@@ -36,7 +36,15 @@ func (r *SliceRules[E]) For(target *[]E) *SliceRules[E] {
 }
 
 // Target implements [Evaluator].
-func (r *SliceRules[E]) Target() any { return r.target }
+//
+// An unbound rule set reports no target at all rather than a typed nil pointer,
+// so a caller can test the result against nil and get the answer it expects.
+func (r *SliceRules[E]) Target() any {
+	if r.target == nil {
+		return nil
+	}
+	return r.target
+}
 
 // Label implements [Evaluator].
 func (r *SliceRules[E]) Label() string { return r.label }

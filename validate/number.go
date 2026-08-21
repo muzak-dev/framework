@@ -24,7 +24,6 @@ type NumberRules struct {
 	label    string
 	required bool
 	steps    []step[float64]
-	isFloat  bool
 }
 
 // Number returns an unbound rule set, for reuse across models.
@@ -142,46 +141,46 @@ func (r *NumberRules) Required() *NumberRules {
 }
 
 // Min requires the value to be at least min.
-func (r *NumberRules) Min(min float64) *NumberRules {
+func (r *NumberRules) Min(lowest float64) *NumberRules {
 	return r.add(step[float64]{
 		id: "min",
 		check: func(f float64) error {
-			if f < min {
-				return fmt.Errorf("must be at least %s", formatNumber(min))
+			if f < lowest {
+				return fmt.Errorf("must be at least %s", formatNumber(lowest))
 			}
 			return nil
 		},
-		describe: func(c *Constraints) { c.Minimum = floatPtr(min) },
+		describe: func(c *Constraints) { c.Minimum = floatPtr(lowest) },
 	})
 }
 
 // Max requires the value to be at most max.
-func (r *NumberRules) Max(max float64) *NumberRules {
+func (r *NumberRules) Max(highest float64) *NumberRules {
 	return r.add(step[float64]{
 		id: "max",
 		check: func(f float64) error {
-			if f > max {
-				return fmt.Errorf("must be at most %s", formatNumber(max))
+			if f > highest {
+				return fmt.Errorf("must be at most %s", formatNumber(highest))
 			}
 			return nil
 		},
-		describe: func(c *Constraints) { c.Maximum = floatPtr(max) },
+		describe: func(c *Constraints) { c.Maximum = floatPtr(highest) },
 	})
 }
 
 // Between requires the value to fall within an inclusive range, which is the
 // pair of bounds written as one rule so that the failure names both.
-func (r *NumberRules) Between(min, max float64) *NumberRules {
+func (r *NumberRules) Between(lowest, highest float64) *NumberRules {
 	return r.add(step[float64]{
 		id: "between",
 		check: func(f float64) error {
-			if f < min || f > max {
-				return fmt.Errorf("must be between %s and %s", formatNumber(min), formatNumber(max))
+			if f < lowest || f > highest {
+				return fmt.Errorf("must be between %s and %s", formatNumber(lowest), formatNumber(highest))
 			}
 			return nil
 		},
 		describe: func(c *Constraints) {
-			c.Minimum, c.Maximum = floatPtr(min), floatPtr(max)
+			c.Minimum, c.Maximum = floatPtr(lowest), floatPtr(highest)
 		},
 	})
 }

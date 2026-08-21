@@ -637,6 +637,9 @@ func (c *Context) writeResponse(v any) error {
 		c.w.WriteHeader(status)
 		return nil
 	}
+	if document, isHTML := v.(HTML); isHTML {
+		return c.writeHTML(status, document)
+	}
 
 	buf := responseBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()

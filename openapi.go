@@ -629,6 +629,9 @@ func (b *schemaBuilder) responseContent(t reflect.Type) map[string]MediaType {
 	if t == emptyType {
 		return nil
 	}
+	if t == htmlType {
+		return map[string]MediaType{"text/html": {Schema: &Schema{Type: "string"}}}
+	}
 	return map[string]MediaType{"application/json": {Schema: b.schemaFor(t)}}
 }
 

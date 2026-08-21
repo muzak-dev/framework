@@ -105,8 +105,18 @@
 //		Files []badele.File `file:"files"`
 //	}
 //
-// A field tagged `form:"name"` is bound from a form value in the same body,
-// converted by the same setters that convert a query parameter. Files and
+// A field tagged `form:"name"` is bound from a form value, converted by the
+// same setters that convert a query parameter. A route may bind form values
+// with no file at all, which is what a sign-in form is:
+//
+//	type LoginIn struct {
+//		Username string `form:"username"`
+//		Password string `form:"password"`
+//	}
+//
+// Such a route accepts application/x-www-form-urlencoded as well as multipart,
+// so a plain HTML form posts to it without an enctype. A route that binds a
+// file accepts only multipart, because urlencoded cannot carry one. Files and
 // form values are body content, so both are required unless the field carries
 // `required:"false"` or a default. Two limits bound what a route accepts:
 // [MaxUploadSize] for the whole body and [MaxFileSize] for any single file.

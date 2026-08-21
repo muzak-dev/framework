@@ -291,7 +291,7 @@ func (m *lifecycleManager) Stop(ctx context.Context) error {
 func roundDuration(d time.Duration) time.Duration {
 	switch {
 	case d < time.Millisecond:
-		return d.Round(10 * time.Microsecond)
+		return d.Round(time.Microsecond)
 	case d < time.Second:
 		return d.Round(time.Millisecond)
 	default:

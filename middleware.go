@@ -110,6 +110,11 @@ func RequestID(opts RequestIDOptions) Middleware {
 func Recovery(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Wrapping here is what lets the deferred function tell whether the
+			// response has already started. Appending an error envelope to a
+			// body that is partly on the wire would corrupt it, so a panic
+			// after the first write is logged and nothing more is sent.
+			rw := asResponseWriter(w)
 			defer func() {
 				recovered := recover()
 				if recovered == nil {
@@ -125,9 +130,9 @@ func Recovery(logger *slog.Logger) Middleware {
 					slog.String("path", r.URL.Path),
 					slog.String(RequestIDKey, id),
 					slog.String("stack", string(debug.Stack())))
-				writeMinimalError(w, id)
+				writeMinimalError(rw, id)
 			}()
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(rw, r)
 		})
 	}
 }

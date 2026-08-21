@@ -707,7 +707,12 @@ func FuzzBindQuery(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, query string) {
-		req := httptest.NewRequest("GET", "/x?"+query, nil)
+		// The query is assigned to RawQuery rather than spliced into the
+		// target, because httptest.NewRequest parses its argument as a request
+		// line and rejects anything containing a space. A real server hands the
+		// handler an already parsed URL, which is what this reproduces.
+		req := httptest.NewRequest("GET", "/x", nil)
+		req.URL.RawQuery = query
 		rec := httptest.NewRecorder()
 		// The contract: any query string produces a well-formed response and
 		// never a panic or a 5xx.

@@ -313,3 +313,37 @@ func BenchmarkRouteParamBare(b *testing.B) {
 		serve(app, req, w)
 	}
 }
+
+// BenchmarkValidation measures a request through a model that declares rules,
+// against the same model with validation skipped.
+//
+// The pair is what makes the cost readable: the difference is what the rules
+// themselves add, separate from routing, binding and encoding.
+func BenchmarkValidation(b *testing.B) {
+	body := `{"email":"rick@example.test","password":"a-long-enough-password",` +
+		`"confirm_password":"a-long-enough-password","age":70,"role":"editor"}`
+
+	run := func(b *testing.B, opts ...RouteOption) {
+		app := New(AppOptions{
+			LoggerOptions:    LoggerOptions{Format: LogFormatNone},
+			DisableAccessLog: true,
+			DisableDocs:      true,
+		})
+		app.Post("/signup", func(ctx *Context, in signup) (rtOut, error) {
+			return rtOut{OK: true}, nil
+		}, opts...)
+		if err := app.Build(); err != nil {
+			b.Fatalf("Build: %v", err)
+		}
+		w := newDiscardWriter()
+		b.ReportAllocs()
+		for b.Loop() {
+			req := httptest.NewRequest("POST", "/signup", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			serve(app, req, w)
+		}
+	}
+
+	b.Run("validated", func(b *testing.B) { run(b) })
+	b.Run("skipped", func(b *testing.B) { run(b, SkipValidation()) })
+}

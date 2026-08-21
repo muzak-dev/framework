@@ -73,6 +73,82 @@ type Validation struct {
 	rules    []validate.Evaluator
 	rejected []rejection
 	children []*Validation
+
+	// The free lists below hold the rule sets this Validation has already
+	// built. A model declares the same shape on every request, so handing a
+	// recycled rule set back and resetting it means redeclaring the rules
+	// costs nothing after the first request through a route. Each list is
+	// typed, so a recycled set is always the right kind; only which field it
+	// binds to changes.
+	freeStrings []*validate.StringRules
+	freeNumbers []*validate.NumberRules
+	freeTimes   []*validate.TimeRules
+	usedStrings int
+	usedNumbers int
+	usedTimes   int
+}
+
+// reset returns a Validation to the pool's idea of empty, keeping the rule sets
+// and slices it has already built.
+func (v *Validation) reset() {
+	v.plan = nil
+	v.base = 0
+	v.size = 0
+	v.value = reflect.Value{}
+	v.prefix = ""
+	for i := range v.rules {
+		v.rules[i] = nil
+	}
+	v.rules = v.rules[:0]
+	for i := range v.rejected {
+		v.rejected[i] = rejection{}
+	}
+	v.rejected = v.rejected[:0]
+	v.children = v.children[:0]
+	v.usedStrings, v.usedNumbers, v.usedTimes = 0, 0, 0
+}
+
+// nextString hands out a recycled string rule set, building one only the first
+// time a model reaches that position.
+func (v *Validation) nextString() *validate.StringRules {
+	if v.usedStrings < len(v.freeStrings) {
+		rules := v.freeStrings[v.usedStrings]
+		rules.Reset()
+		v.usedStrings++
+		return rules
+	}
+	rules := validate.String()
+	v.freeStrings = append(v.freeStrings, rules)
+	v.usedStrings++
+	return rules
+}
+
+// nextNumber hands out a recycled numeric rule set.
+func (v *Validation) nextNumber() *validate.NumberRules {
+	if v.usedNumbers < len(v.freeNumbers) {
+		rules := v.freeNumbers[v.usedNumbers]
+		rules.Reset()
+		v.usedNumbers++
+		return rules
+	}
+	rules := validate.Number()
+	v.freeNumbers = append(v.freeNumbers, rules)
+	v.usedNumbers++
+	return rules
+}
+
+// nextTime hands out a recycled time rule set.
+func (v *Validation) nextTime() *validate.TimeRules {
+	if v.usedTimes < len(v.freeTimes) {
+		rules := v.freeTimes[v.usedTimes]
+		rules.Reset()
+		v.usedTimes++
+		return rules
+	}
+	rules := validate.Time()
+	v.freeTimes = append(v.freeTimes, rules)
+	v.usedTimes++
+	return rules
 }
 
 // rejection is a failure recorded directly rather than through a rule set.
@@ -88,7 +164,7 @@ type rejection struct {
 // The field may be a string or a pointer to one; a nil pointer skips its rules.
 // A field of any other type does not compile.
 func (v *Validation) String[T StringField](ptr *T) *validate.StringRules {
-	rules := validate.String().For(ptr)
+	rules := v.nextString().For(ptr)
 	v.rules = append(v.rules, rules)
 	return rules
 }
@@ -100,14 +176,14 @@ func (v *Validation) String[T StringField](ptr *T) *validate.StringRules {
 // Bounds are written as ordinary constants whatever the field's own numeric
 // type. A pointer field is optional.
 func (v *Validation) Number[T NumberField](ptr *T) *validate.NumberRules {
-	rules := validate.Number().For(ptr)
+	rules := v.nextNumber().For(ptr)
 	v.rules = append(v.rules, rules)
 	return rules
 }
 
 // Time binds rules to a time field.
 func (v *Validation) Time[T TimeField](ptr *T) *validate.TimeRules {
-	rules := validate.Time().For(ptr)
+	rules := v.nextTime().For(ptr)
 	v.rules = append(v.rules, rules)
 	return rules
 }
@@ -478,6 +554,17 @@ func (rt *Route) elementConstraintsForDocs() map[string]validate.Constraints {
 	return rt.plan.elementConstraints()
 }
 
+// validationPool recycles Validation values, and with them the rule sets they
+// have already built.
+//
+// A model declares the same shape on every request, so after the first request
+// through a route the rule sets, their step slices and the detail slice are all
+// already the right size. Nothing request-specific survives a reset, which is
+// what makes sharing them safe.
+var validationPool = sync.Pool{
+	New: func() any { return new(Validation) },
+}
+
 // runValidation validates a bound model and returns what failed.
 //
 // Fields that already failed to bind are left alone: telling a client that
@@ -494,12 +581,15 @@ func (p *bindPlan) runValidation(dst reflect.Value, failed map[string]bool) []Er
 		return nil
 	}
 
-	v := &Validation{
-		plan:  p.validation,
-		base:  dst.Addr().Pointer(),
-		size:  p.typ.Size(),
-		value: dst,
-	}
+	v := validationPool.Get().(*Validation)
+	defer func() {
+		v.reset()
+		validationPool.Put(v)
+	}()
+	v.plan = p.validation
+	v.base = dst.Addr().Pointer()
+	v.size = p.typ.Size()
+	v.value = dst
 	model.Validate(v)
 
 	details := v.details()

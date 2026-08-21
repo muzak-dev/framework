@@ -402,10 +402,18 @@ type validationPlan struct {
 func newValidationPlan(t reflect.Type, plan *bindPlan) *validationPlan {
 	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}}
 	collectOrigins(t, 0, vp.fields)
-	for i := range plan.params {
-		p := &plan.params[i]
-		if offset, ok := offsetOf(t, p.index); ok {
-			vp.fields[offset] = fieldOrigin{name: p.name, location: p.source.String()}
+	for _, binders := range [][]paramBinder{plan.params, plan.form} {
+		for i := range binders {
+			p := &binders[i]
+			if offset, ok := offsetOf(t, p.index); ok {
+				vp.fields[offset] = fieldOrigin{name: p.name, location: p.source.String()}
+			}
+		}
+	}
+	for i := range plan.files {
+		f := &plan.files[i]
+		if offset, ok := offsetOf(t, f.index); ok {
+			vp.fields[offset] = fieldOrigin{name: f.name, location: srcFile.String()}
 		}
 	}
 	return vp

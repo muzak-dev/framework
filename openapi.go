@@ -376,7 +376,15 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		}
 		op.Parameters = append(op.Parameters, parameter)
 	}
-	if rt.plan.body != nil {
+	switch {
+	case rt.plan.multipart:
+		body := builder.multipartSchema(rt.plan)
+		builder.applyBodyConstraints(body, constraints, elements)
+		op.RequestBody = &RequestBody{
+			Required: len(body.Required) > 0,
+			Content:  multipartContent(rt.plan, body),
+		}
+	case rt.plan.body != nil:
 		// The schema is built once and then annotated. Building it twice would
 		// leave the constraints on a throwaway for a mixed input, whose body is
 		// described inline rather than by reference.
@@ -392,7 +400,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		Description: orDefault(http.StatusText(rt.Status), "Success"),
 		Content:     builder.responseContent(rt.outType),
 	}
-	if len(rt.plan.params) > 0 || rt.plan.body != nil {
+	if len(rt.plan.params) > 0 || rt.plan.body != nil || rt.plan.multipart {
 		op.Responses[strconv.Itoa(http.StatusUnprocessableEntity)] = builder.errorResponse("The request could not be validated.")
 	}
 	for _, doc := range rt.responses {
@@ -410,6 +418,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 // The schema may be a reference into components, in which case the constraints
 // land on the shared definition. That is correct: the rules belong to the type,
 // so every operation that accepts it enforces them.
+
 func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[string]validate.Constraints) {
 	if len(constraints) == 0 && len(elements) == 0 {
 		return
@@ -566,6 +575,52 @@ func (b *schemaBuilder) bodySchema(plan *bindPlan) *Schema {
 	}
 	slices.Sort(schema.Required)
 	return schema
+}
+
+// multipartSchema describes the form body a route accepts, with one property
+// per form value and one per file field. Files are described as the binary
+// strings OpenAPI uses for them, so the documentation UI offers a file picker
+// rather than a text box.
+func (b *schemaBuilder) multipartSchema(plan *bindPlan) *Schema {
+	schema := &Schema{Type: "object", Properties: map[string]*Schema{}}
+	for i := range plan.files {
+		f := &plan.files[i]
+		property := &Schema{Type: "string", Format: "binary"}
+		if f.multi() {
+			property = &Schema{Type: "array", Items: property}
+		}
+		property.Description = f.doc
+		schema.Properties[f.name] = property
+		if f.required {
+			schema.Required = append(schema.Required, f.name)
+		}
+	}
+	for i := range plan.form {
+		p := &plan.form[i]
+		property := b.inline(p.typ)
+		property.Description = p.doc
+		if p.hasDef {
+			property.Default = p.defValue
+		}
+		schema.Properties[p.name] = property
+		if p.required {
+			schema.Required = append(schema.Required, p.name)
+		}
+	}
+	slices.Sort(schema.Required)
+	return schema
+}
+
+// multipartContent pairs the form schema with the media types the route
+// accepts it under. A route that binds a file accepts only multipart, since
+// that is the only encoding that can carry one; a route that binds form values
+// alone also accepts what a plain HTML form posts.
+func multipartContent(plan *bindPlan, schema *Schema) map[string]MediaType {
+	content := map[string]MediaType{"multipart/form-data": {Schema: schema}}
+	if len(plan.files) == 0 {
+		content["application/x-www-form-urlencoded"] = MediaType{Schema: schema}
+	}
+	return content
 }
 
 // responseContent describes the body a successful response carries, or nothing

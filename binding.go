@@ -24,7 +24,7 @@ import (
 // skipped entirely for it.
 type Empty struct{}
 
-// Struct tags recognised by the binder. A field carrying one of the first four
+// Struct tags recognised by the binder. A field carrying one of the first six
 // is read from that part of the request; a field carrying none of them becomes
 // part of the JSON body.
 const (
@@ -32,6 +32,8 @@ const (
 	tagQuery    = "query"
 	tagHeader   = "header"
 	tagCookie   = "cookie"
+	tagForm     = "form"
+	tagFile     = "file"
 	tagDoc      = "doc"
 	tagDefault  = "default"
 	tagRequired = "required"
@@ -46,10 +48,14 @@ const (
 	srcQuery
 	srcHeader
 	srcCookie
+	srcForm
+	srcFile
 )
 
 // String returns the OpenAPI name for the parameter location, which is also
-// what appears in the "loc" member of a validation error.
+// what appears in the "location" member of a validation error. The form and
+// file locations are not OpenAPI parameter locations, because both describe
+// the body rather than a parameter; they only ever appear in error details.
 func (s paramSource) String() string {
 	switch s {
 	case srcPath:
@@ -58,6 +64,10 @@ func (s paramSource) String() string {
 		return "query"
 	case srcHeader:
 		return "header"
+	case srcForm:
+		return "form"
+	case srcFile:
+		return "file"
 	default:
 		return "cookie"
 	}
@@ -111,6 +121,14 @@ type bindPlan struct {
 	params     []paramBinder
 	body       *bodyPlan
 	needsQuery bool
+	// form and files describe a body sent as a form rather than as JSON. They
+	// are populated from the "form" and "file" struct tags, and a plan that
+	// has either of them has no JSON body at all.
+	form  []paramBinder
+	files []fileBinder
+	// multipart is true when the plan reads a form-encoded body, which is what
+	// tells the binder to parse one instead of decoding JSON.
+	multipart bool
 	// empty marks a plan with nothing to do at all, letting the router skip
 	// binding for Empty inputs.
 	empty bool
@@ -171,6 +189,16 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 		plan.validation = newValidationPlan(t, plan)
 	}
 
+	if len(plan.form) > 0 || len(plan.files) > 0 {
+		plan.multipart = true
+		if len(bodyFields) > 0 {
+			field := t.FieldByIndex(bodyFields[0]).Name
+			return nil, fmt.Errorf("badele: %s %s: field %s carries no location tag, so it would come from a JSON body, but this input already reads a form body; tag it with %q or move it to the path, query, header or cookie",
+				method, path, field, tagForm)
+		}
+		return plan, nil
+	}
+
 	if len(bodyFields) > 0 {
 		plan.body = &bodyPlan{
 			// Decoding straight into the input value is only safe when the
@@ -225,13 +253,26 @@ func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][
 			continue
 		}
 
+		if name, declared := f.Tag.Lookup(tagFile); declared {
+			binder, err := newFileBinder(f, index, name)
+			if err != nil {
+				return err
+			}
+			plan.files = append(plan.files, binder)
+			continue
+		}
+
 		source, name, ok := locationTag(f)
 		if ok {
 			binder, err := newParamBinder(f, index, source, name)
 			if err != nil {
 				return err
 			}
-			plan.params = append(plan.params, binder)
+			if source == srcForm {
+				plan.form = append(plan.form, binder)
+			} else {
+				plan.params = append(plan.params, binder)
+			}
 			continue
 		}
 
@@ -239,20 +280,26 @@ func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][
 		// find them; if it declares none, the embedded value is body content
 		// like any other field.
 		if f.Anonymous && f.Type.Kind() == reflect.Struct {
-			before := len(plan.params)
+			before := plan.located()
 			var nestedBody [][]int
 			if err := collectFields(f.Type, index, plan, &nestedBody); err != nil {
 				return err
 			}
-			if len(plan.params) > before {
+			if plan.located() != before {
 				*bodyFields = append(*bodyFields, nestedBody...)
 				continue
 			}
-			plan.params = plan.params[:before]
 		}
 		*bodyFields = append(*bodyFields, index)
 	}
 	return nil
+}
+
+// located counts the binders compiled so far, which is what tells
+// collectFields whether an embedded struct contributed anything of its own or
+// is body content like any other field.
+func (p *bindPlan) located() int {
+	return len(p.params) + len(p.form) + len(p.files)
 }
 
 // usableField reports whether a struct field takes part in binding.
@@ -275,6 +322,7 @@ func locationTag(f reflect.StructField) (paramSource, string, bool) {
 		{tagQuery, srcQuery},
 		{tagHeader, srcHeader},
 		{tagCookie, srcCookie},
+		{tagForm, srcForm},
 	} {
 		if name, ok := f.Tag.Lookup(candidate.tag); ok {
 			return candidate.src, name, true
@@ -304,13 +352,18 @@ func newParamBinder(f reflect.StructField, index []int, source paramSource, name
 	}
 	b.defValue, b.hasDef = f.Tag.Lookup(tagDefault)
 	// A path parameter is always present when the route matched, so it is
-	// required by definition. Other locations are optional unless the field
-	// asks otherwise, which keeps optional filters and cursors ergonomic.
+	// required by definition. A form value is body content, so it is required
+	// like the body is, unless the field carries a default or says otherwise.
+	// Everything else is optional unless the field asks otherwise, which keeps
+	// optional filters and cursors ergonomic.
+	explicit, declared := f.Tag.Lookup(tagRequired)
 	switch {
 	case source == srcPath:
 		b.required = true
-	case f.Tag.Get(tagRequired) == "true":
-		b.required = true
+	case declared:
+		b.required = explicit == "true"
+	case source == srcForm:
+		b.required = !b.hasDef
 	}
 	if b.required && b.hasDef {
 		return paramBinder{}, fmt.Errorf("field %s (%s parameter %q) is both required and given a default", f.Name, source, name)
@@ -451,25 +504,14 @@ func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 		query = c.r.URL.Query()
 	}
 
-	for i := range p.params {
-		b := &p.params[i]
-		raw, present := b.lookup(c, query)
-		if !present {
-			if b.required {
-				verr.add(b.source.String(), b.name, "is required")
-				continue
-			}
-			if !b.hasDef {
-				continue
-			}
-			raw = []string{b.defValue}
-		}
-		if err := b.set(fieldByIndex(dst, b.index), raw); err != nil {
-			verr.add(b.source.String(), b.name, err.Error())
-		}
-	}
+	bindParams(p.params, c, dst, query, verr)
 
-	if p.body != nil {
+	switch {
+	case p.multipart:
+		if err := p.bindMultipart(c, dst, route, verr); err != nil {
+			return err
+		}
+	case p.body != nil:
 		if err := p.bindBody(c, dst, route, verr); err != nil {
 			return err
 		}
@@ -492,6 +534,29 @@ func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 	return nil
 }
 
+// bindParams writes each supplied parameter into its field, recording a
+// failure for every one that is missing or malformed rather than stopping at
+// the first, so a client learns about all of them at once.
+func bindParams(binders []paramBinder, c *Context, dst reflect.Value, query url.Values, verr *ValidationError) {
+	for i := range binders {
+		b := &binders[i]
+		raw, present := b.lookup(c, query)
+		if !present {
+			if b.required {
+				verr.add(b.source.String(), b.name, "is required")
+				continue
+			}
+			if !b.hasDef {
+				continue
+			}
+			raw = []string{b.defValue}
+		}
+		if err := b.set(fieldByIndex(dst, b.index), raw); err != nil {
+			verr.add(b.source.String(), b.name, err.Error())
+		}
+	}
+}
+
 // lookup fetches the raw textual values supplied for a parameter and reports
 // whether it was present at all, which is what distinguishes an empty value
 // from a missing one.
@@ -511,6 +576,15 @@ func (b *paramBinder) lookup(c *Context, query url.Values) ([]string, bool) {
 		return v, true
 	case srcHeader:
 		v, ok := c.r.Header[http.CanonicalHeaderKey(b.name)]
+		if !ok || len(v) == 0 {
+			return nil, false
+		}
+		return v, true
+	case srcForm:
+		// The body has already been parsed by the time a form binder runs, and
+		// net/http copies multipart values into PostForm too, so one lookup
+		// serves both encodings.
+		v, ok := c.r.PostForm[b.name]
 		if !ok || len(v) == 0 {
 			return nil, false
 		}
@@ -581,19 +655,29 @@ func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *V
 // decode. A missing Content-Type is accepted, because many clients omit it and
 // the decoder will reject anything that is not JSON anyway.
 func checkContentType(r *http.Request) error {
-	raw := r.Header.Get("Content-Type")
-	if raw == "" {
-		return nil
-	}
-	mediaType, _, err := mime.ParseMediaType(raw)
+	mediaType, err := requestMediaType(r)
 	if err != nil {
-		return NewHTTPError(http.StatusUnsupportedMediaType, "the Content-Type header is malformed").Wrap(err)
+		return err
 	}
-	if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
+	if mediaType == "" || mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
 		return nil
 	}
 	return NewHTTPErrorf(http.StatusUnsupportedMediaType,
 		"unsupported media type %q; this route accepts application/json", mediaType)
+}
+
+// requestMediaType returns the media type of a request body, without its
+// parameters, or the empty string when no Content-Type was sent.
+func requestMediaType(r *http.Request) (string, error) {
+	raw := r.Header.Get("Content-Type")
+	if raw == "" {
+		return "", nil
+	}
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return "", NewHTTPError(http.StatusUnsupportedMediaType, "the Content-Type header is malformed").Wrap(err)
+	}
+	return mediaType, nil
 }
 
 // jsonReadOptions returns the decoder options for the route. Duplicate object

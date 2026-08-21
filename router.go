@@ -75,6 +75,8 @@ type routerConfig struct {
 	responses          []responseDoc
 	lifecycles         []Lifecycle
 	maxBodySize        int64
+	maxUploadSize      int64
+	maxFileSize        int64
 	allowUnknownFields *bool
 	deprecated         bool
 	hidden             bool
@@ -91,6 +93,8 @@ type routeConfig struct {
 	description        string
 	operationID        string
 	maxBodySize        int64
+	maxUploadSize      int64
+	maxFileSize        int64
 	allowUnknownFields *bool
 	skipValidation     bool
 	deprecated         bool
@@ -192,6 +196,40 @@ func MaxBodySize(bytes int64) SharedOption {
 	}
 }
 
+// MaxUploadSize overrides the maximum accepted size, in bytes, of a form body
+// for a route or for every route beneath a router.
+//
+// It is what bounds a route that binds `form` or `file` fields, in place of
+// [MaxBodySize], because an upload is expected to be larger than a JSON
+// document and the two limits should not have to be traded off against each
+// other. A body that exceeds it is rejected with 413 while it is being read,
+// so the server never buffers more than the limit. The application-wide
+// default comes from [AppOptions.MaxUploadSize]; a negative value removes an
+// inherited limit, which is only appropriate behind a proxy that imposes its
+// own.
+func MaxUploadSize(bytes int64) SharedOption {
+	return sharedOption{
+		route:  func(c *routeConfig) { c.maxUploadSize = bytes },
+		router: func(c *routerConfig) { c.maxUploadSize = bytes },
+	}
+}
+
+// MaxFileSize limits the size, in bytes, of any single uploaded file for a
+// route or for every route beneath a router.
+//
+// A request carrying a file larger than the limit is rejected with 413 before
+// the handler runs. The limit is checked once the body has been read, so it
+// bounds what a handler is handed rather than what the server accepts;
+// [MaxUploadSize] is what bounds the latter and should be set alongside it.
+// The application-wide default comes from [AppOptions.MaxFileSize], and zero
+// leaves each file bounded only by the upload limit.
+func MaxFileSize(bytes int64) SharedOption {
+	return sharedOption{
+		route:  func(c *routeConfig) { c.maxFileSize = bytes },
+		router: func(c *routerConfig) { c.maxFileSize = bytes },
+	}
+}
+
 // AllowUnknownFields relaxes JSON decoding so that members with no
 // corresponding field are ignored rather than rejected.
 //
@@ -250,6 +288,8 @@ type Route struct {
 	providers          []*provider
 	responses          []responseDoc
 	maxBodySize        int64
+	maxUploadSize      int64
+	maxFileSize        int64
 	allowUnknownFields bool
 	skipValidation     bool
 
@@ -449,6 +489,11 @@ func register[In, Out any](r *Router, method, path string, h Handler[In, Out], o
 	rt.invoke = func(c *Context) error {
 		var in In
 		if !rt.plan.empty {
+			if rt.plan.multipart {
+				// A form body may have spilled to temporary files, which stay
+				// readable for as long as the handler runs and no longer.
+				defer releaseUpload(c.r)
+			}
 			if err := rt.plan.bind(c, reflect.ValueOf(&in).Elem(), rt); err != nil {
 				return err
 			}
@@ -474,6 +519,8 @@ type inherited struct {
 	providers          []*provider
 	responses          []responseDoc
 	maxBodySize        int64
+	maxUploadSize      int64
+	maxFileSize        int64
 	allowUnknownFields bool
 	deprecated         bool
 	hidden             bool
@@ -489,12 +536,20 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		providers:          concat(in.providers, cfg.providers),
 		responses:          concat(in.responses, cfg.responses),
 		maxBodySize:        in.maxBodySize,
+		maxUploadSize:      in.maxUploadSize,
+		maxFileSize:        in.maxFileSize,
 		allowUnknownFields: in.allowUnknownFields,
 		deprecated:         in.deprecated || cfg.deprecated,
 		hidden:             in.hidden || cfg.hidden,
 	}
 	if cfg.maxBodySize > 0 {
 		out.maxBodySize = cfg.maxBodySize
+	}
+	if cfg.maxUploadSize != 0 {
+		out.maxUploadSize = cfg.maxUploadSize
+	}
+	if cfg.maxFileSize != 0 {
+		out.maxFileSize = cfg.maxFileSize
 	}
 	if cfg.allowUnknownFields != nil {
 		out.allowUnknownFields = *cfg.allowUnknownFields
@@ -573,6 +628,14 @@ func (rt *Route) resolve(in inherited) error {
 	rt.maxBodySize = in.maxBodySize
 	if cfg.maxBodySize > 0 {
 		rt.maxBodySize = cfg.maxBodySize
+	}
+	rt.maxUploadSize = in.maxUploadSize
+	if cfg.maxUploadSize != 0 {
+		rt.maxUploadSize = cfg.maxUploadSize
+	}
+	rt.maxFileSize = in.maxFileSize
+	if cfg.maxFileSize != 0 {
+		rt.maxFileSize = cfg.maxFileSize
 	}
 	rt.allowUnknownFields = in.allowUnknownFields
 	if cfg.allowUnknownFields != nil {

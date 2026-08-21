@@ -1,0 +1,82 @@
+package handlers
+
+import (
+	"errors"
+	"net/http"
+
+	"badele"
+	"badele-example/core"
+	"badele-example/schemas"
+)
+
+// ListItems returns every known item.
+func ListItems(ctx *badele.Context, _ badele.Empty) (schemas.ItemListOut, error) {
+	store := badele.From[*core.ItemStore](ctx)
+	settings := badele.From[core.Settings](ctx)
+
+	stored := store.List()
+	items := make([]schemas.ItemOut, 0, len(stored))
+	for _, item := range stored {
+		items = append(items, schemas.ItemOut{ID: item.ID, Name: item.Name})
+	}
+	return schemas.ItemListOut{Items: items, Limit: settings.ItemsPerUser}, nil
+}
+
+// ReadItem returns one item, attributing it to the caller resolved by the value
+// dependency the route declares.
+func ReadItem(ctx *badele.Context, in schemas.ItemParams) (schemas.ItemOut, error) {
+	// Both type arguments are checked at compile time and no cast appears here.
+	store := badele.From[*core.ItemStore](ctx)
+	user := badele.From[core.CurrentUser](ctx)
+
+	item, err := store.Get(in.ID)
+	if err != nil {
+		return schemas.ItemOut{}, asHTTPError(err)
+	}
+	return schemas.ItemOut{ID: item.ID, Name: item.Name, Owner: user.Username}, nil
+}
+
+// CreateItem adds an item.
+//
+// The route declares 201 as its status; this handler overrides it at run time
+// when the caller asks for the work to be queued, which is the two mechanisms
+// staying out of each other's way.
+func CreateItem(ctx *badele.Context, in schemas.ItemCreateIn) (schemas.ItemOut, error) {
+	store := badele.From[*core.ItemStore](ctx)
+
+	if err := store.Create(core.Item{ID: in.ID, Name: in.Name}); err != nil {
+		return schemas.ItemOut{}, asHTTPError(err)
+	}
+	if in.Async {
+		ctx.SetStatus(http.StatusAccepted)
+	}
+	return schemas.ItemOut{ID: in.ID, Name: in.Name}, nil
+}
+
+// RenameItem changes an item's display name.
+func RenameItem(ctx *badele.Context, in schemas.ItemRenameIn) (schemas.ItemOut, error) {
+	store := badele.From[*core.ItemStore](ctx)
+
+	item, err := store.Rename(in.ID, in.Name)
+	if err != nil {
+		return schemas.ItemOut{}, asHTTPError(err)
+	}
+	return schemas.ItemOut{ID: item.ID, Name: item.Name}, nil
+}
+
+// asHTTPError translates a store error into the response it deserves.
+//
+// The translation lives here rather than in the store, which keeps the store
+// free of any knowledge about HTTP, and it is exhaustive rather than a
+// fall-through: an error the service does not recognise becomes an opaque 500
+// with the real cause logged and never sent.
+func asHTTPError(err error) error {
+	switch {
+	case errors.Is(err, core.ErrItemNotFound):
+		return badele.NewHTTPError(http.StatusNotFound, "Item not found")
+	case errors.Is(err, core.ErrItemExists):
+		return badele.NewHTTPError(http.StatusConflict, "Item already exists")
+	default:
+		return err
+	}
+}

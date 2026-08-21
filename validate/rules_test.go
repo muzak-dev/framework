@@ -111,30 +111,43 @@ func TestNumberAcrossEveryNumericKind(t *testing.T) {
 	}
 }
 
-// TestNumberTransformWritesBack covers the path that stores a value a rule
-// changed, across each numeric family.
-func TestNumberTransformWritesBack(t *testing.T) {
+// TestNumberClampWritesBack covers the transform and the path that stores what
+// it changed, across each numeric family.
+func TestNumberClampWritesBack(t *testing.T) {
 	t.Parallel()
-	clampToTen := func(r *NumberRules) *NumberRules {
-		return r.add(step[float64]{id: "clamp", change: func(f float64) float64 { return 10 }})
-	}
-
 	signed := 1
-	clampToTen(Number().For(&signed)).Evaluate()
+	Number().Clamp(10, 20).For(&signed).Evaluate()
 	if signed != 10 {
-		t.Errorf("signed = %d, want 10", signed)
+		t.Errorf("signed = %d, want it clamped up to 10", signed)
 	}
 
-	unsigned := uint(1)
-	clampToTen(Number().For(&unsigned)).Evaluate()
-	if unsigned != 10 {
-		t.Errorf("unsigned = %d, want 10", unsigned)
+	unsigned := uint(50)
+	Number().Clamp(10, 20).For(&unsigned).Evaluate()
+	if unsigned != 20 {
+		t.Errorf("unsigned = %d, want it clamped down to 20", unsigned)
 	}
 
 	float := 1.0
-	clampToTen(Number().For(&float)).Evaluate()
+	Number().Clamp(10, 20).For(&float).Evaluate()
 	if float != 10 {
-		t.Errorf("float = %v, want 10", float)
+		t.Errorf("float = %v, want it clamped up to 10", float)
+	}
+
+	// A value already inside the range is left alone.
+	inside := 15
+	Number().Clamp(10, 20).For(&inside).Evaluate()
+	if inside != 15 {
+		t.Errorf("inside = %d, want it untouched", inside)
+	}
+
+	// Clamping runs before the checks, so a clamped value satisfies them.
+	if err := Number().Clamp(1, 100).Between(1, 100).Check(500); err != nil {
+		t.Errorf("Check = %v, want the clamped value accepted", err)
+	}
+
+	c := Number().Clamp(1, 100).Describe()
+	if c.Minimum == nil || *c.Minimum != 1 || c.Maximum == nil || *c.Maximum != 100 {
+		t.Errorf("Clamp did not describe its range: %+v", c)
 	}
 }
 

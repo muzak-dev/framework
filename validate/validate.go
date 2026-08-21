@@ -1,7 +1,9 @@
 package validate
 
 import (
+	"errors"
 	"reflect"
+	"regexp"
 )
 
 // Problem is one thing a rule set found wrong.
@@ -119,45 +121,131 @@ func resolve(target any) (reflect.Value, bool) {
 	return rv, true
 }
 
+// ruleKind identifies a built-in rule without a closure.
+//
+// Carrying the rule's parameters as data rather than capturing them in a
+// closure is what lets a rule set be declared without allocating: MinLen(12)
+// appends a value to a slice instead of building a function. Only a rule of
+// the caller's own, which is a function by definition, keeps a closure.
+type ruleKind uint8
+
+const (
+	// kindCustom applies the step's check function. It covers Must and every
+	// rule whose comparand is of the field's own type, which a shared step
+	// cannot carry without being generic over it.
+	kindCustom ruleKind = iota
+	// kindRequired is the presence check, the one rule that runs against an
+	// empty value.
+	kindRequired
+
+	// String transforms.
+	kindTrim
+	kindLower
+	kindUpper
+
+	// String checks.
+	kindMinLen
+	kindMaxLen
+	kindLen
+	kindEmail
+	kindURL
+	kindUUID
+	kindMatches
+	kindOneOfString
+	kindNotOneOfString
+	kindEqualString
+	kindPrefix
+	kindSuffix
+	kindContains
+
+	// Number transform.
+	kindClamp
+
+	// Number checks.
+	kindMin
+	kindMax
+	kindBetween
+	kindPositive
+	kindNegative
+	kindMultipleOf
+
+	// Collection checks.
+	kindMinItems
+	kindMaxItems
+	kindUnique
+
+	// kindOneOfValue restricts a field to a set of values of its own type,
+	// which the string list cannot hold.
+	kindOneOfValue
+)
+
 // step is one transform or check in a rule set.
 //
-// Exactly one of change and check is set. Transforms are kept in the same list
-// as checks so that the order written is the order applied, which is what makes
-// Trim().Required() mean "trim, then insist on something left".
+// Transforms are kept in the same list as checks so that the order written is
+// the order applied, which is what makes Trim().Required() mean "trim, then
+// insist on something left".
+//
+// The struct is wider than a closure pair would be, and deliberately so: one
+// slice of steps costs a single allocation where a closure per rule costs one
+// each, and a rule set is rebuilt on every request.
 type step[T any] struct {
-	// id names the rule for the constraint description and for tests.
-	id string
-	// change rewrites the value in place.
-	change func(T) T
-	// check reports what is wrong with the value.
+	// kind selects the built-in rule, or kindCustom to call check.
+	kind ruleKind
+	// n carries a length or item count.
+	n int
+	// lo and hi carry numeric bounds.
+	lo, hi float64
+	// text carries a comparand, prefix, suffix or substring.
+	text string
+	// list carries a set of permitted or rejected values.
+	list []string
+	// pattern carries a compiled expression, compiled when the rule was
+	// declared rather than when it runs.
+	pattern *regexp.Regexp
+	// check is the rule's own function, used only by kindCustom.
 	check func(T) error
-	// message overrides the check's own wording.
+	// message overrides the rule's own wording.
 	message string
-	// describe contributes to the OpenAPI constraints.
-	describe func(*Constraints)
+	// enum carries the permitted values of a rule whose comparands are of the
+	// field's own type, which the string list cannot hold.
+	enum []any
 }
+
+// isTransform reports whether a step rewrites the value rather than judging it.
+func (s *step[T]) isTransform() bool {
+	switch s.kind {
+	case kindTrim, kindLower, kindUpper, kindClamp:
+		return true
+	default:
+		return false
+	}
+}
+
+// applier applies one step to a value, rewriting it for a transform and
+// reporting what is wrong with it for a check.
+//
+// Each rule set family supplies one as a package-level function rather than a
+// closure, so dispatching costs nothing per request.
+type applier[T any] func(s *step[T], value *T) error
 
 // run applies a list of steps to a value, returning the first failure.
 //
 // Checks stop at the first failure on purpose: once a field is empty, telling
 // the client it is also too short and not an email address adds noise rather
 // than information.
-func run[T any](value *T, steps []step[T], isEmpty func(T) bool, required bool) []Problem {
+//
+// Only the collection, value and time families reach it; strings and numbers
+// take the written-out paths above. None of those three families declares a
+// transform, so there is no rewriting branch here.
+func run[T any](value *T, steps []step[T], isEmpty func(T) bool, required bool, apply applier[T]) []Problem {
 	for i := range steps {
 		s := &steps[i]
-		if s.change != nil {
-			*value = s.change(*value)
+		if s.kind != kindRequired && isEmpty(*value) {
+			// An optional field that was not supplied has nothing to check,
+			// and a required one has already been reported by kindRequired.
 			continue
 		}
-		if s.id != requiredRuleID && !required && isEmpty(*value) {
-			// An optional field that was not supplied has nothing to check.
-			continue
-		}
-		if s.id != requiredRuleID && required && isEmpty(*value) {
-			// Required already reported the emptiness; do not pile on.
-			continue
-		}
-		if err := s.check(*value); err != nil {
+		if err := apply(s, value); err != nil {
 			issue := err.Error()
 			if s.message != "" {
 				issue = s.message
@@ -168,16 +256,122 @@ func run[T any](value *T, steps []step[T], isEmpty func(T) bool, required bool) 
 	return nil
 }
 
-// requiredRuleID marks the presence check, which is the one rule that must run
-// against an empty value.
-const requiredRuleID = "required"
+// Errors the built-in rules report. They are package-level values because the
+// same wording is produced on every failure, and building the error once keeps
+// a rejected request from allocating one.
+var (
+	errRequired = errors.New("is required")
+	errNoMatch  = errors.New("does not match")
+)
+
+// customApplier is the applier for a rule set whose rules are all functions,
+// which is what the generic families use.
+func customApplier[T any](s *step[T], value *T) error {
+	return s.check(*value)
+}
+
+// runString and runNumber are the string and numeric halves of [run], written
+// out rather than reached through an applier value.
+//
+// The generic version passes the value pointer into an indirect call, which
+// forces the compiler to assume the pointer escapes and so to heap-allocate the
+// value on every request. Calling the applier directly keeps it on the stack.
+// The duplication buys one fewer allocation per validated field, on the two
+// paths that carry almost all the traffic.
+func runString(value *string, steps []step[string], required bool) []Problem {
+	for i := range steps {
+		s := &steps[i]
+		if s.isTransform() {
+			_ = applyStringStep(s, value)
+			continue
+		}
+		if s.kind != kindRequired && *value == "" {
+			continue
+		}
+		if err := applyStringStep(s, value); err != nil {
+			return []Problem{{Issue: issueFor(s, err)}}
+		}
+	}
+	return nil
+}
+
+// runNumber is the numeric counterpart to [runString].
+func runNumber(value *float64, steps []step[float64], required bool) []Problem {
+	for i := range steps {
+		s := &steps[i]
+		if s.isTransform() {
+			_ = applyNumberStep(s, value)
+			continue
+		}
+		if s.kind != kindRequired && *value == 0 {
+			continue
+		}
+		if err := applyNumberStep(s, value); err != nil {
+			return []Problem{{Issue: issueFor(s, err)}}
+		}
+	}
+	return nil
+}
+
+// issueFor picks the wording a failure is reported with, preferring the
+// override a rule set attached over the rule's own message.
+func issueFor[T any](s *step[T], err error) string {
+	if s.message != "" {
+		return s.message
+	}
+	return err.Error()
+}
 
 // describeAll folds every step's contribution into one set of constraints.
+//
+// What a rule demands is derived from its kind and its parameters, so declaring
+// one costs no closure. A rule with nothing a document can express, which is
+// every rule of the caller's own, contributes nothing.
 func describeAll[T any](steps []step[T]) Constraints {
 	var c Constraints
 	for i := range steps {
-		if steps[i].describe != nil {
-			steps[i].describe(&c)
+		s := &steps[i]
+		switch s.kind {
+		case kindRequired:
+			c.Required = true
+		case kindMinLen:
+			c.MinLength = intPtr(s.n)
+		case kindMaxLen:
+			c.MaxLength = intPtr(s.n)
+		case kindLen:
+			c.MinLength, c.MaxLength = intPtr(s.n), intPtr(s.n)
+		case kindEmail:
+			c.Format = "email"
+		case kindURL:
+			c.Format = "uri"
+		case kindUUID:
+			c.Format = "uuid"
+		case kindMatches:
+			c.Pattern = s.text
+		case kindMin:
+			c.Minimum = floatPtr(s.lo)
+		case kindMax:
+			c.Maximum = floatPtr(s.hi)
+		case kindBetween, kindClamp:
+			c.Minimum, c.Maximum = floatPtr(s.lo), floatPtr(s.hi)
+		case kindPositive:
+			c.Minimum = floatPtr(0)
+		case kindNegative:
+			c.Maximum = floatPtr(0)
+		case kindMultipleOf:
+			c.MultipleOf = floatPtr(s.lo)
+		case kindMinItems:
+			c.MinItems = intPtr(s.n)
+		case kindMaxItems:
+			c.MaxItems = intPtr(s.n)
+		case kindUnique:
+			c.UniqueItems = true
+		case kindOneOfString:
+			for _, value := range s.list {
+				c.Enum = append(c.Enum, value)
+			}
+		case kindOneOfValue:
+			c.Enum = append(c.Enum, s.enum...)
 		}
 	}
 	return c
@@ -190,7 +384,7 @@ func describeAll[T any](steps []step[T]) Constraints {
 // trimming.
 func setMessage[T any](steps []step[T], message string) {
 	for i := len(steps) - 1; i >= 0; i-- {
-		if steps[i].check != nil {
+		if !steps[i].isTransform() {
 			steps[i].message = message
 			return
 		}

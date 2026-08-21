@@ -35,6 +35,16 @@ func (r *SliceRules[E]) For(target *[]E) *SliceRules[E] {
 	return r
 }
 
+// Reset returns the rule set to its unbound, ruleless state while keeping the
+// memory it has already claimed. See [StringRules.Reset].
+func (r *SliceRules[E]) Reset() {
+	r.target = nil
+	r.label = ""
+	r.required = false
+	r.steps = r.steps[:0]
+	r.element = nil
+}
+
 // Target implements [Evaluator].
 //
 // An unbound rule set reports no target at all rather than a typed nil pointer,
@@ -73,7 +83,7 @@ func (r *SliceRules[E]) Evaluate() []Problem {
 		return nil
 	}
 	values := *r.target
-	if problems := run(&values, r.steps, isEmptySlice[E], r.required); len(problems) > 0 {
+	if problems := run(&values, r.steps, isEmptySlice[E], r.required, applySliceStep[E]); len(problems) > 0 {
 		return problems
 	}
 	if r.element == nil {
@@ -116,44 +126,17 @@ func (r *SliceRules[E]) Message(message string) *SliceRules[E] {
 // Required rejects an empty or absent collection.
 func (r *SliceRules[E]) Required() *SliceRules[E] {
 	r.required = true
-	return r.add(step[[]E]{
-		id: requiredRuleID,
-		check: func(values []E) error {
-			if len(values) == 0 {
-				return errors.New("is required")
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.Required = true },
-	})
+	return r.add(step[[]E]{kind: kindRequired})
 }
 
 // MinItems requires at least n elements.
 func (r *SliceRules[E]) MinItems(n int) *SliceRules[E] {
-	return r.add(step[[]E]{
-		id: "min_items",
-		check: func(values []E) error {
-			if len(values) < n {
-				return fmt.Errorf("must have at least %d %s", n, plural(n, "item"))
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.MinItems = intPtr(n) },
-	})
+	return r.add(step[[]E]{kind: kindMinItems, n: n})
 }
 
 // MaxItems requires at most n elements.
 func (r *SliceRules[E]) MaxItems(n int) *SliceRules[E] {
-	return r.add(step[[]E]{
-		id: "max_items",
-		check: func(values []E) error {
-			if len(values) > n {
-				return fmt.Errorf("must have at most %d %s", n, plural(n, "item"))
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.MaxItems = intPtr(n) },
-	})
+	return r.add(step[[]E]{kind: kindMaxItems, n: n})
 }
 
 // Unique requires every element to differ from every other.
@@ -161,20 +144,7 @@ func (r *SliceRules[E]) MaxItems(n int) *SliceRules[E] {
 // Elements are compared with reflect.DeepEqual, so a slice of structs is
 // deduplicated by content rather than by identity.
 func (r *SliceRules[E]) Unique() *SliceRules[E] {
-	return r.add(step[[]E]{
-		id: "unique",
-		check: func(values []E) error {
-			for i := range values {
-				for j := i + 1; j < len(values); j++ {
-					if reflect.DeepEqual(values[i], values[j]) {
-						return fmt.Errorf("must not repeat %v", values[i])
-					}
-				}
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.UniqueItems = true },
-	})
+	return r.add(step[[]E]{kind: kindUnique})
 }
 
 // Each applies a rule set to every element.
@@ -191,12 +161,12 @@ func (r *SliceRules[E]) Each(rules ElementRules[E]) *SliceRules[E] {
 
 // Must applies a rule of your own to the collection as a whole.
 func (r *SliceRules[E]) Must(check func([]E) error) *SliceRules[E] {
-	return r.add(step[[]E]{id: "must", check: check})
+	return r.add(step[[]E]{kind: kindCustom, check: check})
 }
 
 // Check applies the rule set to a value and returns the first failure.
 func (r *SliceRules[E]) Check(values []E) error {
-	problems := run(&values, r.steps, isEmptySlice[E], r.required)
+	problems := run(&values, r.steps, isEmptySlice[E], r.required, applySliceStep[E])
 	if len(problems) == 0 && r.element != nil {
 		for i := range values {
 			if elementProblems := r.element.applyTo(&values[i]); len(elementProblems) > 0 {
@@ -220,4 +190,35 @@ func joinWithOr(values []string) string {
 	default:
 		return strings.Join(values[:len(values)-1], ", ") + " or " + values[len(values)-1]
 	}
+}
+
+// applySliceStep runs one collection rule. See [applyStringStep] for why the
+// rules are dispatched rather than closed over.
+func applySliceStep[E any](s *step[[]E], values *[]E) error {
+	switch s.kind {
+	case kindRequired:
+		if len(*values) == 0 {
+			return errRequired
+		}
+	case kindMinItems:
+		if len(*values) < s.n {
+			return fmt.Errorf("must have at least %d %s", s.n, plural(s.n, "item"))
+		}
+	case kindMaxItems:
+		if len(*values) > s.n {
+			return fmt.Errorf("must have at most %d %s", s.n, plural(s.n, "item"))
+		}
+	case kindUnique:
+		list := *values
+		for i := range list {
+			for j := i + 1; j < len(list); j++ {
+				if reflect.DeepEqual(list[i], list[j]) {
+					return fmt.Errorf("must not repeat %v", list[i])
+				}
+			}
+		}
+	default:
+		return s.check(*values)
+	}
+	return nil
 }

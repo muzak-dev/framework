@@ -33,6 +33,15 @@ func (r *ValueRules[T]) For(target *T) *ValueRules[T] {
 	return r
 }
 
+// Reset returns the rule set to its unbound, ruleless state while keeping the
+// memory it has already claimed. See [StringRules.Reset].
+func (r *ValueRules[T]) Reset() {
+	r.target = nil
+	r.label = ""
+	r.required = false
+	r.steps = r.steps[:0]
+}
+
 // Target implements [Evaluator].
 func (r *ValueRules[T]) Target() any { return r.target }
 
@@ -60,7 +69,7 @@ func (r *ValueRules[T]) Evaluate() []Problem {
 
 // applyTo implements [ElementRules].
 func (r *ValueRules[T]) applyTo(value *T) []Problem {
-	return run(value, r.steps, isZeroValue[T], r.required)
+	return run(value, r.steps, isZeroValue[T], r.required, customApplier)
 }
 
 // isZeroValue reports whether a value counts as absent, which for an arbitrary
@@ -91,14 +100,13 @@ func (r *ValueRules[T]) Message(message string) *ValueRules[T] {
 func (r *ValueRules[T]) Required() *ValueRules[T] {
 	r.required = true
 	return r.add(step[T]{
-		id: requiredRuleID,
+		kind: kindRequired,
 		check: func(value T) error {
 			if isZeroValue(value) {
-				return errors.New("is required")
+				return errRequired
 			}
 			return nil
 		},
-		describe: func(c *Constraints) { c.Required = true },
 	})
 }
 
@@ -106,8 +114,13 @@ func (r *ValueRules[T]) Required() *ValueRules[T] {
 // the field, so a value of the wrong type is a compile error rather than a
 // check that can never pass.
 func (r *ValueRules[T]) OneOf(allowed ...T) *ValueRules[T] {
+	enum := make([]any, len(allowed))
+	for i, value := range allowed {
+		enum[i] = value
+	}
 	return r.add(step[T]{
-		id: "one_of",
+		kind: kindOneOfValue,
+		enum: enum,
 		check: func(value T) error {
 			for _, candidate := range allowed {
 				if equalValues(value, candidate) {
@@ -116,11 +129,6 @@ func (r *ValueRules[T]) OneOf(allowed ...T) *ValueRules[T] {
 			}
 			return fmt.Errorf("must be one of %s", describeList(allowed))
 		},
-		describe: func(c *Constraints) {
-			for _, value := range allowed {
-				c.Enum = append(c.Enum, value)
-			}
-		},
 	})
 }
 
@@ -128,7 +136,7 @@ func (r *ValueRules[T]) OneOf(allowed ...T) *ValueRules[T] {
 // or a paired setting is checked.
 func (r *ValueRules[T]) Equal(other T) *ValueRules[T] {
 	return r.add(step[T]{
-		id: "equal",
+		kind: kindCustom,
 		check: func(value T) error {
 			if !equalValues(value, other) {
 				return errors.New("does not match")
@@ -140,7 +148,7 @@ func (r *ValueRules[T]) Equal(other T) *ValueRules[T] {
 
 // Must applies a rule of your own, receiving the field's own type.
 func (r *ValueRules[T]) Must(check func(T) error) *ValueRules[T] {
-	return r.add(step[T]{id: "must", check: check})
+	return r.add(step[T]{kind: kindCustom, check: check})
 }
 
 // Check applies the rule set to a value and returns the first failure.
@@ -188,6 +196,15 @@ func (r *TimeRules) For(target any) *TimeRules {
 	return r
 }
 
+// Reset returns the rule set to its unbound, ruleless state while keeping the
+// memory it has already claimed. See [StringRules.Reset].
+func (r *TimeRules) Reset() {
+	r.target = nil
+	r.label = ""
+	r.required = false
+	r.steps = r.steps[:0]
+}
+
 // Target implements [Evaluator].
 func (r *TimeRules) Target() any { return r.target }
 
@@ -213,7 +230,7 @@ func (r *TimeRules) Evaluate() []Problem {
 		// coverage: the entry point constrains the field to a time.Time.
 		return nil
 	}
-	return run(&moment, r.steps, func(t time.Time) bool { return t.IsZero() }, r.required)
+	return run(&moment, r.steps, func(t time.Time) bool { return t.IsZero() }, r.required, customApplier)
 }
 
 // add appends a step and returns the rule set for chaining.
@@ -238,21 +255,20 @@ func (r *TimeRules) Message(message string) *TimeRules {
 func (r *TimeRules) Required() *TimeRules {
 	r.required = true
 	return r.add(step[time.Time]{
-		id: requiredRuleID,
+		kind: kindRequired,
 		check: func(t time.Time) error {
 			if t.IsZero() {
-				return errors.New("is required")
+				return errRequired
 			}
 			return nil
 		},
-		describe: func(c *Constraints) { c.Required = true },
 	})
 }
 
 // Before requires a moment strictly earlier than the limit.
 func (r *TimeRules) Before(limit time.Time) *TimeRules {
 	return r.add(step[time.Time]{
-		id: "before",
+		kind: kindCustom,
 		check: func(t time.Time) error {
 			if !t.Before(limit) {
 				return fmt.Errorf("must be before %s", limit.Format(time.RFC3339))
@@ -265,7 +281,7 @@ func (r *TimeRules) Before(limit time.Time) *TimeRules {
 // After requires a moment strictly later than the limit.
 func (r *TimeRules) After(limit time.Time) *TimeRules {
 	return r.add(step[time.Time]{
-		id: "after",
+		kind: kindCustom,
 		check: func(t time.Time) error {
 			if !t.After(limit) {
 				return fmt.Errorf("must be after %s", limit.Format(time.RFC3339))
@@ -278,7 +294,7 @@ func (r *TimeRules) After(limit time.Time) *TimeRules {
 // Between requires a moment within an inclusive range.
 func (r *TimeRules) Between(earliest, latest time.Time) *TimeRules {
 	return r.add(step[time.Time]{
-		id: "between",
+		kind: kindCustom,
 		check: func(t time.Time) error {
 			if t.Before(earliest) || t.After(latest) {
 				return fmt.Errorf("must be between %s and %s",
@@ -291,12 +307,12 @@ func (r *TimeRules) Between(earliest, latest time.Time) *TimeRules {
 
 // Must applies a rule of your own.
 func (r *TimeRules) Must(check func(time.Time) error) *TimeRules {
-	return r.add(step[time.Time]{id: "must", check: check})
+	return r.add(step[time.Time]{kind: kindCustom, check: check})
 }
 
 // Check applies the rule set to a value and returns the first failure.
 func (r *TimeRules) Check(value time.Time) error {
-	problems := run(&value, r.steps, func(t time.Time) bool { return t.IsZero() }, r.required)
+	problems := run(&value, r.steps, func(t time.Time) bool { return t.IsZero() }, r.required, customApplier)
 	if len(problems) == 0 {
 		return nil
 	}

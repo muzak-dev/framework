@@ -36,6 +36,15 @@ func (r *NumberRules) For(target any) *NumberRules {
 	return r
 }
 
+// Reset returns the rule set to its unbound, ruleless state while keeping the
+// memory it has already claimed. See [StringRules.Reset].
+func (r *NumberRules) Reset() {
+	r.target = nil
+	r.label = ""
+	r.required = false
+	r.steps = r.steps[:0]
+}
+
 // Target implements [Evaluator].
 func (r *NumberRules) Target() any { return r.target }
 
@@ -61,15 +70,10 @@ func (r *NumberRules) Evaluate() []Problem {
 		// a rule set can only ever be bound to one that converts.
 		return nil
 	}
-	problems := run(&number, r.steps, isZeroNumber, r.required)
+	problems := runNumber(&number, r.steps, r.required)
 	writeBack(value, number)
 	return problems
 }
-
-// isZeroNumber reports whether a value counts as absent. Zero is the only
-// value a number can take without being supplied, so it is what an optional
-// numeric field skips its checks on.
-func isZeroNumber(f float64) bool { return f == 0 }
 
 // toFloat reads any numeric kind as a float64.
 func toFloat(value reflect.Value) (float64, bool) {
@@ -128,43 +132,38 @@ func (r *NumberRules) Message(message string) *NumberRules {
 // rather than marked Required.
 func (r *NumberRules) Required() *NumberRules {
 	r.required = true
+	return r.add(step[float64]{kind: kindRequired})
+}
+
+// Clamp pulls a value inside a range instead of rejecting it.
+//
+// It is a transform, so the handler receives the clamped number, and like every
+// transform it runs before the checks. Reach for it where a value outside the
+// range is a client being imprecise rather than a client being wrong, such as a
+// page size that should quietly cap rather than fail:
+//
+//	v.Number(&in.Limit).Clamp(1, 100)
+func (r *NumberRules) Clamp(lowest, highest float64) *NumberRules {
 	return r.add(step[float64]{
-		id: requiredRuleID,
-		check: func(f float64) error {
-			if f == 0 {
-				return errors.New("is required")
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.Required = true },
+		kind: kindClamp,
+		lo:   lowest,
+		hi:   highest,
 	})
 }
 
 // Min requires the value to be at least min.
 func (r *NumberRules) Min(lowest float64) *NumberRules {
 	return r.add(step[float64]{
-		id: "min",
-		check: func(f float64) error {
-			if f < lowest {
-				return fmt.Errorf("must be at least %s", formatNumber(lowest))
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.Minimum = floatPtr(lowest) },
+		kind: kindMin,
+		lo:   lowest,
 	})
 }
 
 // Max requires the value to be at most max.
 func (r *NumberRules) Max(highest float64) *NumberRules {
 	return r.add(step[float64]{
-		id: "max",
-		check: func(f float64) error {
-			if f > highest {
-				return fmt.Errorf("must be at most %s", formatNumber(highest))
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.Maximum = floatPtr(highest) },
+		kind: kindMax,
+		hi:   highest,
 	})
 }
 
@@ -172,72 +171,41 @@ func (r *NumberRules) Max(highest float64) *NumberRules {
 // pair of bounds written as one rule so that the failure names both.
 func (r *NumberRules) Between(lowest, highest float64) *NumberRules {
 	return r.add(step[float64]{
-		id: "between",
-		check: func(f float64) error {
-			if f < lowest || f > highest {
-				return fmt.Errorf("must be between %s and %s", formatNumber(lowest), formatNumber(highest))
-			}
-			return nil
-		},
-		describe: func(c *Constraints) {
-			c.Minimum, c.Maximum = floatPtr(lowest), floatPtr(highest)
-		},
+		kind: kindBetween,
+		lo:   lowest,
+		hi:   highest,
 	})
 }
 
 // Positive requires a value greater than zero.
 func (r *NumberRules) Positive() *NumberRules {
-	return r.add(step[float64]{
-		id: "positive",
-		check: func(f float64) error {
-			if f <= 0 {
-				return errors.New("must be greater than zero")
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.Minimum = floatPtr(0) },
-	})
+	return r.add(step[float64]{kind: kindPositive})
 }
 
 // Negative requires a value less than zero.
 func (r *NumberRules) Negative() *NumberRules {
-	return r.add(step[float64]{
-		id: "negative",
-		check: func(f float64) error {
-			if f >= 0 {
-				return errors.New("must be less than zero")
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.Maximum = floatPtr(0) },
-	})
+	return r.add(step[float64]{kind: kindNegative})
 }
 
 // MultipleOf requires the value to divide evenly by factor, for a quantity
 // that only makes sense in steps.
 func (r *NumberRules) MultipleOf(factor float64) *NumberRules {
 	return r.add(step[float64]{
-		id: "multiple_of",
-		check: func(f float64) error {
-			if factor == 0 || math.Abs(math.Mod(f, factor)) > 1e-9 {
-				return fmt.Errorf("must be a multiple of %s", formatNumber(factor))
-			}
-			return nil
-		},
-		describe: func(c *Constraints) { c.MultipleOf = floatPtr(factor) },
+		kind: kindMultipleOf,
+		lo:   factor,
 	})
 }
 
 // Must applies a rule of your own, receiving the value as a float64 whatever
 // the field's own numeric type.
 func (r *NumberRules) Must(check func(float64) error) *NumberRules {
-	return r.add(step[float64]{id: "must", check: check})
+	return r.add(step[float64]{kind: kindCustom, check: check})
 }
 
 // Check applies the rule set to a value and returns the first failure, which is
 // what makes a rule set testable on its own.
 func (r *NumberRules) Check(value float64) error {
-	problems := run(&value, r.steps, isZeroNumber, r.required)
+	problems := runNumber(&value, r.steps, r.required)
 	if len(problems) == 0 {
 		return nil
 	}
@@ -251,4 +219,44 @@ func formatNumber(f float64) string {
 		return strconv.FormatInt(int64(f), 10)
 	}
 	return strconv.FormatFloat(f, 'g', -1, 64)
+}
+
+// applyNumberStep runs one numeric rule. See [applyStringStep] for why the
+// rules are dispatched rather than closed over.
+func applyNumberStep(s *step[float64], value *float64) error {
+	switch s.kind {
+	case kindClamp:
+		*value = min(max(*value, s.lo), s.hi)
+	case kindRequired:
+		if *value == 0 {
+			return errRequired
+		}
+	case kindMin:
+		if *value < s.lo {
+			return fmt.Errorf("must be at least %s", formatNumber(s.lo))
+		}
+	case kindMax:
+		if *value > s.hi {
+			return fmt.Errorf("must be at most %s", formatNumber(s.hi))
+		}
+	case kindBetween:
+		if *value < s.lo || *value > s.hi {
+			return fmt.Errorf("must be between %s and %s", formatNumber(s.lo), formatNumber(s.hi))
+		}
+	case kindPositive:
+		if *value <= 0 {
+			return errors.New("must be greater than zero")
+		}
+	case kindNegative:
+		if *value >= 0 {
+			return errors.New("must be less than zero")
+		}
+	case kindMultipleOf:
+		if s.lo == 0 || math.Abs(math.Mod(*value, s.lo)) > 1e-9 {
+			return fmt.Errorf("must be a multiple of %s", formatNumber(s.lo))
+		}
+	default:
+		return s.check(*value)
+	}
+	return nil
 }

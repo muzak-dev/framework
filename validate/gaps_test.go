@@ -94,3 +94,82 @@ func TestBoundTargets(t *testing.T) {
 		t.Errorf("value target = %v", got)
 	}
 }
+
+// TestResetReturnsARuleSetToTheStart covers the recycling that lets a
+// Validation hand the same rule set to one request after another.
+func TestResetReturnsARuleSetToTheStart(t *testing.T) {
+	t.Parallel()
+	text := "value"
+
+	t.Run("string", func(t *testing.T) {
+		t.Parallel()
+		rules := String().As("label").Required().MinLen(3).For(&text)
+		rules.Reset()
+		if rules.Target() != nil || rules.Label() != "" || !rules.Describe().IsZero() {
+			t.Errorf("Reset left state behind: target %v, label %q, %+v",
+				rules.Target(), rules.Label(), rules.Describe())
+		}
+		// The rule set is usable again, and its capacity survived.
+		if err := rules.For(&text).MaxLen(1).Evaluate(); len(err) != 1 {
+			t.Errorf("a reset rule set did not work again: %v", err)
+		}
+	})
+
+	t.Run("number", func(t *testing.T) {
+		t.Parallel()
+		number := 5
+		rules := Number().As("label").Required().Min(3).For(&number)
+		rules.Reset()
+		if rules.Target() != nil || rules.Label() != "" || !rules.Describe().IsZero() {
+			t.Error("Reset left state behind")
+		}
+	})
+
+	t.Run("slice", func(t *testing.T) {
+		t.Parallel()
+		values := []string{"a"}
+		rules := Slice[string]().As("label").Required().MaxItems(1).Each(String()).For(&values)
+		rules.Reset()
+		if rules.Target() != nil || rules.Label() != "" || !rules.Describe().IsZero() {
+			t.Error("Reset left state behind")
+		}
+		if !rules.DescribeElement().IsZero() {
+			t.Error("Reset left the element rules behind")
+		}
+	})
+
+	t.Run("value", func(t *testing.T) {
+		t.Parallel()
+		role := "admin"
+		rules := Value[string]().As("label").Required().For(&role)
+		rules.Reset()
+		if rules.Target() != nil || rules.Label() != "" || !rules.Describe().IsZero() {
+			t.Error("Reset left state behind")
+		}
+	})
+
+	t.Run("time", func(t *testing.T) {
+		t.Parallel()
+		rules := Time().As("label").Required()
+		rules.Reset()
+		if rules.Target() != nil || rules.Label() != "" {
+			t.Error("Reset left state behind")
+		}
+	})
+}
+
+// TestOptionalCollectionSkipsItsChecks covers the generic runner's skip, which
+// is what makes an absent collection acceptable to a rule set that bounds its
+// size.
+func TestOptionalCollectionSkipsItsChecks(t *testing.T) {
+	t.Parallel()
+	if err := Slice[string]().MinItems(2).Check(nil); err != nil {
+		t.Errorf("Check(nil) on an optional collection = %v, want it accepted", err)
+	}
+	if err := Slice[string]().MinItems(2).Check([]string{"a"}); err == nil {
+		t.Error("a supplied collection skipped its check")
+	}
+	if err := Value[string]().Equal("x").Check(""); err != nil {
+		t.Errorf("Check on an optional value = %v, want it accepted", err)
+	}
+}

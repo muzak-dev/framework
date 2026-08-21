@@ -178,7 +178,7 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 func totalFields(t reflect.Type) int {
 	n := 0
 	for i := range t.NumField() {
-		if t.Field(i).IsExported() {
+		if usableField(t.Field(i)) {
 			n++
 		}
 	}
@@ -204,7 +204,7 @@ func templateParams(path string) map[string]bool {
 func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][]int) error {
 	for i := range t.NumField() {
 		f := t.Field(i)
-		if !f.IsExported() {
+		if !usableField(f) {
 			continue
 		}
 		index := append(append([]int(nil), prefix...), i)
@@ -240,6 +240,15 @@ func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][
 		*bodyFields = append(*bodyFields, index)
 	}
 	return nil
+}
+
+// usableField reports whether a struct field takes part in binding.
+//
+// An embedded struct of unexported type is usable even though the field itself
+// is unexported, because its promoted exported fields are settable through
+// reflection and encoding/json treats them as members of the outer object.
+func usableField(f reflect.StructField) bool {
+	return f.IsExported() || (f.Anonymous && f.Type.Kind() == reflect.Struct)
 }
 
 // locationTag reports which part of the request a field is read from, if the

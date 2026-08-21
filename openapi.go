@@ -517,7 +517,7 @@ func (b *schemaBuilder) describeStruct(t reflect.Type) *Schema {
 func (b *schemaBuilder) collectProperties(t reflect.Type, schema *Schema) {
 	for i := range t.NumField() {
 		field := t.Field(i)
-		if !field.IsExported() {
+		if !usableField(field) {
 			continue
 		}
 		name, optional := jsonFieldName(field)

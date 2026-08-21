@@ -199,7 +199,7 @@ func MustLoadConfig[T any](opts ...ConfigOption) T {
 func (l *configLoader) fill(t reflect.Type, value reflect.Value, prefix []int, problems *[]error) {
 	for i := range t.NumField() {
 		field := t.Field(i)
-		if !field.IsExported() {
+		if !usableField(field) {
 			continue
 		}
 		index := append(append([]int(nil), prefix...), i)

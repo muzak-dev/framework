@@ -388,15 +388,16 @@ func (r *Router) Head[In, Out any](path string, h Handler[In, Out], opts ...Rout
 	return register(r, http.MethodHead, path, h, opts)
 }
 
-// Options registers a handler for OPTIONS requests at the given path template.
-// Registering one replaces the automatic response that otherwise advertises
-// the methods available at the path.
-func (r *Router) Options[In, Out any](path string, h Handler[In, Out], opts ...RouteOption) *Route {
-	return register(r, http.MethodOptions, path, h, opts)
-}
-
 // Handle registers a handler for an arbitrary HTTP method, for the methods the
 // named helpers do not cover. The method is upper-cased before use.
+//
+// It is also how an OPTIONS route is registered. There is no Router.Options
+// method, because [App.Options] applies configuration to an application and
+// the two would shadow each other on an App; OPTIONS is answered automatically
+// with an Allow header in any case, so registering one is only necessary to
+// replace that behaviour:
+//
+//	r.Handle(http.MethodOptions, "/things", describeThings)
 func (r *Router) Handle[In, Out any](method, path string, h Handler[In, Out], opts ...RouteOption) *Route {
 	return register(r, strings.ToUpper(method), path, h, opts)
 }

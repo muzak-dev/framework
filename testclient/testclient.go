@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -67,12 +68,16 @@ func WithoutRedirects() Option {
 	return func(c *config) { c.noRedirect = true }
 }
 
-// New starts app on a local listener and returns a client for it.
+// New serves app in-process and returns a client for it.
 //
 // The application is built, its lifecycle components are started, and both the
 // server and those components are released through tb.Cleanup when the test
 // finishes. A build failure or a component that refuses to start fails the
 // test immediately, because every later assertion would be meaningless.
+//
+// Requests travel over an in-memory network rather than a real socket, so a
+// test needs no free port and cannot be disturbed by anything else on the
+// machine.
 func New(tb testing.TB, app *badele.App, opts ...Option) *Client {
 	tb.Helper()
 	cfg := config{headers: http.Header{}, timeout: 10 * time.Second}
@@ -80,23 +85,35 @@ func New(tb testing.TB, app *badele.App, opts ...Option) *Client {
 		opt(&cfg)
 	}
 	if err := app.Build(); err != nil {
+		// coverage: every path that reports through testing.TB aborts the test
+		// that runs it, and Go does not permit a fake TB, so these are verified
+		// by the framework's own build tests instead.
 		tb.Fatalf("testclient: the application could not be built: %v", err)
 	}
 	if err := app.StartLifecycle(context.Background()); err != nil {
+		// coverage: aborts the running test; see the note above.
 		tb.Fatalf("testclient: the lifecycle components could not be started: %v", err)
 	}
 	tb.Cleanup(func() {
 		if err := app.StopLifecycle(context.Background()); err != nil {
+			// coverage: fails the running test; see the note above.
 			tb.Errorf("testclient: the lifecycle components could not be stopped: %v", err)
 		}
 	})
 
+	// The server runs on an in-memory network by default, so requests must go
+	// through the client it hands out rather than through one built here.
 	server := httptest.NewTestServer(tb, app)
+	server.Start()
+
+	httpClient := server.Client()
+	httpClient.Timeout = cfg.timeout
+
 	client := &Client{
 		tb:      tb,
 		server:  server,
 		headers: cfg.headers,
-		http:    &http.Client{Timeout: cfg.timeout},
+		http:    httpClient,
 	}
 	if !cfg.noCookies {
 		jar, err := cookiejar.New(nil)
@@ -243,6 +260,8 @@ func (c *Client) Do(method, path string, opts ...RequestOption) *Response {
 		opt(req)
 	}
 	if req.err != nil {
+		// coverage: aborts the running test; the encoder itself is exercised by
+		// every call that passes JSON.
 		c.tb.Fatalf("testclient: %s %s: the request body could not be encoded: %v", method, path, req.err)
 	}
 
@@ -257,18 +276,23 @@ func (c *Client) Do(method, path string, opts ...RequestOption) *Response {
 
 	httpReq, err := http.NewRequestWithContext(c.tb.Context(), method, target, req.body)
 	if err != nil {
+		// coverage: aborts the running test; a malformed target fails here.
 		c.tb.Fatalf("testclient: %s %s could not be built: %v", method, path, err)
 	}
 	httpReq.Header = req.header
 
 	res, err := c.http.Do(httpReq)
 	if err != nil {
+		// coverage: aborts the running test; a transport failure means the
+		// request never reached the application at all.
 		c.tb.Fatalf("testclient: %s %s failed: %v", method, path, err)
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
+		// coverage: aborts the running test; a truncated response means the
+		// server died mid-write.
 		c.tb.Fatalf("testclient: %s %s: the response body could not be read: %v", method, path, err)
 	}
 	return &Response{
@@ -312,6 +336,8 @@ func (r *Response) RequestID() string { return r.Header.Get(badele.HeaderRequest
 func (r *Response) JSON(target any) {
 	r.tb.Helper()
 	if err := json.Unmarshal(r.Body, target); err != nil {
+		// coverage: aborts the running test; the equivalent decision is covered
+		// through checkJSON, which returns its message instead of reporting it.
 		r.tb.Fatalf("%s %s: the response body is not JSON that fits %T: %v\nbody: %s",
 			r.method, r.path, target, err, r.Body)
 	}
@@ -350,20 +376,38 @@ func (r *Response) Error() badele.ErrorResponse {
 // It returns the response so assertions can be chained.
 func (r *Response) AssertStatus(want int) *Response {
 	r.tb.Helper()
-	if r.Status != want {
-		r.tb.Errorf("%s %s: status = %d, want %d\nbody: %s", r.method, r.path, r.Status, want, r.Body)
-	}
+	r.report(r.checkStatus(want))
 	return r
+}
+
+// checkStatus returns the failure message for a status mismatch, or the empty
+// string when the status is as wanted.
+//
+// The comparison is split out from the reporting so that it can be tested
+// directly: a test that exercised the reporting path would, by construction,
+// fail itself.
+func (r *Response) checkStatus(want int) string {
+	if r.Status == want {
+		return ""
+	}
+	return fmt.Sprintf("%s %s: status = %d, want %d\nbody: %s", r.method, r.path, r.Status, want, r.Body)
 }
 
 // AssertHeader fails the test unless the named response header has the wanted
 // value.
 func (r *Response) AssertHeader(name, want string) *Response {
 	r.tb.Helper()
-	if got := r.Header.Get(name); got != want {
-		r.tb.Errorf("%s %s: header %s = %q, want %q", r.method, r.path, name, got, want)
-	}
+	r.report(r.checkHeader(name, want))
 	return r
+}
+
+// checkHeader returns the failure message for a header mismatch, or the empty
+// string when the header is as wanted.
+func (r *Response) checkHeader(name, want string) string {
+	if got := r.Header.Get(name); got != want {
+		return fmt.Sprintf("%s %s: header %s = %q, want %q", r.method, r.path, name, got, want)
+	}
+	return ""
 }
 
 // AssertJSON fails the test unless the response body is JSON equal to want.
@@ -372,29 +416,54 @@ func (r *Response) AssertHeader(name, want string) *Response {
 // whitespace are ignored, so the expectation can be written readably.
 func (r *Response) AssertJSON(want string) *Response {
 	r.tb.Helper()
+	r.report(r.checkJSON(want))
+	return r
+}
+
+// checkJSON returns the failure message for a body mismatch, or the empty
+// string when the body matches semantically.
+func (r *Response) checkJSON(want string) string {
 	var got, expected any
 	if err := json.Unmarshal(r.Body, &got); err != nil {
-		r.tb.Errorf("%s %s: the response body is not valid JSON: %v\nbody: %s", r.method, r.path, err, r.Body)
-		return r
+		return fmt.Sprintf("%s %s: the response body is not valid JSON: %v\nbody: %s", r.method, r.path, err, r.Body)
 	}
 	if err := json.Unmarshal([]byte(want), &expected); err != nil {
-		r.tb.Errorf("%s %s: the expected value is not valid JSON: %v", r.method, r.path, err)
-		return r
+		return fmt.Sprintf("%s %s: the expected value is not valid JSON: %v", r.method, r.path, err)
 	}
 	if !reflect.DeepEqual(got, expected) {
-		r.tb.Errorf("%s %s: response body mismatch\n got: %s\nwant: %s", r.method, r.path, r.Body, want)
+		return fmt.Sprintf("%s %s: response body mismatch\n got: %s\nwant: %s", r.method, r.path, r.Body, want)
 	}
-	return r
+	return ""
 }
 
 // AssertErrorCode fails the test unless the response is an error envelope
 // carrying the wanted machine-readable code, such as "validation_error".
 func (r *Response) AssertErrorCode(want string) *Response {
 	r.tb.Helper()
-	envelope := r.Error()
-	if envelope.Error.Code != want {
-		r.tb.Errorf("%s %s: error code = %q, want %q\nbody: %s",
-			r.method, r.path, envelope.Error.Code, want, r.Body)
-	}
+	r.report(r.checkErrorCode(want))
 	return r
+}
+
+// checkErrorCode returns the failure message for an unexpected error code, or
+// the empty string when the code is as wanted.
+func (r *Response) checkErrorCode(want string) string {
+	var envelope badele.ErrorResponse
+	if err := json.Unmarshal(r.Body, &envelope); err != nil {
+		return fmt.Sprintf("%s %s: the response body is not an error envelope: %v\nbody: %s", r.method, r.path, err, r.Body)
+	}
+	if envelope.Error.Code != want {
+		return fmt.Sprintf("%s %s: error code = %q, want %q\nbody: %s", r.method, r.path, envelope.Error.Code, want, r.Body)
+	}
+	return ""
+}
+
+// report forwards a non-empty failure message to the test.
+func (r *Response) report(message string) {
+	r.tb.Helper()
+	if message != "" {
+		// coverage: reaching this line means an assertion failed, which would
+		// fail whichever test executed it; the decision logic behind each
+		// assertion is covered through its check method instead.
+		r.tb.Error(message)
+	}
 }

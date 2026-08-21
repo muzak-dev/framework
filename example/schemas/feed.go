@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"badele"
+	"badele/validate"
 )
 
 // HTTPDate is a time carried in the format HTTP dates use.
@@ -74,8 +75,18 @@ type FeedIn struct {
 	Limit int `query:"limit" default:"20" doc:"How many entries to return"`
 }
 
-// Validate bounds the one parameter that is this route's own.
+// Validate declares what this route accepts, wherever a value came from.
+//
+// Rules bind to the field, not to the location, so a header is checked exactly
+// as a query parameter is and its failure is reported against the header name
+// the client sent. Transforms run first, which is what lets Save-Data be
+// compared against a single spelling further down.
 func (in *FeedIn) Validate(v *badele.Validation) {
+	v.String(&in.SaveData).Trim().Lower().OneOf("on", "off")
+	v.String(&in.Traceparent).Matches(`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`).
+		Message("must be a W3C trace context, such as 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	v.Slice(&in.Tags).MaxItems(5).Each(validate.String().MaxLen(24))
+	v.String(&in.SessionID).Trim().MinLen(4).MaxLen(64)
 	v.Number(&in.Limit).Between(1, 100)
 }
 

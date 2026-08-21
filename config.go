@@ -36,10 +36,9 @@ type ConfigOption func(*configLoader)
 
 // configLoader accumulates the sources and settings for one load.
 type configLoader struct {
-	sources  []ConfigSource
-	skipEnv  bool
-	prefix   string
-	optional map[string]bool
+	sources []ConfigSource
+	skipEnv bool
+	prefix  string
 }
 
 // envSource reads from the process environment.
@@ -238,7 +237,7 @@ func (l *configLoader) assign(field reflect.StructField, name string, target ref
 		return
 	}
 	if err := set(target, splitConfigValue(field.Type, raw)); err != nil {
-		*problems = append(*problems, fmt.Errorf("badele: %s %s%s", name, err, describeBadValue(field, raw)))
+		*problems = append(*problems, fmt.Errorf("badele: %s %w%s", name, err, describeBadValue(field, raw)))
 	}
 }
 
@@ -323,14 +322,17 @@ func deriveEnvName(field string) string {
 // readEnvFile parses a dotenv file into a map. A missing file yields an empty
 // map and no error, because the environment alone is a complete source.
 func readEnvFile(path string) (map[string]string, error) {
-	file, err := os.Open(path)
+	// The caller names the file, which is the whole point of EnvFile; there is
+	// no fixed path to open instead.
+	file, err := os.Open(path) // #nosec G304 -- the path is the API's argument
+
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return map[string]string{}, nil
 		}
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return parseEnv(file)
 }
 

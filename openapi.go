@@ -275,7 +275,7 @@ func (a *App) buildDocument() *Document {
 		Info: Info{
 			Title:          orDefault(a.opts.Title, "Badele API"),
 			Version:        orDefault(a.opts.Version, "0.1.0"),
-			Description:    a.opts.OpenAPIOptions.Description,
+			Description:    a.opts.Description,
 			TermsOfService: a.opts.TermsOfService,
 			Contact:        a.opts.Contact,
 			License:        a.opts.License,

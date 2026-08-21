@@ -287,7 +287,7 @@ func (c *Client) Do(method, path string, opts ...RequestOption) *Response {
 		// request never reached the application at all.
 		c.tb.Fatalf("testclient: %s %s failed: %v", method, path, err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {

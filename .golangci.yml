@@ -1,0 +1,73 @@
+version: "2"
+
+# Linters are chosen for the properties this module claims: no unsafe code, no
+# ignored errors, no shadowed builtins, documented exported identifiers, and no
+# accidental complexity in the request path.
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - nilerr
+    - predeclared
+    - revive
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+
+  settings:
+    errcheck:
+      # Every type assertion in this module is guaranteed by construction: the
+      # sync.Pool values are written by the pool's own New, and the
+      # TextUnmarshaler assertion is gated by an Implements check performed when
+      # the binding plan is compiled. Requiring the comma-ok form on those would
+      # add branches no test could ever reach.
+      check-type-assertions: false
+      check-blank: false
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+        - name: package-comments
+        - name: indent-error-flow
+        - name: var-declaration
+        - name: unreachable-code
+    gosec:
+      excludes:
+        # G104 duplicates errcheck.
+        - G104
+    staticcheck:
+      checks:
+        - all
+        # S1016 suggests converting an input struct to an output struct when
+        # their fields happen to line up. Doing that is precisely what this
+        # framework exists to prevent: the response type is written out so that
+        # a field which is not declared on it cannot be sent, and a conversion
+        # would silently reintroduce the coupling the design removes.
+        - -S1016
+
+  exclusions:
+    rules:
+      # Tests may ignore write errors on discarding writers and use weak
+      # randomness in fixtures, neither of which is a production concern.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - bodyclose
+          # A method literal reads more clearly than http.MethodGet when the
+          # test is describing a request, which is how the standard library's
+          # own tests are written.
+          - usestdlibvars
+
+formatters:
+  enable:
+    - gofmt

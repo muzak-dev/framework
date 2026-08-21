@@ -148,7 +148,7 @@ func TestAbortHandlerPanicIsNotSwallowed(t *testing.T) {
 	mustBuild(t, app)
 
 	defer func() {
-		if recovered := recover(); recovered != http.ErrAbortHandler {
+		if recovered := recover(); recovered != http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
 			t.Errorf("recovered %v, want ErrAbortHandler to propagate", recovered)
 		}
 	}()
@@ -189,7 +189,7 @@ func TestRecoveryMiddlewareStandalone(t *testing.T) {
 
 	t.Run("re-panics on ErrAbortHandler", func(t *testing.T) {
 		defer func() {
-			if recovered := recover(); recovered != http.ErrAbortHandler {
+			if recovered := recover(); recovered != http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
 				t.Errorf("recovered %v, want ErrAbortHandler", recovered)
 			}
 		}()

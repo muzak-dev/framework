@@ -120,7 +120,9 @@ func Recovery(logger *slog.Logger) Middleware {
 				if recovered == nil {
 					return
 				}
-				if recovered == http.ErrAbortHandler {
+				// recover returns any, not error, so errors.Is does not apply
+				// here; net/http compares the sentinel the same way.
+				if recovered == http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
 					panic(recovered)
 				}
 				id, _ := RequestIDFromContext(r.Context())

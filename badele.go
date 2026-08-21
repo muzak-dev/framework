@@ -265,7 +265,7 @@ func (a *App) Logger() *slog.Logger { return a.logger }
 // chains are resolved once.
 func (a *App) Options(opts ...RouterOption) {
 	for _, opt := range opts {
-		opt.applyRouter(&a.Router.cfg)
+		opt.applyRouter(&a.cfg)
 	}
 }
 
@@ -315,7 +315,7 @@ func (a *App) build() {
 	}
 
 	a.routers = countRouters(a.Router)
-	a.Router.finalize(inherited{
+	a.finalize(inherited{
 		maxBodySize: a.opts.MaxBodySize,
 	}, emit, state)
 	a.lifecycle.components = state.lifecycles
@@ -515,7 +515,9 @@ func (a *App) recoverRoute(c *Context) {
 	if recovered == nil {
 		return
 	}
-	if recovered == http.ErrAbortHandler {
+	// recover returns any, not error, so errors.Is does not apply here. This is
+	// the same identity comparison net/http performs on the sentinel.
+	if recovered == http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
 		panic(recovered)
 	}
 	a.logger.ErrorContext(c.Context(), "badele: recovered from a panic in a handler",

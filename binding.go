@@ -399,7 +399,7 @@ func setterFor(t reflect.Type) (setter, error) {
 			out := reflect.MakeSlice(dst.Type(), len(raw), len(raw))
 			for i, s := range raw {
 				if err := elem(out.Index(i), raw[i:i+1]); err != nil {
-					return fmt.Errorf("entry %d %q %s", i+1, s, err)
+					return fmt.Errorf("entry %d %q %w", i+1, s, err)
 				}
 			}
 			dst.Set(out)

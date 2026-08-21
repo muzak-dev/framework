@@ -29,3 +29,12 @@ func CurrentUser(ctx *badele.Context, _ badele.Empty) (schemas.UserOut, error) {
 func ReadUser(ctx *badele.Context, in schemas.UserLookupParams) (schemas.UserOut, error) {
 	return schemas.UserOut{Username: in.Username}, nil
 }
+
+// CreateUser registers a user.
+//
+// By the time this runs the model has been validated, so the handler can take
+// the input at face value: the email is trimmed and lower-cased, the password
+// is long enough, and the role is one of the three it is allowed to be.
+func CreateUser(ctx *badele.Context, in schemas.CreateUserIn) (schemas.UserOut, error) {
+	return schemas.UserOut{Username: in.Username, Email: in.Email}, nil
+}

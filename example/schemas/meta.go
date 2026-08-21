@@ -1,5 +1,9 @@
 package schemas
 
+import (
+	"badele"
+)
+
 // InfoOut is the response model for the settings endpoint.
 //
 // It is a separate type from the configuration on purpose: the response exposes
@@ -25,4 +29,9 @@ type PredictOut struct {
 // HealthOut is the response model for the liveness probe.
 type HealthOut struct {
 	Status string `json:"status"`
+}
+
+// Validate keeps the prediction input inside the range the model was fitted on.
+func (in *PredictParams) Validate(v *badele.Validation) {
+	v.Number(&in.X).Between(-1000, 1000)
 }

@@ -1,6 +1,8 @@
 package routers
 
 import (
+	"net/http"
+
 	"badele"
 	"badele-example/handlers"
 )
@@ -18,6 +20,10 @@ func Users() *badele.Router {
 
 	r.Get("/users/{username}", handlers.ReadUser,
 		badele.Summary("Read a user by name"))
+
+	r.Post("/users/", handlers.CreateUser,
+		badele.Summary("Register a user"),
+		badele.Status(http.StatusCreated))
 
 	return r
 }

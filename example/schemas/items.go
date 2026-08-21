@@ -1,5 +1,9 @@
 package schemas
 
+import (
+	"badele"
+)
+
 // ItemOut is the response model for a single item.
 type ItemOut struct {
 	// ID identifies the item.
@@ -46,4 +50,25 @@ type ItemListOut struct {
 	Items []ItemOut `json:"items"`
 	// Limit reports the per-user cap the service is configured with.
 	Limit int `json:"limit" doc:"How many items one user may hold"`
+}
+
+// Validate constrains a new item.
+func (in *ItemCreateIn) Validate(v *badele.Validation) {
+	v.String(&in.ID).Trim().Lower().Required().MinLen(2).MaxLen(32).
+		Matches(`^[a-z0-9-]+$`).
+		Message("may only contain lower case letters, digits and hyphens")
+	v.String(&in.Name).Trim().Required().MaxLen(80)
+}
+
+// Validate constrains a rename, covering a model that mixes a path parameter
+// with a body member. The path parameter is reported as one, which comes free
+// from the binding plan.
+func (in *ItemRenameIn) Validate(v *badele.Validation) {
+	v.String(&in.ID).Required()
+	v.String(&in.Name).Trim().Required().MinLen(1).MaxLen(80)
+}
+
+// Validate constrains the item identifier read from the path.
+func (in *ItemParams) Validate(v *badele.Validation) {
+	v.String(&in.ID).Trim().Lower().Required().MaxLen(32)
 }

@@ -164,9 +164,13 @@ func walkProject(t *testing.T, visit func(name, content string)) {
 }
 
 // skipDir reports whether a directory should not be walked.
+//
+// The panels directory holds the front-end workspace, whose dependencies and
+// vendored documentation are not this module's to police; the rules enforced
+// here are about Go sources and the documents written alongside them.
 func skipDir(name string) bool {
 	switch name {
-	case ".git", "node_modules", "testdata", "vendor":
+	case ".git", "node_modules", "testdata", "vendor", "panels":
 		return true
 	}
 	return false
@@ -215,7 +219,7 @@ func TestFindNonASCII(t *testing.T) {
 
 func TestSkipDirAndCheckedExtension(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{".git", "node_modules", "testdata", "vendor"} {
+	for _, name := range []string{".git", "node_modules", "testdata", "vendor", "panels"} {
 		if !skipDir(name) {
 			t.Errorf("skipDir(%q) = false, want true", name)
 		}

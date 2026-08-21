@@ -56,6 +56,13 @@ func main() {
 		badele.WithSingleton(store, store.Lifecycle()),
 	)
 
+	// Middleware installed here runs inside the built-in chain, so it already
+	// has a request identifier and is already covered by panic recovery.
+	// ProcessTime is outermost of the two, so the duration it reports includes
+	// the time spent compressing.
+	app.Use(core.ProcessTime())
+	app.Use(badele.Compress(badele.CompressionOptions{}))
+
 	app.Include(routers.Users())
 	app.Include(routers.Items())
 	app.Include(routers.Meta())

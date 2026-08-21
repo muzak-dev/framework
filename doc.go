@@ -129,6 +129,36 @@
 //			`<input name="files" type="file" multiple><input type="submit"></form>`), nil
 //	})
 //
+// # Middleware
+//
+// The built-in chain assigns a request identifier, recovers panics, writes the
+// access log and sets the security headers before any route runs. [App.Use]
+// installs more inside that chain, so anything added there already has an
+// identifier and is already covered by recovery:
+//
+//	app.Use(badele.Compress(badele.CompressionOptions{}))
+//
+// Two are ready to use. [CORS] is configured rather than installed: a policy on
+// [AppOptions.CORS] installs it, and no policy at all means no CORS header is
+// ever emitted, so a browser refuses every cross-origin read until the policy
+// is written down. A wildcard origin combined with credentials is refused as a
+// configuration error rather than served.
+//
+// [Compress] negotiates gzip or deflate from Accept-Encoding and leaves alone
+// what is not worth compressing: a body under [DefaultCompressionMinSize], a
+// media type that is already compressed, an event stream, a range, and
+// anything the handler encoded itself. Vary records the dependency on every
+// response either way, so a cache cannot hand a compressed body to a client
+// that cannot read it.
+//
+// Anything else is an ordinary func(http.Handler) http.Handler, so writing one
+// takes no framework knowledge. One thing does differ from frameworks in other
+// languages, and it fails quietly: Go puts the header block on the wire at the
+// first WriteHeader, so a header set after the next handler returns is
+// dropped without a word. Middleware that reports something only known at the
+// end, such as how long the request took, has to wrap the writer and fill the
+// value in as the response starts.
+//
 // # What is generated
 //
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs

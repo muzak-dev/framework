@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -253,3 +255,61 @@ func BenchmarkLoggerJSON(b *testing.B) {
 type nopWriter struct{}
 
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// BenchmarkBaselineServeMux measures the same work through net/http's own
+// router and encoder, so the framework's overhead can be read as a difference
+// rather than as an absolute number.
+func BenchmarkBaselineServeMux(b *testing.B) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/plain/{id}", func(w http.ResponseWriter, r *http.Request) {
+		out := benchOut{ID: r.PathValue("id")}
+		buf := &bytes.Buffer{}
+		if err := json.MarshalWrite(buf, out); err != nil {
+			b.Fatalf("MarshalWrite: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/plain/12345", nil)
+	w := newDiscardWriter()
+	b.ReportAllocs()
+	for b.Loop() {
+		clear(w.header)
+		mux.ServeHTTP(w, req)
+	}
+}
+
+// BenchmarkRouteParamBare measures a Badele route with the optional middleware
+// removed, which isolates routing, binding and encoding from the request
+// identifier and the security headers.
+func BenchmarkRouteParamBare(b *testing.B) {
+	app := New(AppOptions{
+		LoggerOptions:          LoggerOptions{Format: LogFormatNone},
+		DisableAccessLog:       true,
+		DisableDocs:            true,
+		DisableSecurityHeaders: true,
+	})
+	app.Get("/api/v1/plain/{id}", func(ctx *Context, in struct {
+		ID string `path:"id"`
+	}) (benchOut, error) {
+		return benchOut{ID: in.ID}, nil
+	})
+	if err := app.Build(); err != nil {
+		b.Fatalf("Build: %v", err)
+	}
+	// Drop the request-identifier middleware too, so the comparison is like
+	// for like with the bare mux above.
+	app.middleware = nil
+	app.buildOnce = sync.Once{}
+	app.handler = app.buildHandler()
+
+	req := httptest.NewRequest("GET", "/api/v1/plain/12345", nil)
+	w := newDiscardWriter()
+	b.ReportAllocs()
+	for b.Loop() {
+		serve(app, req, w)
+	}
+}

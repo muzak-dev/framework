@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -79,9 +78,11 @@ func benchApp(b *testing.B) *App {
 }
 
 // discardWriter is a ResponseWriter that throws the response away, so that the
-// benchmarks measure the framework rather than the recorder.
+// benchmarks measure the framework rather than the recorder. It keeps the
+// status so that a benchmark can prove it is measuring what it claims.
 type discardWriter struct {
 	header http.Header
+	status int
 }
 
 func newDiscardWriter() *discardWriter {
@@ -90,7 +91,7 @@ func newDiscardWriter() *discardWriter {
 
 func (w *discardWriter) Header() http.Header         { return w.header }
 func (w *discardWriter) Write(p []byte) (int, error) { return len(p), nil }
-func (w *discardWriter) WriteHeader(int)             {}
+func (w *discardWriter) WriteHeader(status int)      { w.status = status }
 
 // serve runs one request through the application.
 func serve(app *App, req *http.Request, w *discardWriter) {
@@ -98,10 +99,26 @@ func serve(app *App, req *http.Request, w *discardWriter) {
 	app.ServeHTTP(w, req)
 }
 
+// mustServe checks that a benchmark is measuring the response it means to,
+// before the timed loop begins.
+//
+// It exists because a benchmark that quietly measures an error path looks
+// exactly like a fast one: the work it skips is the work being measured. That
+// mistake produced a published claim here once already.
+func mustServe(b *testing.B, app *App, req *http.Request, want int) {
+	b.Helper()
+	w := newDiscardWriter()
+	serve(app, req, w)
+	if w.status != want {
+		b.Fatalf("the benchmark serves %d, not %d; it would be measuring the wrong path", w.status, want)
+	}
+}
+
 func BenchmarkRouteStatic(b *testing.B) {
 	app := benchApp(b)
 	req := httptest.NewRequest("GET", "/api/v1/users/me/settings", nil)
 	w := newDiscardWriter()
+	mustServe(b, app, req, http.StatusOK)
 	b.ReportAllocs()
 	for b.Loop() {
 		serve(app, req, w)
@@ -112,6 +129,7 @@ func BenchmarkRouteParam(b *testing.B) {
 	app := benchApp(b)
 	req := httptest.NewRequest("GET", "/api/v1/plain/12345", nil)
 	w := newDiscardWriter()
+	mustServe(b, app, req, http.StatusOK)
 	b.ReportAllocs()
 	for b.Loop() {
 		serve(app, req, w)
@@ -122,6 +140,7 @@ func BenchmarkRouteNotFound(b *testing.B) {
 	app := benchApp(b)
 	req := httptest.NewRequest("GET", "/api/v1/nothing/here", nil)
 	w := newDiscardWriter()
+	mustServe(b, app, req, http.StatusNotFound)
 	b.ReportAllocs()
 	for b.Loop() {
 		serve(app, req, w)
@@ -132,6 +151,7 @@ func BenchmarkBindEmpty(b *testing.B) {
 	app := benchApp(b)
 	req := httptest.NewRequest("GET", "/api/v1/empty", nil)
 	w := newDiscardWriter()
+	mustServe(b, app, req, http.StatusOK)
 	b.ReportAllocs()
 	for b.Loop() {
 		serve(app, req, w)
@@ -143,6 +163,7 @@ func BenchmarkBindPathQueryHeader(b *testing.B) {
 	req := httptest.NewRequest("GET", "/api/v1/items/12345?limit=50&cursor=abcdef", nil)
 	req.Header.Set("X-Token", "a-token-value")
 	w := newDiscardWriter()
+	mustServe(b, app, req, http.StatusOK)
 	b.ReportAllocs()
 	for b.Loop() {
 		serve(app, req, w)
@@ -200,6 +221,7 @@ func BenchmarkErrorResponse(b *testing.B) {
 	app := benchApp(b)
 	req := httptest.NewRequest("GET", "/api/v1/items/12345?limit=not-a-number", nil)
 	w := newDiscardWriter()
+	mustServe(b, app, req, http.StatusUnprocessableEntity)
 	b.ReportAllocs()
 	for b.Loop() {
 		serve(app, req, w)
@@ -275,6 +297,14 @@ func BenchmarkBaselineServeMux(b *testing.B) {
 
 	req := httptest.NewRequest("GET", "/api/v1/plain/12345", nil)
 	w := newDiscardWriter()
+
+	// The baseline proves itself too, so that a comparison is never drawn
+	// against a handler that was quietly doing nothing.
+	mux.ServeHTTP(w, req)
+	if w.status != http.StatusOK {
+		b.Fatalf("the baseline serves %d, not %d", w.status, http.StatusOK)
+	}
+
 	b.ReportAllocs()
 	for b.Loop() {
 		clear(w.header)
@@ -297,17 +327,17 @@ func BenchmarkRouteParamBare(b *testing.B) {
 	}) (benchOut, error) {
 		return benchOut{ID: in.ID}, nil
 	})
+	// The middleware is dropped before the application is built, so that the
+	// handler chain is assembled without it. Rebuilding afterwards would fail,
+	// because a router cannot be mounted twice.
+	app.middleware = nil
 	if err := app.Build(); err != nil {
 		b.Fatalf("Build: %v", err)
 	}
-	// Drop the request-identifier middleware too, so the comparison is like
-	// for like with the bare mux above.
-	app.middleware = nil
-	app.buildOnce = sync.Once{}
-	app.handler = app.buildHandler()
 
 	req := httptest.NewRequest("GET", "/api/v1/plain/12345", nil)
 	w := newDiscardWriter()
+	mustServe(b, app, req, http.StatusOK)
 	b.ReportAllocs()
 	for b.Loop() {
 		serve(app, req, w)

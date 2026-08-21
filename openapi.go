@@ -790,7 +790,17 @@ func jsonFieldName(field reflect.StructField) (name string, optional bool) {
 // isWellKnown reports whether a struct type has a natural JSON representation
 // that should not be described field by field.
 func isWellKnown(t reflect.Type) bool {
-	return t == timeType || t == uuidType
+	return t == timeType || t == uuidType || isTextCoded(t)
+}
+
+// isTextCoded reports whether a type converts to and from text rather than to
+// a JSON object, which is what a type implementing both text interfaces means.
+// Such a type is a string everywhere it appears: in a parameter, where the
+// binder parses it with UnmarshalText, and in a body, where encoding/json
+// writes it with MarshalText. Describing it by walking its fields would
+// document the Go struct rather than the value on the wire.
+func isTextCoded(t reflect.Type) bool {
+	return reflect.PointerTo(t).Implements(textUnmarshaler) && t.Implements(textMarshaler)
 }
 
 // inline describes a type without hoisting it into the components section.
@@ -802,6 +812,9 @@ func (b *schemaBuilder) inline(t reflect.Type) *Schema {
 		return &Schema{Type: "string", Format: "uuid"}
 	case durationType:
 		return &Schema{Type: "string", Format: "duration", Description: "A Go duration such as 1500ms or 2h45m."}
+	}
+	if t.Kind() != reflect.String && isTextCoded(t) {
+		return &Schema{Type: "string"}
 	}
 
 	switch t.Kind() {

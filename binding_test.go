@@ -853,3 +853,41 @@ func TestHeadersNetHTTPMovesOffTheMap(t *testing.T) {
 	assertStatus(t, rec, http.StatusOK)
 	assertJSON(t, rec, `{"Host":"","Length":0,"Agent":""}`)
 }
+
+// textCoded round-trips as text rather than as a JSON object.
+type textCoded struct {
+	value string
+}
+
+func (c textCoded) MarshalText() ([]byte, error) { return []byte(c.value), nil }
+
+func (c *textCoded) UnmarshalText(text []byte) error {
+	c.value = string(text)
+	return nil
+}
+
+type textCodedIn struct {
+	Stamp textCoded `header:"X-Stamp"`
+}
+
+func TestTextCodedTypesAreDocumentedAsStrings(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/stamped", func(ctx *Context, in textCodedIn) (Empty, error) { return Empty{}, nil })
+
+	doc, err := mustBuild(t, app).Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+	schema := doc.Paths["/stamped"].Get.Parameters[0].Schema
+	if schema.Type != "string" {
+		t.Errorf("schema type = %v, want string; a type that parses from text is a string on the wire", schema.Type)
+	}
+	// Describing it by walking its fields would also have named a component
+	// for it, which would document the Go struct rather than the value.
+	if doc.Components != nil {
+		if _, named := doc.Components.Schemas["textCoded"]; named {
+			t.Error("a text-coded type was given a component of its own")
+		}
+	}
+}

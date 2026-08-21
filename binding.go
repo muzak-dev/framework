@@ -79,6 +79,7 @@ var (
 	uuidType        = reflect.TypeFor[uuid.UUID]()
 	emptyType       = reflect.TypeFor[Empty]()
 	textUnmarshaler = reflect.TypeFor[encoding.TextUnmarshaler]()
+	textMarshaler   = reflect.TypeFor[encoding.TextMarshaler]()
 )
 
 // setter writes the textual values supplied for a parameter into a struct

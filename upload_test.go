@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -750,5 +751,58 @@ func TestUploadDefaultsComeFromTheApplication(t *testing.T) {
 	// presence of an upload limit.
 	if route.maxBodySize != DefaultMaxBodySize {
 		t.Errorf("body limit = %d, want the default of %d", route.maxBodySize, DefaultMaxBodySize)
+	}
+}
+
+// loginIn is a form whose rules constrain its values without declaring them
+// required, which is what the requiredness of a form value comes from instead.
+type loginIn struct {
+	Username string `form:"username"`
+	Password string `form:"password"`
+	Next     string `form:"next" required:"false"`
+}
+
+func (in *loginIn) Validate(v *Validation) {
+	v.String(&in.Username).Trim().Lower().MinLen(2)
+	v.String(&in.Password).MinLen(8)
+}
+
+func TestFormRulesCannotClearAValueTheBinderRequires(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/login/", func(ctx *Context, in loginIn) (formOnlyOut, error) {
+		return formOnlyOut{Username: in.Username}, nil
+	})
+	built := mustBuild(t, app)
+
+	// The runtime rejects a missing password, so the document has to say the
+	// body needs one. Rules that constrain a value without declaring it
+	// required must not be read as declaring it optional.
+	rec := doRequest(t, built, uploadRequest(t, "/login/", []string{"username", "muzak"}))
+	assertStatus(t, rec, http.StatusUnprocessableEntity)
+	details := decodeError(t, rec).Error.Details
+	if len(details) != 1 || details[0].Field != "password" || details[0].Issue != "is required" {
+		t.Fatalf("details = %+v, want the missing password reported as required", details)
+	}
+
+	doc, err := built.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+	body := doc.Paths["/login/"].Post.RequestBody
+	if !body.Required {
+		t.Error("request body is documented as optional, but the route rejects one without a password")
+	}
+	schema := body.Content["application/x-www-form-urlencoded"].Schema
+	if got := fmt.Sprint(schema.Required); got != "[password username]" {
+		t.Errorf("required = %s, want the two values the binder demands", got)
+	}
+	// The rules still reach the properties they do speak for.
+	if shortest := schema.Properties["password"].MinLength; shortest == nil || *shortest != 8 {
+		t.Errorf("password minLength = %v, want 8", shortest)
+	}
+	// A value the tag made optional stays optional.
+	if slices.Contains(schema.Required, "next") {
+		t.Error("an optional form value was documented as required")
 	}
 }

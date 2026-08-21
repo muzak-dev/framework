@@ -166,12 +166,12 @@ func TestSetRequiredAddsAndRemoves(t *testing.T) {
 func TestApplyBodyConstraintsWithNothingToDo(t *testing.T) {
 	t.Parallel()
 	builder := newSchemaBuilder()
-	builder.applyBodyConstraints(&Schema{}, nil, nil)
+	builder.applyBodyConstraints(&Schema{}, nil, nil, true)
 	builder.applyBodyConstraints(&Schema{Type: "string"},
-		map[string]validate.Constraints{"a": {Required: true}}, nil)
+		map[string]validate.Constraints{"a": {Required: true}}, nil, true)
 	// A reference that names nothing resolves to nothing rather than panicking.
 	builder.applyBodyConstraints(&Schema{Ref: componentPrefix + "absent"},
-		map[string]validate.Constraints{"a": {Required: true}}, nil)
+		map[string]validate.Constraints{"a": {Required: true}}, nil, false)
 }
 
 // TestValidationWithoutAModel covers the paths a plan takes when the input type

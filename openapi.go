@@ -379,7 +379,10 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 	switch {
 	case rt.plan.multipart:
 		body := builder.multipartSchema(rt.plan)
-		builder.applyBodyConstraints(body, constraints, elements)
+		// The binder already decided which form values are required, and it
+		// enforces that whatever the rules say, so the rules may only add to
+		// the list here.
+		builder.applyBodyConstraints(body, constraints, elements, false)
 		op.RequestBody = &RequestBody{
 			Required: len(body.Required) > 0,
 			Content:  multipartContent(rt.plan, body),
@@ -389,7 +392,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		// leave the constraints on a throwaway for a mixed input, whose body is
 		// described inline rather than by reference.
 		body := builder.bodySchema(rt.plan)
-		builder.applyBodyConstraints(body, constraints, elements)
+		builder.applyBodyConstraints(body, constraints, elements, true)
 		op.RequestBody = &RequestBody{
 			Required: rt.plan.body.required,
 			Content:  map[string]MediaType{"application/json": {Schema: body}},
@@ -418,8 +421,12 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 // The schema may be a reference into components, in which case the constraints
 // land on the shared definition. That is correct: the rules belong to the type,
 // so every operation that accepts it enforces them.
-
-func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[string]validate.Constraints) {
+//
+// requiredFromRules reports whether the rules also decide which members are
+// required. That is true for a JSON body, where the only alternative is the Go
+// type's shape, and false for a form, where the binder has already decided and
+// will enforce it whatever the rules say.
+func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[string]validate.Constraints, requiredFromRules bool) {
 	if len(constraints) == 0 && len(elements) == 0 {
 		return
 	}
@@ -434,11 +441,19 @@ func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements
 		}
 		applyConstraints(property, c)
 
-		// A field the rules speak for is required exactly when they say so.
-		// Without this the document would fall back to the Go type's shape,
-		// which calls every non-pointer field required and would contradict a
-		// model that deliberately left one optional.
-		schema.Required = setRequired(schema.Required, name, c.Required)
+		switch {
+		case requiredFromRules:
+			// A JSON member the rules speak for is required exactly when they
+			// say so. Without this the document would fall back to the Go
+			// type's shape, which calls every non-pointer field required and
+			// would contradict a model that deliberately left one optional.
+			schema.Required = setRequired(schema.Required, name, c.Required)
+		case c.Required:
+			// A form value carries its own requiredness from the tag, which the
+			// binder enforces. A rule can only add to that, never take it away,
+			// or the document would promise a body the route then rejects.
+			schema.Required = setRequired(schema.Required, name, true)
+		}
 	}
 	for name, c := range elements {
 		if property, described := schema.Properties[name]; described && property.Items != nil {

@@ -406,6 +406,10 @@ func (r *Router) Handle[In, Out any](method, path string, h Handler[In, Out], op
 // free function rather than a method because it needs the same type parameters
 // the caller inferred, and keeping it separate lets every method above be a
 // one-line delegation.
+//
+// A route is recorded only once it is fully formed. A registration that fails
+// its checks reports the reason and returns without joining the router's route
+// list, so nothing downstream has to cope with a half-built Route.
 func register[In, Out any](r *Router, method, path string, h Handler[In, Out], opts []RouteOption) *Route {
 	rt := &Route{
 		Method:   method,
@@ -517,10 +521,6 @@ func (r *Router) finalize(in inherited, emit func(*Route) error, state *buildSta
 	}
 
 	for _, rt := range r.routes {
-		if rt.invoke == nil {
-			// Registration already reported why this route is unusable.
-			continue
-		}
 		if err := rt.resolve(cur); err != nil {
 			state.errs = append(state.errs, err)
 			continue

@@ -788,3 +788,30 @@ func FuzzBindHeaders(f *testing.F) {
 		}
 	})
 }
+
+// An embedded struct holding both a located parameter and a body member.
+type embInner struct {
+	Role string `query:"role"`
+	Note string `json:"note"`
+}
+type embOuter struct {
+	embInner
+	Name string `json:"name"`
+}
+type embOut struct {
+	Role string `json:"role"`
+	Note string `json:"note"`
+	Name string `json:"name"`
+}
+
+func TestBodyCannotOverwriteEmbeddedLocatedField(t *testing.T) {
+	app := New(quietOptions())
+	app.Post("/x", func(ctx *Context, in embOuter) (embOut, error) {
+		return embOut{Role: in.Role, Note: in.Note, Name: in.Name}, nil
+	}, AllowUnknownFields())
+	mustBuild(t, app)
+
+	rec := do(t, app, "POST", "/x?role=viewer", `{"note":"n","name":"x","Role":"admin"}`)
+	assertStatus(t, rec, http.StatusOK)
+	assertJSON(t, rec, `{"role":"viewer","note":"n","name":"x"}`)
+}

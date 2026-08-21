@@ -161,6 +161,9 @@ func isReadMethod(method string) bool {
 func newNonce() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
+		// coverage: crypto/rand.Read does not fail on any supported platform,
+		// and the caller turns a failure into a 500 rather than serving the
+		// page without a usable policy.
 		return "", err
 	}
 	return base64.RawStdEncoding.EncodeToString(buf), nil

@@ -102,9 +102,12 @@ func orDefaultDuration(v, fallback time.Duration) time.Duration {
 
 // serverRunner owns the http.Server and the state needed to shut it down
 // exactly once, no matter which of the run methods started it.
+//
+// Every field is written once, before the runner is published through
+// App.server, and only read afterwards. The atomic store that publishes it
+// supplies the happens-before edge another goroutine needs to read them.
 type serverRunner struct {
 	http     *http.Server
-	mu       sync.Mutex
 	listener net.Listener
 	done     chan struct{}
 	stopOnce sync.Once
@@ -185,18 +188,18 @@ func (a *App) listen(ctx context.Context) (net.Listener, error) {
 	if err != nil {
 		return nil, errors.Join(err, a.StopLifecycle(context.WithoutCancel(ctx)))
 	}
-	a.server = &serverRunner{
+	a.server.Store(&serverRunner{
 		http:     a.newServer(),
 		listener: listener,
 		done:     make(chan struct{}),
-	}
+	})
 	return listener, nil
 }
 
 // serve runs the accept loop until the context is cancelled or the server
 // stops on its own.
 func (a *App) serve(ctx context.Context, listener net.Listener) error {
-	runner := a.server
+	runner := a.server.Load()
 	scheme := "http"
 	if a.servesTLS() {
 		scheme = "https"
@@ -247,7 +250,7 @@ func (a *App) servesTLS() bool {
 // only the first call does the work. Calling it on a server that was never
 // started returns nil.
 func (a *App) Shutdown(ctx context.Context) error {
-	runner := a.server
+	runner := a.server.Load()
 	if runner == nil {
 		return nil
 	}
@@ -282,13 +285,8 @@ func (a *App) Shutdown(ctx context.Context) error {
 // that asked for ":0" discovers the port that was assigned. It returns an
 // empty string before the server has started.
 func (a *App) Addr() string {
-	runner := a.server
-	if runner == nil {
-		return ""
-	}
-	runner.mu.Lock()
-	defer runner.mu.Unlock()
-	if runner.listener == nil {
+	runner := a.server.Load()
+	if runner == nil || runner.listener == nil {
 		return ""
 	}
 	return runner.listener.Addr().String()

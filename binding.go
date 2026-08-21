@@ -165,7 +165,12 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 
 	if len(bodyFields) > 0 {
 		plan.body = &bodyPlan{
-			direct:   len(bodyFields) == totalFields(t),
+			// Decoding straight into the input value is only safe when the
+			// input has no located fields at all. Counting body fields against
+			// the field count is not enough: an embedded struct holding both a
+			// located parameter and a body member counts as one field on each
+			// side, which would let a crafted body reach the located field.
+			direct:   len(plan.params) == 0 && len(bodyFields) == totalFields(t),
 			fields:   bodyFields,
 			required: true,
 		}

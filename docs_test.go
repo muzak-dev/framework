@@ -280,3 +280,42 @@ func TestNewNonce(t *testing.T) {
 		seen[nonce] = true
 	}
 }
+
+// TestDocsAreOmittedWhenTheDocumentCannotBeRendered covers the guard that
+// leaves the documentation routes unregistered rather than serving a broken
+// page.
+//
+// The document is built from Badele's own types and cannot normally fail to
+// render, so the test poisons the generated schema with a value JSON has no
+// representation for.
+func TestDocsAreOmittedWhenTheDocumentCannotBeRendered(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger(t)
+	opts := quietOptions()
+	opts.Logger = logger
+
+	app := New(opts)
+	app.Get("/x", okHandler)
+	mustBuild(t, app)
+
+	app.spec.Components = &Components{Schemas: map[string]*Schema{
+		"poisoned": {Default: make(chan int)},
+	}}
+
+	if assets := app.prepareDocs(); assets != nil {
+		t.Fatal("prepareDocs returned assets for a document that cannot be rendered")
+	}
+	if !strings.Contains(logs.String(), "could not be rendered") {
+		t.Errorf("the failure was not reported:\n%s", logs.String())
+	}
+
+	// With no assets, the documentation paths fall through to the routes.
+	handler := app.withDocs(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/openapi.json", nil))
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("status = %d, want the request to pass through to the next handler", rec.Code)
+	}
+}

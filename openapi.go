@@ -415,6 +415,10 @@ func (b *schemaBuilder) bodySchema(plan *bindPlan) *Schema {
 		field := plan.typ.FieldByIndex(index)
 		name, optional := jsonFieldName(field)
 		if name == "" {
+			// coverage: body field indices come from the binding plan, which
+			// already excludes located fields and those tagged "-", so
+			// jsonFieldName cannot return an empty name here. The guard keeps a
+			// future change to that plan from emitting a nameless property.
 			continue
 		}
 		schema.Properties[name] = b.describeField(field)

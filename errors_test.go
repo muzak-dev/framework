@@ -177,9 +177,9 @@ func TestDefaultErrorRenderer(t *testing.T) {
 		notInMsg string
 	}{
 		{
-			name:    "validation error",
-			err:     &ValidationError{Details: []ErrorDetail{{Field: "a", Location: "query", Issue: "is required"}}},
-			status:  422, code: CodeValidationError, message: validationMessage, details: 1,
+			name:   "validation error",
+			err:    &ValidationError{Details: []ErrorDetail{{Field: "a", Location: "query", Issue: "is required"}}},
+			status: 422, code: CodeValidationError, message: validationMessage, details: 1,
 		},
 		{
 			name:   "http error",

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"badele/internal/radix"
 )
@@ -143,7 +144,11 @@ type App struct {
 	handler   http.Handler
 
 	ctxPool sync.Pool
-	server  *serverRunner
+
+	// server is stored atomically because Addr and Shutdown are documented to
+	// be callable from a different goroutine than the one running the server,
+	// which is exactly what a caller asking for port ":0" has to do.
+	server atomic.Pointer[serverRunner]
 }
 
 // buildState collects everything discovered while walking the router tree, so
@@ -484,6 +489,10 @@ func (a *App) run(c *Context, route *Route) {
 	c.route = route
 	c.status = route.Status
 	if err := unescapeParams(&c.params); err != nil {
+		// coverage: net/http normalises the request URL before a handler runs,
+		// so EscapedPath never yields an escape that PathUnescape rejects. The
+		// branch guards against a caller driving dispatch directly, and the
+		// decoding itself is covered by TestUnescapeParams.
 		a.fail(c, err)
 		return
 	}

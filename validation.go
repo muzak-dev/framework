@@ -62,9 +62,13 @@ type TimeField interface {
 // to its own fields. It is not safe for concurrent use and must not be retained
 // after Validate returns.
 type Validation struct {
-	plan     *validationPlan
-	base     uintptr
-	size     uintptr
+	plan *validationPlan
+	base uintptr
+	size uintptr
+	// value is the model being validated. It is kept so that a nested model
+	// reached through a pointer field can be traced back to the field holding
+	// it, which its address alone cannot reveal.
+	value    reflect.Value
 	prefix   string
 	rules    []validate.Evaluator
 	rejected []rejection
@@ -183,15 +187,43 @@ func (v *Validation) Nested(model Validatable) {
 		return
 	}
 
-	name, _ := v.describe(model, "")
 	child := &Validation{
 		plan:   planForType(pointer.Type().Elem()),
 		base:   pointer.Pointer(),
 		size:   pointer.Type().Elem().Size(),
-		prefix: joinPath(v.prefix, name),
+		value:  pointer.Elem(),
+		prefix: joinPath(v.prefix, v.nameOfNested(model, pointer)),
 	}
 	model.Validate(child)
 	v.children = append(v.children, child)
+}
+
+// nameOfNested works out which field of this model holds a nested one.
+//
+// A model embedded by value sits inside its parent, so its address resolves
+// through the offset map like any other field. A model held behind a pointer
+// does not: its address is wherever it was allocated, which says nothing about
+// the field pointing at it. For that case the parent's pointer fields are
+// compared against the address, which is a short scan over a handful of fields
+// and only happens when the direct lookup fails.
+func (v *Validation) nameOfNested(model Validatable, pointer reflect.Value) string {
+	if origin, found := v.originOf(model); found {
+		return origin.name
+	}
+	if !v.value.IsValid() || v.value.Kind() != reflect.Struct {
+		return ""
+	}
+	address := pointer.Pointer()
+	for i := range v.value.NumField() {
+		field := v.value.Field(i)
+		if field.Kind() != reflect.Pointer || field.IsNil() || field.Pointer() != address {
+			continue
+		}
+		if origin, found := v.plan.fields[v.value.Type().Field(i).Offset]; found {
+			return origin.name
+		}
+	}
+	return ""
 }
 
 // details turns everything collected into error details, naming each field the
@@ -380,7 +412,7 @@ func (p *bindPlan) describeConstraints() map[string]validate.Constraints {
 		return nil
 	}
 
-	v := &Validation{plan: p.validation, base: scratch.Pointer(), size: p.typ.Size()}
+	v := &Validation{plan: p.validation, base: scratch.Pointer(), size: p.typ.Size(), value: scratch.Elem()}
 	model.Validate(v)
 
 	out := make(map[string]validate.Constraints, len(v.rules))
@@ -408,7 +440,7 @@ func (p *bindPlan) elementConstraints() map[string]validate.Constraints {
 		return nil
 	}
 
-	v := &Validation{plan: p.validation, base: scratch.Pointer(), size: p.typ.Size()}
+	v := &Validation{plan: p.validation, base: scratch.Pointer(), size: p.typ.Size(), value: scratch.Elem()}
 	model.Validate(v)
 
 	out := map[string]validate.Constraints{}
@@ -463,9 +495,10 @@ func (p *bindPlan) runValidation(dst reflect.Value, failed map[string]bool) []Er
 	}
 
 	v := &Validation{
-		plan: p.validation,
-		base: dst.Addr().Pointer(),
-		size: p.typ.Size(),
+		plan:  p.validation,
+		base:  dst.Addr().Pointer(),
+		size:  p.typ.Size(),
+		value: dst,
 	}
 	model.Validate(v)
 

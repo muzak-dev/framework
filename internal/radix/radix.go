@@ -47,8 +47,8 @@ func (p *Params) At(i int) (name, value string) {
 }
 
 // Get returns the value captured for the named parameter and reports whether
-// that parameter was present. When a name was captured more than once — which
-// the tree prevents at insertion time — the first value wins.
+// that parameter was present. When a name was captured more than once (which
+// the tree prevents at insertion time), the first value wins.
 func (p *Params) Get(name string) (string, bool) {
 	for i, n := range p.names {
 		if n == name {
@@ -56,6 +56,13 @@ func (p *Params) Get(name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// SetValue replaces the value captured at index i, which the router uses to
+// store the percent-decoded form of a parameter after matching against the
+// escaped path. It panics if i is out of range.
+func (p *Params) SetValue(i int, value string) {
+	p.values[i] = value
 }
 
 // Reset discards every captured parameter while keeping the allocated backing
@@ -80,7 +87,7 @@ func (p *Params) truncate(n int) {
 
 // node is a single segment position in the trie. Exactly one of the three
 // child kinds may be taken for a given segment, but a node may own all three
-// simultaneously — that is what makes backtracking necessary.
+// simultaneously, and that is what makes backtracking necessary.
 type node[T any] struct {
 	static       map[string]*node[T]
 	param        *node[T]

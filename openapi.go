@@ -539,6 +539,12 @@ func (b *schemaBuilder) collectProperties(t reflect.Type, schema *Schema) {
 // default tags.
 func (b *schemaBuilder) describeField(field reflect.StructField) *Schema {
 	schema := b.schemaFor(field.Type)
+	if field.Type.Kind() == reflect.Pointer {
+		// schemaFor looks through a pointer so that T and *T share one
+		// component. At field level the pointer still means something, though:
+		// the member may be null, and the schema has to say so.
+		schema = nullable(schema)
+	}
 	doc := field.Tag.Get(tagDoc)
 	def, hasDef := field.Tag.Lookup(tagDefault)
 	if doc == "" && !hasDef {

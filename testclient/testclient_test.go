@@ -238,6 +238,16 @@ func TestQueryAndBodyOptions(t *testing.T) {
 	// A path that already carries a query string is extended, not replaced.
 	client.Get("/whoami?name=morty").AssertJSON(`{"name":"morty"}`)
 
+	// The separator is chosen to suit the path, so an option added to a path
+	// that already has a query string joins it rather than starting a new one.
+	client.Get("/whoami?name=summer", testclient.Query("ignored", "1")).
+		AssertJSON(`{"name":"summer"}`)
+
+	// A value the encoder cannot handle is reported rather than sent.
+	if err := testclient.ApplyJSON(make(chan int)); err == nil {
+		t.Error("an unencodable body was accepted")
+	}
+
 	client.Post("/items/", testclient.Body("application/json",
 		strings.NewReader(`{"id":"raw","title":"Raw","description":"d"}`))).
 		AssertStatus(http.StatusOK)

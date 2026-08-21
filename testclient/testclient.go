@@ -254,6 +254,9 @@ func (c *Client) Do(method, path string, opts ...RequestOption) *Response {
 	c.tb.Helper()
 	req := &request{header: c.headers.Clone(), query: url.Values{}}
 	if req.header == nil {
+		// coverage: New always supplies a non-nil header set, and Clone only
+		// returns nil for a nil one, so this guards against a Client built by
+		// some future path rather than by New.
 		req.header = http.Header{}
 	}
 	for _, opt := range opts {

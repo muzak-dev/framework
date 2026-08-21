@@ -88,9 +88,12 @@ type setter func(dst reflect.Value, raw []string) error
 
 // paramBinder binds one struct field from one request parameter.
 type paramBinder struct {
-	index    []int
-	source   paramSource
-	name     string
+	index  []int
+	source paramSource
+	name   string
+	// key is the canonical form of name for a header binder, resolved once
+	// here so that a request pays no canonicalization.
+	key      string
 	typ      reflect.Type
 	doc      string
 	required bool
@@ -350,6 +353,9 @@ func newParamBinder(f reflect.StructField, index []int, source paramSource, name
 		isSlice: f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() != reflect.Uint8,
 		set:     set,
 	}
+	if source == srcHeader {
+		b.key = http.CanonicalHeaderKey(name)
+	}
 	b.defValue, b.hasDef = f.Tag.Lookup(tagDefault)
 	// A path parameter is always present when the route matched, so it is
 	// required by definition. A form value is body content, so it is required
@@ -575,7 +581,24 @@ func (b *paramBinder) lookup(c *Context, query url.Values) ([]string, bool) {
 		}
 		return v, true
 	case srcHeader:
-		v, ok := c.r.Header[http.CanonicalHeaderKey(b.name)]
+		// net/http lifts two headers out of the map and onto the request
+		// itself, so a binder that read only the map would report them absent
+		// on every request that carried them.
+		switch b.key {
+		case "Host":
+			if c.r.Host == "" {
+				return nil, false
+			}
+			return []string{c.r.Host}, true
+		case "Content-Length":
+			// A length of zero cannot be told from an absent header once
+			// net/http has parsed the request, so it is reported as sent.
+			if c.r.ContentLength < 0 {
+				return nil, false
+			}
+			return []string{strconv.FormatInt(c.r.ContentLength, 10)}, true
+		}
+		v, ok := c.r.Header[b.key]
 		if !ok || len(v) == 0 {
 			return nil, false
 		}

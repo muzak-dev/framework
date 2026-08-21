@@ -820,3 +820,36 @@ func TestBodyCannotOverwriteEmbeddedLocatedField(t *testing.T) {
 	assertStatus(t, rec, http.StatusOK)
 	assertJSON(t, rec, `{"role":"viewer","note":"n","name":"x"}`)
 }
+
+// specialHeaders binds the two headers net/http moves off the header map.
+type specialHeaders struct {
+	Host   string `header:"Host"`
+	Length int64  `header:"Content-Length"`
+	Agent  string `header:"User-Agent"`
+}
+
+func TestHeadersNetHTTPMovesOffTheMap(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/echo", func(ctx *Context, in specialHeaders) (specialHeaders, error) {
+		return in, nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.example.test/echo", strings.NewReader("hello"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "probe/1")
+	rec := doRequest(t, mustBuild(t, app), req)
+	assertStatus(t, rec, http.StatusOK)
+	// Host and Content-Length live on the request rather than in its header
+	// map, so a binder that read only the map would report both as absent.
+	assertJSON(t, rec, `{"Host":"api.example.test","Length":5,"Agent":"probe/1"}`)
+
+	// Neither is always knowable. A request with no authority and a body of
+	// unannounced length leaves both absent rather than reporting a zero.
+	req = httptest.NewRequest(http.MethodPost, "http://api.example.test/echo", strings.NewReader("hello"))
+	req.Host = ""
+	req.ContentLength = -1
+	rec = doRequest(t, mustBuild(t, app), req)
+	assertStatus(t, rec, http.StatusOK)
+	assertJSON(t, rec, `{"Host":"","Length":0,"Agent":""}`)
+}

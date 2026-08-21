@@ -59,6 +59,7 @@ func main() {
 	app.Include(routers.Users())
 	app.Include(routers.Items())
 	app.Include(routers.Meta())
+	app.Include(routers.Uploads())
 
 	// The admin router is written without a prefix or a guard. Both are applied
 	// here, which is what keeps that router reusable and puts the security

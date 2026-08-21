@@ -83,6 +83,42 @@
 // that should outlive a request are published with [WithSingleton], and those
 // that need opening and closing implement [Lifecycle].
 //
+// # Uploads and forms
+//
+// A field tagged `file:"name"` is bound from a multipart upload, and its Go
+// type decides what the handler is handed. [File] carries the metadata and
+// leaves the content where it is, which is what a large upload wants, while
+// []byte reads it straight into memory:
+//
+//	type UploadFileIn struct {
+//		File badele.File `file:"file" doc:"A file read as an upload"`
+//	}
+//
+//	r.Post("/uploadfile/", func(ctx *badele.Context, in UploadFileIn) (UploadFileOut, error) {
+//		return UploadFileOut{Filename: in.File.Filename}, nil
+//	})
+//
+// Declaring the field as []badele.File, or as [][]byte, accepts every file
+// sent under the name instead of one:
+//
+//	type MultiUploadIn struct {
+//		Files []badele.File `file:"files"`
+//	}
+//
+// A field tagged `form:"name"` is bound from a form value in the same body,
+// converted by the same setters that convert a query parameter. Files and
+// form values are body content, so both are required unless the field carries
+// `required:"false"` or a default. Two limits bound what a route accepts:
+// [MaxUploadSize] for the whole body and [MaxFileSize] for any single file.
+//
+// A handler that returns [HTML] writes an HTML document instead of JSON, which
+// is what serving an upload form from the same application takes:
+//
+//	r.Get("/", func(ctx *badele.Context, _ badele.Empty) (badele.HTML, error) {
+//		return badele.HTML(`<form action="/files/" enctype="multipart/form-data" method="post">` +
+//			`<input name="files" type="file" multiple><input type="submit"></form>`), nil
+//	})
+//
 // # What is generated
 //
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs
@@ -119,12 +155,12 @@
 // # Defaults worth knowing
 //
 // Badele starts from settings that are safe rather than permissive. Every
-// listener timeout is non-zero, request bodies are capped at one mebibyte,
-// unknown JSON members are rejected, duplicate members and invalid UTF-8 are
-// refused by encoding/json/v2, CORS denies every cross-origin request until it
-// is configured, and a panic becomes a generic 500 with the stack recorded
-// only in the log. Each of these can be relaxed deliberately; none of them is
-// relaxed by omission.
+// listener timeout is non-zero, request bodies are capped at one mebibyte and
+// uploads at 32, unknown JSON members are rejected, duplicate members and
+// invalid UTF-8 are refused by encoding/json/v2, CORS denies every
+// cross-origin request until it is configured, and a panic becomes a generic
+// 500 with the stack recorded only in the log. Each of these can be relaxed
+// deliberately; none of them is relaxed by omission.
 //
 // # Testing
 //

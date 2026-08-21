@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"badele/validate"
 )
 
 // OpenAPIVersion is the specification version Badele emits.
@@ -245,6 +247,21 @@ type Schema struct {
 	Default any `json:"default,omitzero"`
 	// Enum lists the permitted values.
 	Enum []any `json:"enum,omitzero"`
+	// Pattern is a regular expression a string must match.
+	Pattern string `json:"pattern,omitzero"`
+	// MinLength and MaxLength bound a string's length.
+	MinLength *int `json:"minLength,omitzero"`
+	MaxLength *int `json:"maxLength,omitzero"`
+	// Minimum and Maximum bound a number's value.
+	Minimum *float64 `json:"minimum,omitzero"`
+	Maximum *float64 `json:"maximum,omitzero"`
+	// MultipleOf requires a number to divide evenly by this value.
+	MultipleOf *float64 `json:"multipleOf,omitzero"`
+	// MinItems and MaxItems bound an array's length.
+	MinItems *int `json:"minItems,omitzero"`
+	MaxItems *int `json:"maxItems,omitzero"`
+	// UniqueItems requires an array's elements to differ.
+	UniqueItems bool `json:"uniqueItems,omitzero"`
 	// Deprecated marks the value as no longer recommended.
 	Deprecated bool `json:"deprecated,omitzero"`
 }
@@ -341,15 +358,33 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		Responses:   make(map[string]*Response, 2+len(rt.responses)),
 	}
 
+	// Validation rules describe themselves, so the document carries the limits
+	// the code actually enforces rather than a prose restatement of them.
+	constraints := rt.constraintsForDocs()
+	elements := rt.elementConstraintsForDocs()
+
 	for i := range rt.plan.params {
-		op.Parameters = append(op.Parameters, builder.parameterFor(&rt.plan.params[i]))
+		parameter := builder.parameterFor(&rt.plan.params[i])
+		if c, described := constraints[parameter.Name]; described {
+			applyConstraints(parameter.Schema, c)
+			if c.Required {
+				parameter.Required = true
+			}
+		}
+		if c, described := elements[parameter.Name]; described && parameter.Schema.Items != nil {
+			applyConstraints(parameter.Schema.Items, c)
+		}
+		op.Parameters = append(op.Parameters, parameter)
 	}
 	if rt.plan.body != nil {
+		// The schema is built once and then annotated. Building it twice would
+		// leave the constraints on a throwaway for a mixed input, whose body is
+		// described inline rather than by reference.
+		body := builder.bodySchema(rt.plan)
+		builder.applyBodyConstraints(body, constraints, elements)
 		op.RequestBody = &RequestBody{
 			Required: rt.plan.body.required,
-			Content: map[string]MediaType{
-				"application/json": {Schema: builder.bodySchema(rt.plan)},
-			},
+			Content:  map[string]MediaType{"application/json": {Schema: body}},
 		}
 	}
 
@@ -367,6 +402,109 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		op.Responses["default"] = builder.errorResponse("An unexpected error occurred.")
 	}
 	return op
+}
+
+// applyBodyConstraints writes a model's validation rules onto the schema its
+// body was described with.
+//
+// The schema may be a reference into components, in which case the constraints
+// land on the shared definition. That is correct: the rules belong to the type,
+// so every operation that accepts it enforces them.
+func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[string]validate.Constraints) {
+	if len(constraints) == 0 && len(elements) == 0 {
+		return
+	}
+	schema := b.resolve(body)
+	if schema == nil || schema.Properties == nil {
+		return
+	}
+	for name, c := range constraints {
+		property, described := schema.Properties[name]
+		if !described {
+			continue
+		}
+		applyConstraints(property, c)
+
+		// A field the rules speak for is required exactly when they say so.
+		// Without this the document would fall back to the Go type's shape,
+		// which calls every non-pointer field required and would contradict a
+		// model that deliberately left one optional.
+		schema.Required = setRequired(schema.Required, name, c.Required)
+	}
+	for name, c := range elements {
+		if property, described := schema.Properties[name]; described && property.Items != nil {
+			applyConstraints(property.Items, c)
+		}
+	}
+}
+
+// resolve follows a reference back to the schema it names, so that constraints
+// can be written onto the definition rather than onto the pointer to it.
+func (b *schemaBuilder) resolve(schema *Schema) *Schema {
+	if schema == nil || schema.Ref == "" {
+		return schema
+	}
+	return b.schemas[strings.TrimPrefix(schema.Ref, componentPrefix)]
+}
+
+// setRequired adds or removes a name from a schema's required list, keeping it
+// sorted so the generated document stays reproducible.
+func setRequired(required []string, name string, want bool) []string {
+	present := slices.Contains(required, name)
+	switch {
+	case want && !present:
+		required = append(required, name)
+		slices.Sort(required)
+	case !want && present:
+		required = slices.DeleteFunc(required, func(candidate string) bool {
+			return candidate == name
+		})
+	}
+	return required
+}
+
+// applyConstraints writes what a rule set demands onto a schema.
+//
+// A constraint the rules do not mention is left alone, so a format already
+// derived from the Go type, such as date-time for a time.Time, survives a rule
+// set that says nothing about it.
+func applyConstraints(schema *Schema, c validate.Constraints) {
+	if schema == nil {
+		return
+	}
+	if c.Format != "" {
+		schema.Format = c.Format
+	}
+	if c.Pattern != "" {
+		schema.Pattern = c.Pattern
+	}
+	if c.MinLength != nil {
+		schema.MinLength = c.MinLength
+	}
+	if c.MaxLength != nil {
+		schema.MaxLength = c.MaxLength
+	}
+	if c.Minimum != nil {
+		schema.Minimum = c.Minimum
+	}
+	if c.Maximum != nil {
+		schema.Maximum = c.Maximum
+	}
+	if c.MultipleOf != nil {
+		schema.MultipleOf = c.MultipleOf
+	}
+	if c.MinItems != nil {
+		schema.MinItems = c.MinItems
+	}
+	if c.MaxItems != nil {
+		schema.MaxItems = c.MaxItems
+	}
+	if c.UniqueItems {
+		schema.UniqueItems = true
+	}
+	if len(c.Enum) > 0 {
+		schema.Enum = c.Enum
+	}
 }
 
 // schemaBuilder turns Go types into JSON schemas, hoisting every named struct

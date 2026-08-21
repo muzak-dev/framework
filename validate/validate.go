@@ -48,6 +48,20 @@ type Constraints struct {
 	Enum []any
 }
 
+// IsZero reports whether a set of constraints says nothing at all, which is
+// what a rule set of nothing but Must rules produces.
+//
+// Constraints holds a slice, so it cannot be compared with ==; this is the
+// comparison callers actually want anyway, since a nil Enum and an empty one
+// mean the same thing.
+func (c Constraints) IsZero() bool {
+	return !c.Required && c.Format == "" && c.Pattern == "" &&
+		c.MinLength == nil && c.MaxLength == nil &&
+		c.Minimum == nil && c.Maximum == nil && c.MultipleOf == nil &&
+		c.MinItems == nil && c.MaxItems == nil &&
+		!c.UniqueItems && len(c.Enum) == 0
+}
+
 // Evaluator is a rule set bound to a field, ready to run.
 //
 // Badele collects one per field during a call to the model's Validate method

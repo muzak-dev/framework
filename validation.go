@@ -361,6 +361,91 @@ func offsetOf(t reflect.Type, index []int) (uintptr, bool) {
 	return offset, true
 }
 
+// describeConstraints reports what a model's rules demand of each field, keyed
+// by the name the field is reported under.
+//
+// The rules are collected by running Validate once against a zero value, which
+// is safe because declaring a rule set has no effect beyond recording it. Only
+// the rules that map onto JSON Schema keywords contribute; a Must rule is
+// opaque by nature and adds nothing.
+func (p *bindPlan) describeConstraints() map[string]validate.Constraints {
+	if p.validation == nil {
+		return nil
+	}
+	scratch := reflect.New(p.typ)
+	model, ok := scratch.Interface().(Validatable)
+	if !ok {
+		// coverage: the plan only carries a validation plan for a type that
+		// implements Validatable, which is checked when the route is compiled.
+		return nil
+	}
+
+	v := &Validation{plan: p.validation, base: scratch.Pointer(), size: p.typ.Size()}
+	model.Validate(v)
+
+	out := make(map[string]validate.Constraints, len(v.rules))
+	for _, rules := range v.rules {
+		name, _ := v.describe(rules.Target(), rules.Label())
+		if name == "" {
+			continue
+		}
+		out[name] = rules.Describe()
+	}
+	return out
+}
+
+// elementConstraints reports the rules a model applies to the elements of each
+// of its collections, so an array's items can be described as precisely as the
+// array itself.
+func (p *bindPlan) elementConstraints() map[string]validate.Constraints {
+	if p.validation == nil {
+		return nil
+	}
+	scratch := reflect.New(p.typ)
+	model, ok := scratch.Interface().(Validatable)
+	if !ok {
+		// coverage: guarded by the same check as describeConstraints.
+		return nil
+	}
+
+	v := &Validation{plan: p.validation, base: scratch.Pointer(), size: p.typ.Size()}
+	model.Validate(v)
+
+	out := map[string]validate.Constraints{}
+	for _, rules := range v.rules {
+		describer, ok := rules.(interface{ DescribeElement() validate.Constraints })
+		if !ok {
+			continue
+		}
+		name, _ := v.describe(rules.Target(), rules.Label())
+		if name == "" {
+			continue
+		}
+		if constraints := describer.DescribeElement(); !constraints.IsZero() {
+			out[name] = constraints
+		}
+	}
+	return out
+}
+
+// constraintsForDocs reports the field constraints for the OpenAPI document,
+// or nothing when the route skips validation, because a document should
+// describe what the route actually enforces.
+func (rt *Route) constraintsForDocs() map[string]validate.Constraints {
+	if rt.skipValidation {
+		return nil
+	}
+	return rt.plan.describeConstraints()
+}
+
+// elementConstraintsForDocs reports the constraints on collection elements.
+func (rt *Route) elementConstraintsForDocs() map[string]validate.Constraints {
+	if rt.skipValidation {
+		return nil
+	}
+	return rt.plan.elementConstraints()
+}
+
 // runValidation validates a bound model and returns what failed.
 //
 // Fields that already failed to bind are left alone: telling a client that

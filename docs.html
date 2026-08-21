@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>__TITLE__</title>
+<style nonce="__NONCE__">
+:root{
+  --bg:#fbfbfd; --panel:#ffffff; --ink:#16181d; --muted:#666d7a; --line:#e4e6ec;
+  --accent:#3b5bdb; --accent-soft:#eef1fd;
+  --get:#1c7ed6; --post:#2f9e44; --put:#f08c00; --patch:#ae3ec9; --delete:#e03131; --other:#5c5f66;
+  --code-bg:#f4f5f8; --req:#e03131;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0f1115; --panel:#161920; --ink:#e6e8ee; --muted:#949ba8; --line:#272b35;
+    --accent:#748ffc; --accent-soft:#1b2138;
+    --get:#4dabf7; --post:#51cf66; --put:#ffa94d; --patch:#da77f2; --delete:#ff6b6b; --other:#909296;
+    --code-bg:#1c1f27; --req:#ff8787;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.55}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:var(--mono);font-size:12.5px}
+.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}
+aside{border-right:1px solid var(--line);background:var(--panel);position:sticky;top:0;height:100vh;overflow-y:auto;padding:20px 0}
+.brand{padding:0 20px 16px;border-bottom:1px solid var(--line);margin-bottom:12px}
+.brand h1{font-size:16px;margin:0 0 2px}
+.brand .ver{color:var(--muted);font-size:12px;font-family:var(--mono)}
+.brand .spec{display:inline-block;margin-top:8px;font-size:12px}
+.filter{padding:0 16px 12px}
+.filter input{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);font:inherit;font-size:13px}
+.filter input:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.group{padding:10px 16px 2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+nav button{display:flex;gap:8px;align-items:center;width:100%;text-align:left;background:none;border:0;color:var(--ink);
+  padding:5px 16px;cursor:pointer;font:inherit;font-size:13px;border-left:2px solid transparent}
+nav button:hover{background:var(--accent-soft)}
+nav button[aria-current="true"]{background:var(--accent-soft);border-left-color:var(--accent)}
+nav button .path{font-family:var(--mono);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.verb{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.04em;padding:2px 5px;border-radius:4px;
+  color:#fff;flex:none;min-width:46px;text-align:center}
+.verb.get{background:var(--get)}.verb.post{background:var(--post)}.verb.put{background:var(--put)}
+.verb.patch{background:var(--patch)}.verb.delete{background:var(--delete)}.verb.head,.verb.options{background:var(--other)}
+main{padding:28px 34px 80px;max-width:960px}
+.desc{color:var(--muted);margin:0 0 24px}
+section.op{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin-bottom:18px;scroll-margin-top:16px}
+section.op h2{margin:0;font-size:15px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+section.op h2 .path{font-family:var(--mono);font-size:13.5px;word-break:break-all}
+.summary{margin:8px 0 0;color:var(--ink)}
+.opdesc{margin:6px 0 0;color:var(--muted)}
+.meta{margin-top:6px;color:var(--muted);font-size:12px;font-family:var(--mono)}
+.dep{background:var(--put);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;font-weight:700}
+h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:20px 0 8px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);font-weight:600}
+td.name{font-family:var(--mono);white-space:nowrap}
+td.type{font-family:var(--mono);color:var(--muted);white-space:nowrap}
+.req{color:var(--req);font-weight:700}
+.in{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:1px 5px;margin-left:6px}
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;margin:0}
+.status{display:inline-block;font-family:var(--mono);font-weight:700;padding:2px 7px;border-radius:5px;font-size:12px;margin-right:8px}
+.s2{background:rgba(47,158,68,.16);color:var(--post)}
+.s4{background:rgba(240,140,0,.16);color:var(--put)}
+.s5{background:rgba(224,49,49,.16);color:var(--delete)}
+.sd{background:var(--code-bg);color:var(--muted)}
+.resp{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px}
+.resp .rhead{display:flex;align-items:baseline;gap:4px;flex-wrap:wrap}
+.resp .rdesc{color:var(--muted)}
+details>summary{cursor:pointer;color:var(--accent);font-size:12px;margin-top:8px;list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"Show schema";}
+details[open]>summary::before{content:"Hide schema";}
+.empty{color:var(--muted);font-style:italic}
+.err{border:1px solid var(--delete);border-radius:8px;padding:14px;color:var(--delete)}
+@media (max-width:840px){.layout{grid-template-columns:1fr}aside{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}main{padding:20px}}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <h1 id="api-title">Loading</h1>
+      <div class="ver" id="api-version"></div>
+      <a class="spec" id="spec-link" href="__SPEC__">OpenAPI document</a>
+    </div>
+    <div class="filter"><input id="filter" type="search" placeholder="Filter operations" autocomplete="off" spellcheck="false"></div>
+    <nav id="nav"></nav>
+  </aside>
+  <main>
+    <p class="desc" id="api-desc"></p>
+    <div id="ops"></div>
+  </main>
+</div>
+<script nonce="__NONCE__">
+(function () {
+  "use strict";
+  var SPEC_URL = document.getElementById("spec-link").getAttribute("href");
+  var VERBS = ["get", "post", "put", "patch", "delete", "head", "options"];
+  var spec = null;
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
+  }
+
+  // Resolve a local $ref against the loaded document. Only same-document
+  // pointers are followed; anything else is shown as an opaque reference.
+  function deref(schema, seen) {
+    if (!schema || typeof schema.$ref !== "string") return schema;
+    if (schema.$ref.indexOf("#/components/schemas/") !== 0) return schema;
+    var name = schema.$ref.slice("#/components/schemas/".length);
+    if (seen && seen.indexOf(name) >= 0) return { type: "object", "x-circular": name };
+    var target = spec.components && spec.components.schemas && spec.components.schemas[name];
+    return target ? target : schema;
+  }
+
+  function refName(schema) {
+    if (schema && typeof schema.$ref === "string") {
+      return schema.$ref.split("/").pop();
+    }
+    return null;
+  }
+
+  function typeName(schema) {
+    if (!schema) return "any";
+    var named = refName(schema);
+    if (named) return named;
+    if (Array.isArray(schema.anyOf)) {
+      return schema.anyOf.map(typeName).join(" or ");
+    }
+    var t = schema.type;
+    if (Array.isArray(t)) t = t.join(" or ");
+    if (t === "array") return typeName(schema.items) + "[]";
+    if (!t) return "any";
+    return schema.format ? t + " (" + schema.format + ")" : t;
+  }
+
+  // Build a JSON example from a schema so the reader sees the shape rather
+  // than a nest of keywords.
+  function sample(schema, seen) {
+    seen = seen || [];
+    var named = refName(schema);
+    if (named) {
+      if (seen.indexOf(named) >= 0) return "<" + named + ">";
+      seen = seen.concat([named]);
+    }
+    var s = deref(schema, seen);
+    if (!s) return null;
+    if (Array.isArray(s.anyOf) && s.anyOf.length) return sample(s.anyOf[0], seen);
+    if (s.default !== undefined) return s.default;
+    var t = Array.isArray(s.type) ? s.type[0] : s.type;
+    if (t === "array") return [sample(s.items, seen)];
+    if (t === "object" || s.properties) {
+      var out = {};
+      var props = s.properties || {};
+      Object.keys(props).forEach(function (k) { out[k] = sample(props[k], seen); });
+      if (!Object.keys(out).length && s.additionalProperties) {
+        out["key"] = sample(s.additionalProperties, seen);
+      }
+      return out;
+    }
+    if (t === "integer") return 0;
+    if (t === "number") return 0.0;
+    if (t === "boolean") return true;
+    if (t === "null") return null;
+    if (s.format === "date-time") return "2026-08-21T14:32:07Z";
+    if (s.format === "uuid") return "0611f4b2-2f0a-4b57-9c1a-6e6a2e2f9b31";
+    if (s.format === "duration") return "1500ms";
+    return "string";
+  }
+
+  function schemaTable(schema) {
+    var s = deref(schema, []);
+    var props = s && s.properties;
+    if (!props || !Object.keys(props).length) return null;
+    var required = s.required || [];
+    var table = el("table");
+    var head = el("tr");
+    ["Field", "Type", "Description"].forEach(function (h) { head.appendChild(el("th", null, h)); });
+    table.appendChild(head);
+    Object.keys(props).forEach(function (key) {
+      var p = props[key];
+      var row = el("tr");
+      var name = el("td", "name");
+      name.appendChild(document.createTextNode(key));
+      if (required.indexOf(key) >= 0) {
+        name.appendChild(document.createTextNode(" "));
+        name.appendChild(el("span", "req", "*"));
+      }
+      row.appendChild(name);
+      row.appendChild(el("td", "type", typeName(p)));
+      row.appendChild(el("td", null, p.description || ""));
+      table.appendChild(row);
+    });
+    return table;
+  }
+
+  function schemaBlock(schema) {
+    var frag = document.createDocumentFragment();
+    var table = schemaTable(schema);
+    if (table) frag.appendChild(table);
+    var details = el("details");
+    details.appendChild(el("summary"));
+    details.appendChild(el("pre", null, JSON.stringify(sample(schema), null, 2)));
+    frag.appendChild(details);
+    return frag;
+  }
+
+  function statusClass(code) {
+    if (code === "default") return "sd";
+    if (code.charAt(0) === "2") return "s2";
+    if (code.charAt(0) === "4") return "s4";
+    return "s5";
+  }
+
+  function operationID(path, verb) {
+    return "op-" + verb + "-" + path.replace(/[^a-zA-Z0-9]+/g, "-");
+  }
+
+  function renderOperation(path, verb, op) {
+    var sec = el("section", "op");
+    sec.id = operationID(path, verb);
+    sec.setAttribute("data-search", (verb + " " + path + " " + (op.summary || "") + " " + (op.operationId || "")).toLowerCase());
+
+    var h2 = el("h2");
+    h2.appendChild(el("span", "verb " + verb, verb.toUpperCase()));
+    h2.appendChild(el("span", "path", path));
+    if (op.deprecated) h2.appendChild(el("span", "dep", "DEPRECATED"));
+    sec.appendChild(h2);
+
+    if (op.summary) sec.appendChild(el("p", "summary", op.summary));
+    if (op.description) sec.appendChild(el("p", "opdesc", op.description));
+    if (op.operationId) sec.appendChild(el("div", "meta", op.operationId));
+
+    var params = op.parameters || [];
+    if (params.length) {
+      sec.appendChild(el("h3", null, "Parameters"));
+      var table = el("table");
+      var head = el("tr");
+      ["Name", "Type", "Description"].forEach(function (h) { head.appendChild(el("th", null, h)); });
+      table.appendChild(head);
+      params.forEach(function (p) {
+        var row = el("tr");
+        var name = el("td", "name");
+        name.appendChild(document.createTextNode(p.name));
+        if (p.required) {
+          name.appendChild(document.createTextNode(" "));
+          name.appendChild(el("span", "req", "*"));
+        }
+        name.appendChild(el("span", "in", p.in));
+        row.appendChild(name);
+        row.appendChild(el("td", "type", typeName(p.schema)));
+        row.appendChild(el("td", null, p.description || ""));
+        table.appendChild(row);
+      });
+      sec.appendChild(table);
+    }
+
+    var body = op.requestBody;
+    if (body && body.content && body.content["application/json"]) {
+      sec.appendChild(el("h3", null, body.required ? "Request body (required)" : "Request body"));
+      sec.appendChild(schemaBlock(body.content["application/json"].schema));
+    }
+
+    sec.appendChild(el("h3", null, "Responses"));
+    var codes = Object.keys(op.responses || {}).sort(function (a, b) {
+      if (a === "default") return 1;
+      if (b === "default") return -1;
+      return Number(a) - Number(b);
+    });
+    codes.forEach(function (code) {
+      var r = op.responses[code];
+      var box = el("div", "resp");
+      var head = el("div", "rhead");
+      head.appendChild(el("span", "status " + statusClass(code), code));
+      head.appendChild(el("span", "rdesc", r.description || ""));
+      box.appendChild(head);
+      var json = r.content && r.content["application/json"];
+      if (json) {
+        box.appendChild(schemaBlock(json.schema));
+      } else {
+        box.appendChild(el("div", "empty", "No response body."));
+      }
+      sec.appendChild(box);
+    });
+    return sec;
+  }
+
+  function render() {
+    document.getElementById("api-title").textContent = spec.info.title;
+    document.title = spec.info.title;
+    document.getElementById("api-version").textContent = "v" + spec.info.version;
+    if (spec.info.description) {
+      document.getElementById("api-desc").textContent = spec.info.description;
+    }
+
+    var groups = {};
+    var order = [];
+    Object.keys(spec.paths || {}).sort().forEach(function (path) {
+      VERBS.forEach(function (verb) {
+        var op = spec.paths[path][verb];
+        if (!op) return;
+        var tag = (op.tags && op.tags[0]) || "default";
+        if (!groups[tag]) { groups[tag] = []; order.push(tag); }
+        groups[tag].push({ path: path, verb: verb, op: op });
+      });
+    });
+    order.sort();
+
+    var nav = document.getElementById("nav");
+    var ops = document.getElementById("ops");
+    order.forEach(function (tag) {
+      nav.appendChild(el("div", "group", tag));
+      groups[tag].forEach(function (entry) {
+        var id = operationID(entry.path, entry.verb);
+        var btn = el("button");
+        btn.type = "button";
+        btn.setAttribute("data-target", id);
+        btn.setAttribute("data-search", (entry.verb + " " + entry.path + " " + (entry.op.summary || "")).toLowerCase());
+        btn.appendChild(el("span", "verb " + entry.verb, entry.verb.toUpperCase()));
+        btn.appendChild(el("span", "path", entry.path));
+        nav.appendChild(btn);
+        ops.appendChild(renderOperation(entry.path, entry.verb, entry.op));
+      });
+    });
+
+    nav.addEventListener("click", function (event) {
+      var btn = event.target.closest("button[data-target]");
+      if (!btn) return;
+      var target = document.getElementById(btn.getAttribute("data-target"));
+      if (!target) return;
+      Array.prototype.forEach.call(nav.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-current", b === btn ? "true" : "false");
+      });
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
+    var filter = document.getElementById("filter");
+    filter.addEventListener("input", function () {
+      var q = filter.value.trim().toLowerCase();
+      Array.prototype.forEach.call(document.querySelectorAll("[data-search]"), function (node) {
+        node.style.display = !q || node.getAttribute("data-search").indexOf(q) >= 0 ? "" : "none";
+      });
+    });
+  }
+
+  fetch(SPEC_URL, { credentials: "same-origin", headers: { Accept: "application/json" } })
+    .then(function (res) {
+      if (!res.ok) throw new Error("the OpenAPI document responded with " + res.status);
+      return res.json();
+    })
+    .then(function (doc) { spec = doc; render(); })
+    .catch(function (err) {
+      var box = el("div", "err", "Could not load the OpenAPI document: " + err.message);
+      document.getElementById("ops").appendChild(box);
+      document.getElementById("api-title").textContent = "Unavailable";
+    });
+})();
+</script>
+</body>
+</html>

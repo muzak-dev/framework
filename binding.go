@@ -114,6 +114,10 @@ type bindPlan struct {
 	// empty marks a plan with nothing to do at all, letting the router skip
 	// binding for Empty inputs.
 	empty bool
+	// validation is non-nil when the input type declares rules, and holds the
+	// field origins those rules are reported against. Resolving them here means
+	// a request pays a map lookup per rule rather than a walk over the type.
+	validation *validationPlan
 }
 
 // bodyBufferPool recycles the buffers used to read request bodies. Buffers are
@@ -161,6 +165,10 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 				return nil, fmt.Errorf("badele: %s %s: field binds path parameter %q, which the route template does not declare", method, path, p.name)
 			}
 		}
+	}
+
+	if reflect.PointerTo(t).Implements(reflect.TypeFor[Validatable]()) {
+		plan.validation = newValidationPlan(t, plan)
 	}
 
 	if len(bodyFields) > 0 {
@@ -466,6 +474,18 @@ func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 			return err
 		}
 	}
+
+	// Validation runs even when binding found problems, so a client learns
+	// about every field at once. Fields that already failed to bind are left
+	// out, because a value that could not be parsed has nothing further to say.
+	if p.validation != nil && !route.skipValidation {
+		failed := make(map[string]bool, len(verr.Details))
+		for _, detail := range verr.Details {
+			failed[detail.Field] = true
+		}
+		verr.Details = append(verr.Details, p.runValidation(dst, failed)...)
+	}
+
 	if len(verr.Details) > 0 {
 		return verr
 	}

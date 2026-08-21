@@ -92,6 +92,7 @@ type routeConfig struct {
 	operationID        string
 	maxBodySize        int64
 	allowUnknownFields *bool
+	skipValidation     bool
 	deprecated         bool
 	hidden             bool
 }
@@ -206,6 +207,17 @@ func AllowUnknownFields() SharedOption {
 	}
 }
 
+// SkipValidation stops a route from running its input model's Validate method.
+//
+// Validation is otherwise automatic: a model that declares rules has them
+// applied, with no option to remember and so no way to leave a model
+// unvalidated by forgetting one. Reach for this only where a route must accept
+// input the model itself would reject, such as an administrative endpoint that
+// repairs bad data.
+func SkipValidation() RouteOption {
+	return routeOptionFunc(func(c *routeConfig) { c.skipValidation = true })
+}
+
 // Route is a single registered operation: one HTTP method at one path
 // template, with the handler, dependencies and documentation attached to it.
 //
@@ -239,6 +251,7 @@ type Route struct {
 	responses          []responseDoc
 	maxBodySize        int64
 	allowUnknownFields bool
+	skipValidation     bool
 
 	inType  reflect.Type
 	outType reflect.Type
@@ -565,6 +578,7 @@ func (rt *Route) resolve(in inherited) error {
 	if cfg.allowUnknownFields != nil {
 		rt.allowUnknownFields = *cfg.allowUnknownFields
 	}
+	rt.skipValidation = cfg.skipValidation
 
 	rt.OperationID = cfg.operationID
 	if rt.OperationID == "" {

@@ -1,0 +1,398 @@
+package badele
+
+import (
+	"reflect"
+	"strings"
+	"sync"
+	"time"
+
+	"badele/validate"
+)
+
+// Validatable is implemented by an input model that declares validation rules.
+//
+// Badele runs Validate after binding and after every guard, so a model never
+// gets to tell an unauthenticated caller what is wrong with its request. The
+// method belongs on the pointer type, which is what lets rules name fields by
+// address:
+//
+//	func (in *CreateUser) Validate(v *badele.Validation) {
+//		v.String(&in.Email).Trim().Lower().Required().Email()
+//		v.Number(&in.Age).Between(18, 120)
+//	}
+//
+// Implementing it is the only thing needed: there is no option to remember and
+// no pipe to install, so a model cannot be left unvalidated by omission. Use
+// [SkipValidation] on a route that must not validate.
+type Validatable interface {
+	// Validate declares this model's rules. It is called once per request, on
+	// the bound value, and should declare rules rather than do work of its own.
+	Validate(v *Validation)
+}
+
+// StringField matches a string field or an optional pointer to one.
+//
+// The union is what lets one entry point serve both `Name string` and
+// `Nickname *string`. Rules bind to the field's address either way, so the
+// field is still identified by position, and a nil pointer skips its rules
+// rather than failing them.
+type StringField interface {
+	~string | *string
+}
+
+// NumberField matches a numeric field or an optional pointer to one.
+type NumberField interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 |
+		~float32 | ~float64 |
+		*int | *int8 | *int16 | *int32 | *int64 |
+		*uint | *uint8 | *uint16 | *uint32 | *uint64 |
+		*float32 | *float64
+}
+
+// TimeField matches a time field or an optional pointer to one.
+type TimeField interface {
+	time.Time | *time.Time
+}
+
+// Validation collects the rules a model declares and turns what they find into
+// error details.
+//
+// A model receives one during its Validate method and uses it to bind rule sets
+// to its own fields. It is not safe for concurrent use and must not be retained
+// after Validate returns.
+type Validation struct {
+	plan     *validationPlan
+	base     uintptr
+	size     uintptr
+	prefix   string
+	rules    []validate.Evaluator
+	rejected []rejection
+	children []*Validation
+}
+
+// rejection is a failure recorded directly rather than through a rule set.
+type rejection struct {
+	target any
+	issue  string
+}
+
+// String binds rules to a string field.
+//
+//	v.String(&in.Email).Trim().Lower().Required().Email()
+//
+// The field may be a string or a pointer to one; a nil pointer skips its rules.
+// A field of any other type does not compile.
+func (v *Validation) String[T StringField](ptr *T) *validate.StringRules {
+	rules := validate.String().For(ptr)
+	v.rules = append(v.rules, rules)
+	return rules
+}
+
+// Number binds rules to a numeric field.
+//
+//	v.Number(&in.Age).Between(18, 120)
+//
+// Bounds are written as ordinary constants whatever the field's own numeric
+// type. A pointer field is optional.
+func (v *Validation) Number[T NumberField](ptr *T) *validate.NumberRules {
+	rules := validate.Number().For(ptr)
+	v.rules = append(v.rules, rules)
+	return rules
+}
+
+// Time binds rules to a time field.
+func (v *Validation) Time[T TimeField](ptr *T) *validate.TimeRules {
+	rules := validate.Time().For(ptr)
+	v.rules = append(v.rules, rules)
+	return rules
+}
+
+// Slice binds rules to a collection, both about the collection itself and,
+// through [validate.SliceRules.Each], about each element:
+//
+//	v.Slice(&in.Tags).MaxItems(10).Each(validate.String().MaxLen(20))
+func (v *Validation) Slice[E any](ptr *[]E) *validate.SliceRules[E] {
+	rules := validate.Slice[E]().For(ptr)
+	v.rules = append(v.rules, rules)
+	return rules
+}
+
+// Value binds rules to a field of any type, for what the typed rule sets do not
+// cover. Must and OneOf take the field's own type, so the values written at the
+// call site are checked by the compiler.
+func (v *Validation) Value[T any](ptr *T) *validate.ValueRules[T] {
+	rules := validate.Value[T]().For(ptr)
+	v.rules = append(v.rules, rules)
+	return rules
+}
+
+// Reject records a failure against a field without declaring a rule for it.
+//
+// It is the direct form of a cross-field check, for a condition that reads
+// better as an ordinary if than as a rule:
+//
+//	if in.Start.After(in.End) {
+//		v.Reject(&in.End, "must not be before the start")
+//	}
+func (v *Validation) Reject(target any, issue string) {
+	v.rejected = append(v.rejected, rejection{target: target, issue: issue})
+}
+
+// Condition is a pending cross-field check produced by [Validation.When].
+type Condition struct {
+	validation *Validation
+	holds      bool
+}
+
+// When begins a check that applies only when a condition holds:
+//
+//	v.When(in.Role == "admin" && in.Age < 21).
+//		Reject(&in.Role, "an admin must be at least 21")
+//
+// The condition is an ordinary Go expression over the model's own fields, which
+// is all a cross-field rule needs to be.
+func (v *Validation) When(condition bool) *Condition {
+	return &Condition{validation: v, holds: condition}
+}
+
+// Reject records the failure when the condition held, and does nothing
+// otherwise. It returns the condition so that several failures can hang off one
+// test.
+func (c *Condition) Reject(target any, issue string) *Condition {
+	if c.holds {
+		c.validation.Reject(target, issue)
+	}
+	return c
+}
+
+// Nested validates a model held inside another, reporting its failures under a
+// dotted path:
+//
+//	v.Nested(&in.Address)
+//
+// A failure on the nested model's City field is reported as "address.city". A
+// nil pointer is skipped, so an optional nested model needs no guard of its
+// own.
+func (v *Validation) Nested(model Validatable) {
+	if model == nil {
+		return
+	}
+	pointer := reflect.ValueOf(model)
+	if pointer.Kind() != reflect.Pointer || pointer.IsNil() {
+		return
+	}
+
+	name, _ := v.describe(model, "")
+	child := &Validation{
+		plan:   planForType(pointer.Type().Elem()),
+		base:   pointer.Pointer(),
+		size:   pointer.Type().Elem().Size(),
+		prefix: joinPath(v.prefix, name),
+	}
+	model.Validate(child)
+	v.children = append(v.children, child)
+}
+
+// details turns everything collected into error details, naming each field the
+// way the binder named it and saying where it came from.
+func (v *Validation) details() []ErrorDetail {
+	var out []ErrorDetail
+	for _, rules := range v.rules {
+		name, location := v.describe(rules.Target(), rules.Label())
+		for _, problem := range rules.Evaluate() {
+			out = append(out, ErrorDetail{
+				Field:    joinPath(v.prefix, name) + problem.Path,
+				Location: location,
+				Issue:    problem.Issue,
+			})
+		}
+	}
+	for _, rejected := range v.rejected {
+		name, location := v.describe(rejected.target, "")
+		out = append(out, ErrorDetail{
+			Field:    joinPath(v.prefix, name),
+			Location: location,
+			Issue:    rejected.issue,
+		})
+	}
+	for _, child := range v.children {
+		out = append(out, child.details()...)
+	}
+	return out
+}
+
+// describe resolves a field pointer to the name and location it should be
+// reported under. A rule set's own label wins when it set one, which is what
+// [validate.StringRules.As] is for.
+func (v *Validation) describe(target any, label string) (name, location string) {
+	origin, found := v.originOf(target)
+	switch {
+	case label != "" && found:
+		return label, origin.location
+	case label != "":
+		return label, "body"
+	case found:
+		return origin.name, origin.location
+	default:
+		// A pointer outside the model, which only a hand-written rejection can
+		// produce, is reported against the request rather than against a field.
+		return "", "body"
+	}
+}
+
+// originOf looks a field pointer up by its offset within the model.
+func (v *Validation) originOf(target any) (fieldOrigin, bool) {
+	if target == nil || v.plan == nil || v.base == 0 {
+		return fieldOrigin{}, false
+	}
+	pointer := reflect.ValueOf(target)
+	if pointer.Kind() != reflect.Pointer || pointer.IsNil() {
+		return fieldOrigin{}, false
+	}
+	address := pointer.Pointer()
+	if address < v.base || address >= v.base+v.size {
+		return fieldOrigin{}, false
+	}
+	origin, found := v.plan.fields[address-v.base]
+	return origin, found
+}
+
+// joinPath appends a field name to a prefix, leaving out the separator when
+// either side is empty.
+func joinPath(prefix, name string) string {
+	switch {
+	case prefix == "":
+		return name
+	case name == "":
+		return prefix
+	default:
+		return prefix + "." + name
+	}
+}
+
+// fieldOrigin is how one field should be reported: the name the client knows it
+// by, and the part of the request it arrived in.
+type fieldOrigin struct {
+	name     string
+	location string
+}
+
+// validationPlan maps a field's offset within a model to how it should be
+// reported.
+//
+// Offsets are computed once, when the route is registered, so validating a
+// request costs a subtraction and a map lookup per rule rather than a walk over
+// the type.
+type validationPlan struct {
+	fields map[uintptr]fieldOrigin
+}
+
+// newValidationPlan records where every field of an input type came from,
+// starting from the JSON names and then correcting the ones the binder read
+// from somewhere other than the body.
+func newValidationPlan(t reflect.Type, plan *bindPlan) *validationPlan {
+	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}}
+	collectOrigins(t, 0, vp.fields)
+	for i := range plan.params {
+		p := &plan.params[i]
+		if offset, ok := offsetOf(t, p.index); ok {
+			vp.fields[offset] = fieldOrigin{name: p.name, location: p.source.String()}
+		}
+	}
+	return vp
+}
+
+// nestedPlans caches the plans for models reached through [Validation.Nested],
+// which are not routes of their own and so have no binding plan to derive from.
+var nestedPlans sync.Map
+
+// planForType returns the plan for a nested model, building it once per type.
+func planForType(t reflect.Type) *validationPlan {
+	if cached, found := nestedPlans.Load(t); found {
+		return cached.(*validationPlan)
+	}
+	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}}
+	collectOrigins(t, 0, vp.fields)
+	actual, _ := nestedPlans.LoadOrStore(t, vp)
+	return actual.(*validationPlan)
+}
+
+// collectOrigins walks a struct, recording each field's offset and the name it
+// is encoded under. Every field starts out as body content; the caller corrects
+// the located ones afterwards.
+func collectOrigins(t reflect.Type, base uintptr, into map[uintptr]fieldOrigin) {
+	if t.Kind() != reflect.Struct {
+		return
+	}
+	for i := range t.NumField() {
+		field := t.Field(i)
+		if !usableField(field) {
+			continue
+		}
+		offset := base + field.Offset
+		name, _, _ := strings.Cut(field.Tag.Get(tagJSON), ",")
+		if name == "" {
+			name = field.Name
+		}
+		if name != "-" {
+			into[offset] = fieldOrigin{name: name, location: "body"}
+		}
+		if field.Anonymous && field.Type.Kind() == reflect.Struct {
+			collectOrigins(field.Type, offset, into)
+		}
+	}
+}
+
+// offsetOf resolves a field index path to a byte offset within the struct.
+func offsetOf(t reflect.Type, index []int) (uintptr, bool) {
+	var offset uintptr
+	current := t
+	for _, i := range index {
+		if current.Kind() != reflect.Struct || i >= current.NumField() {
+			// coverage: index paths come from the binding plan, which built
+			// them by walking this very type, so they always resolve.
+			return 0, false
+		}
+		field := current.Field(i)
+		offset += field.Offset
+		current = field.Type
+	}
+	return offset, true
+}
+
+// runValidation validates a bound model and returns what failed.
+//
+// Fields that already failed to bind are left alone: telling a client that
+// "limit" is both unparseable and below the minimum says nothing the first
+// message did not.
+func (p *bindPlan) runValidation(dst reflect.Value, failed map[string]bool) []ErrorDetail {
+	if p.validation == nil {
+		return nil
+	}
+	model, ok := dst.Addr().Interface().(Validatable)
+	if !ok {
+		// coverage: the plan only carries a validation plan for types that
+		// implement Validatable, which is checked when the route is compiled.
+		return nil
+	}
+
+	v := &Validation{
+		plan: p.validation,
+		base: dst.Addr().Pointer(),
+		size: p.typ.Size(),
+	}
+	model.Validate(v)
+
+	details := v.details()
+	if len(failed) == 0 {
+		return details
+	}
+	kept := details[:0]
+	for _, detail := range details {
+		if !failed[detail.Field] {
+			kept = append(kept, detail)
+		}
+	}
+	return kept
+}

@@ -363,3 +363,32 @@ func TestConstraintDescriptionSkipsUnnamedRules(t *testing.T) {
 		t.Errorf("element constraints = %v, want none", elements)
 	}
 }
+
+// TestRuleSetsAreRecycledAcrossRequests covers the free lists a Validation
+// keeps, which are what make redeclaring a model's rules cost nothing after the
+// first request through a route.
+//
+// The recycled branch is otherwise reached only when a pooled Validation
+// happens to be handed back to a model declaring the same kind of rule, which
+// depends on how the pool is scheduled and so cannot be relied on to be
+// exercised at all. Driving it directly is what makes it certain.
+func TestRuleSetsAreRecycledAcrossRequests(t *testing.T) {
+	t.Parallel()
+	v := &Validation{}
+
+	first := []any{v.nextString(), v.nextNumber(), v.nextTime()}
+	// reset returns the counters to zero while keeping the sets already built,
+	// which is exactly the state the next request through a route starts from.
+	v.reset()
+	second := []any{v.nextString(), v.nextNumber(), v.nextTime()}
+
+	for i := range first {
+		if first[i] != second[i] {
+			t.Errorf("rule set %d was rebuilt rather than recycled", i)
+		}
+	}
+	// A model that declares more rules than the last one still gets them.
+	if extra := v.nextTime(); extra == second[2] {
+		t.Error("a second time rule set reused the first")
+	}
+}

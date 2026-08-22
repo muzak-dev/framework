@@ -80,6 +80,11 @@ func main() {
 		badele.WithResponseDoc(http.StatusTeapot, "I'm a teapot"),
 	)
 
+	// Assets that belong to no particular route. A static mount serves what it
+	// finds and nothing else, so a miss here stays a miss rather than being
+	// answered with the application document by the frontend below.
+	app.Static("/static", badele.StaticOptions{Dir: "static"})
+
 	// The built frontend is served last: every route above is matched first,
 	// so mounting at the root cannot shadow the API. The directory here is
 	// what a frontend build tool would have written.

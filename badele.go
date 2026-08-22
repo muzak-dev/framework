@@ -141,6 +141,13 @@ type AppOptions struct {
 	// The zero value bounds writes, holds an idle stream open with a periodic
 	// keepalive, and caps how many streams the application serves at once.
 	SSE SSEOptions
+
+	// ClientIP decides which address a request is attributed to, which
+	// matters wherever a decision is made per client rather than per request.
+	// The zero value believes no forwarding header, so behind a proxy it
+	// attributes every request to the proxy until the proxy is named in
+	// [ClientIPOptions.TrustedProxies].
+	ClientIP ClientIPOptions
 }
 
 // App is a Badele application: a root router plus the server, middleware,
@@ -168,6 +175,13 @@ type App struct {
 	spec      *Document
 
 	lifecycle *lifecycleManager
+
+	// clientIP answers which address a request came from, with the trusted
+	// proxy policy parsed once. clientIPErr holds the reason a policy could
+	// not be parsed, reported when the application is built rather than
+	// swallowed by New, which never fails.
+	clientIP    *clientIPResolver
+	clientIPErr error
 
 	// websockets tracks the open WebSocket connections, which net/http cannot
 	// do for us because a hijacked connection is no longer one of its own.
@@ -236,6 +250,7 @@ func New(opts AppOptions, routerOpts ...RouterOption) *App {
 		entries:     make(map[string]*pathEntry),
 	}
 	app.lifecycle = &lifecycleManager{logger: Scoped(logger, ScopeServer)}
+	app.clientIP, app.clientIPErr = newClientIPResolver(opts.ClientIP)
 	app.ctxPool.New = func() any { return new(Context) }
 	app.installDefaultMiddleware()
 	return app
@@ -370,6 +385,9 @@ func (a *App) build() {
 	}, emit, state)
 	a.websockets.limit = wsConnectionLimit(a.opts.WebSocket.MaxConnections)
 	a.streams.limit = sseStreamLimit(a.opts.SSE.MaxStreams)
+	if a.clientIPErr != nil {
+		state.errs = append(state.errs, a.clientIPErr)
+	}
 	a.lifecycle.components = state.lifecycles
 	a.frontends = state.frontends
 	slices.SortStableFunc(a.frontends, func(x, y *frontend) int {

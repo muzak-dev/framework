@@ -1,6 +1,7 @@
 package badele
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -378,16 +379,30 @@ func TestSSEReaderBoundsAnEventThatNeverFinishes(t *testing.T) {
 		t.Fatalf("listening: %v", err)
 	}
 	t.Cleanup(func() { _ = slow.Close() })
+	finished := make(chan struct{})
+	t.Cleanup(func() { close(finished) })
 	go func() {
 		conn, err := slow.Accept()
 		if err != nil {
 			return
 		}
 		defer func() { _ = conn.Close() }()
+		// The request is read before a byte of the response is written, which
+		// is not politeness but correctness: a response that arrives before
+		// the transport has finished registering the call it answers is one it
+		// cannot attribute to anything, and it discards the connection as
+		// unsolicited. Writing on accept made that a race this test lost about
+		// half the time, for a reason it is not about.
+		_ = conn.SetReadDeadline(time.Now().Add(sseTestTimeout))
+		if _, err := http.ReadRequest(bufio.NewReader(conn)); err != nil {
+			return
+		}
 		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
 		_, _ = fmt.Fprint(conn, "data: the beginning of")
-		// The rest never arrives.
-		time.Sleep(sseTestTimeout)
+		// The rest never arrives. The connection is held until the test is
+		// over rather than for a fixed time, so nothing of it outlives the
+		// test that started it.
+		<-finished
 	}()
 
 	ctx, cancel := context.WithTimeout(t.Context(), sseTestTimeout)

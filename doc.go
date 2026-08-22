@@ -200,18 +200,53 @@
 // close handshake, with every rule the specification lays down enforced and
 // every violation answered with the status it calls for.
 //
-// The connection is bounded in every direction that a peer controls. A message
-// larger than [WSOptions.ReadLimit] is refused before any of it is buffered, a
-// write that a peer stops reading gives up after [WSOptions.WriteTimeout], and
-// a handshake from another origin is refused outright, because a WebSocket
-// handshake is not subject to the same-origin policy and is not preflighted.
-// No extension is negotiated, so no peer can ask the server to keep
-// decompression state on its behalf. Configure the rest with [WithWebSocket],
-// and see [WSOptions] for what each limit is there to stop.
+// # What a hostile peer cannot do
+//
+// A WebSocket is the longest-lived thing an unauthenticated stranger can ask a
+// server for, so every direction a peer controls is bounded, and each bound is
+// there to stop something specific.
+//
+//   - A message larger than [WSOptions.ReadLimit] is refused before any of it
+//     is buffered, and a frame is taken a chunk at a time as the bytes arrive,
+//     so a six byte header cannot buy an allocation the size of the limit.
+//   - A message that begins and does not finish is closed after
+//     [WSOptions.ReadTimeout], which is what a peer dribbling one out a byte at
+//     a time looks like. Waiting between messages is not bounded, because
+//     waiting is what most connections are for.
+//   - A message fragmented endlessly, or interleaved with an endless run of
+//     pings, is closed once too many frames have arrived without one
+//     completing. Neither grows the message, so no size limit would ever catch
+//     them.
+//   - A write to a peer that has stopped reading gives up after
+//     [WSOptions.WriteTimeout] rather than pinning a goroutine and a buffer.
+//   - The application holds at most [WSOptions.MaxConnections] connections at
+//     once, and answers 503 with a Retry-After beyond that, because file
+//     descriptors run out before anything else does.
+//   - A handshake from another origin is refused outright, because a WebSocket
+//     handshake is not subject to the same-origin policy and is never
+//     preflighted, which is what makes cross-site hijacking possible in the
+//     first place. [AppOptions.CORS] does not cover it and never could.
+//   - A handshake carrying a body is refused, because whatever went unread
+//     would sit on the connection and be taken for frames the moment it was
+//     upgraded.
+//   - No extension is negotiated, so no peer can ask the server to keep
+//     decompression state on its behalf.
+//
+// Nothing a peer sends is echoed into a response header: only a subprotocol the
+// route itself offered can be answered with, and a route that offers one which
+// is not a token is refused when the application is built. Nothing a handler
+// fails with is disclosed either; the peer is closed with
+// [WSStatusInternalError] and the reason goes to the log.
+//
+// Configure the rest with [WithWebSocket], and see [WSOptions] for what each
+// limit is there to stop.
 //
 // [WSDial] is the other end of the same engine, which is what lets a route be
 // tested over a real connection rather than against a second implementation.
-// The test client wraps it as [badele/testclient.Client.WS].
+// It checks what a server answers rather than trusting it, and never follows a
+// redirect, because following one would send the headers of the handshake to
+// whatever host the answer named. The test client wraps it as
+// [badele/testclient.Client.WS].
 //
 // # Serving a frontend
 //
@@ -302,8 +337,8 @@
 // rejected, duplicate members and invalid UTF-8 are refused by
 // encoding/json/v2, CORS denies every cross-origin request until it is
 // configured, a WebSocket handshake from another origin is refused until it is
-// allowed, and a panic becomes a generic 500 with the stack recorded only in
-// the log. Each of these can be relaxed deliberately; none of them is relaxed
+// allowed, the connections one application holds are capped, and a panic
+// becomes a generic 500 with the stack recorded only in the log. Each of these can be relaxed deliberately; none of them is relaxed
 // by omission.
 //
 // # Testing

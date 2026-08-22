@@ -191,9 +191,21 @@
 //	app.Frontend("/", badele.FrontendOptions{FS: assets, Dir: "dist"})
 //
 // Nothing is rendered on the server and nothing is built here. A directory is
-// never listed, a symbolic link cannot lead out of the build output, and a
-// directory that does not exist is reported when the application is built
+// never listed, a symbolic link cannot lead out of the build output, a method
+// other than GET or HEAD on a file is refused with 405 rather than served, and
+// a directory that does not exist is reported when the application is built
 // rather than on the first request.
+//
+// [Router.Static] mounts a directory of files on the same machinery, without
+// the part that makes a frontend work:
+//
+//	app.Static("/static", badele.StaticOptions{Dir: "static"})
+//
+// Nothing stands in for a path with no file behind it, so a miss is a 404 and
+// stays one, and a directory is served by its index.html only when
+// [StaticOptions.Index] asks. That is the whole difference: reach for Static to
+// publish assets, and for Frontend to serve an application whose routing
+// happens in the browser.
 //
 // # What is generated
 //

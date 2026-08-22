@@ -330,11 +330,12 @@ type include struct {
 // in practice: routes are declared during start-up from a single goroutine and
 // only read afterwards.
 type Router struct {
-	cfg      routerConfig
-	routes   []*Route
-	includes []include
-	errs     []error
-	mounted  bool
+	cfg       routerConfig
+	routes    []*Route
+	frontends []*frontend
+	includes  []include
+	errs      []error
+	mounted   bool
 }
 
 // NewRouter returns a router configured by the given options.
@@ -596,6 +597,13 @@ func (r *Router) finalize(in inherited, emit func(*Route) error, state *buildSta
 		if err := emit(rt); err != nil {
 			state.errs = append(state.errs, err)
 		}
+	}
+	for _, mount := range r.frontends {
+		if err := mount.resolve(cur); err != nil {
+			state.errs = append(state.errs, err)
+			continue
+		}
+		state.frontends = append(state.frontends, mount)
 	}
 	for _, inc := range r.includes {
 		state.lifecycles = append(state.lifecycles, inc.cfg.lifecycles...)

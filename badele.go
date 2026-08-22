@@ -149,8 +149,11 @@ type App struct {
 	tree    *radix.Tree[*pathEntry]
 	entries map[string]*pathEntry
 	routes  []*Route
-	routers int
-	spec    *Document
+	// frontends are the static mounts, ordered longest path first so that the
+	// most specific mount answers a path two of them could both serve.
+	frontends []*frontend
+	routers   int
+	spec      *Document
 
 	lifecycle *lifecycleManager
 
@@ -171,6 +174,7 @@ type App struct {
 type buildState struct {
 	errs       []error
 	lifecycles []Lifecycle
+	frontends  []*frontend
 }
 
 // pathEntry holds every method served at one path template, so that a single
@@ -339,6 +343,10 @@ func (a *App) build() {
 		maxFileSize:   a.opts.MaxFileSize,
 	}, emit, state)
 	a.lifecycle.components = state.lifecycles
+	a.frontends = state.frontends
+	slices.SortStableFunc(a.frontends, func(x, y *frontend) int {
+		return len(y.path) - len(x.path)
+	})
 
 	if len(state.errs) > 0 {
 		a.buildErr = errors.Join(state.errs...)
@@ -471,6 +479,12 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 
 	entry, found := a.tree.Lookup(r.URL.EscapedPath(), &c.params)
 	if !found {
+		// Every route is matched before any frontend is consulted, so a
+		// frontend mounted at the root cannot shadow an API.
+		if mount, relative, served := a.frontendFor(r.URL.Path); served {
+			a.serveFrontend(c, mount, relative)
+			return
+		}
 		a.fail(c, NewHTTPErrorf(http.StatusNotFound, "no route matches %s %s", r.Method, r.URL.Path))
 		return
 	}

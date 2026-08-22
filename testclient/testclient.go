@@ -145,10 +145,41 @@ type RequestOption func(*request)
 
 // request accumulates what one call should send.
 type request struct {
-	header http.Header
-	query  url.Values
-	body   io.Reader
-	err    error
+	header       http.Header
+	query        url.Values
+	body         io.Reader
+	subprotocols []string
+	err          error
+}
+
+// build applies the options to a fresh request and returns it alongside the
+// full URL it should be sent to.
+func (c *Client) build(method, path string, opts []RequestOption) (*request, string) {
+	c.tb.Helper()
+	req := &request{header: c.headers.Clone(), query: url.Values{}}
+	if req.header == nil {
+		// coverage: New always supplies a non-nil header set, and Clone only
+		// returns nil for a nil one, so this guards against a Client built by
+		// some future path rather than by New.
+		req.header = http.Header{}
+	}
+	for _, opt := range opts {
+		opt(req)
+	}
+	if req.err != nil {
+		// coverage: aborts the running test; the encoder itself is exercised by
+		// every call that passes JSON.
+		c.tb.Fatalf("testclient: %s %s: the request body could not be encoded: %v", method, path, req.err)
+	}
+	target := c.server.URL + path
+	if len(req.query) > 0 {
+		separator := "?"
+		if strings.Contains(path, "?") {
+			separator = "&"
+		}
+		target += separator + req.query.Encode()
+	}
+	return req, target
 }
 
 // Header sets a header on this request, replacing any client-level value of
@@ -252,30 +283,7 @@ func (c *Client) Options(path string, opts ...RequestOption) *Response {
 // because it means the request never reached the application.
 func (c *Client) Do(method, path string, opts ...RequestOption) *Response {
 	c.tb.Helper()
-	req := &request{header: c.headers.Clone(), query: url.Values{}}
-	if req.header == nil {
-		// coverage: New always supplies a non-nil header set, and Clone only
-		// returns nil for a nil one, so this guards against a Client built by
-		// some future path rather than by New.
-		req.header = http.Header{}
-	}
-	for _, opt := range opts {
-		opt(req)
-	}
-	if req.err != nil {
-		// coverage: aborts the running test; the encoder itself is exercised by
-		// every call that passes JSON.
-		c.tb.Fatalf("testclient: %s %s: the request body could not be encoded: %v", method, path, req.err)
-	}
-
-	target := c.server.URL + path
-	if len(req.query) > 0 {
-		separator := "?"
-		if strings.Contains(path, "?") {
-			separator = "&"
-		}
-		target += separator + req.query.Encode()
-	}
+	req, target := c.build(method, path, opts)
 
 	httpReq, err := http.NewRequestWithContext(c.tb.Context(), method, target, req.body)
 	if err != nil {
@@ -292,12 +300,7 @@ func (c *Client) Do(method, path string, opts ...RequestOption) *Response {
 	}
 	defer func() { _ = res.Body.Close() }()
 
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		// coverage: aborts the running test; a truncated response means the
-		// server died mid-write.
-		c.tb.Fatalf("testclient: %s %s: the response body could not be read: %v", method, path, err)
-	}
+	body := c.readBody(method, path, res)
 	return &Response{
 		tb:      c.tb,
 		method:  method,
@@ -307,6 +310,19 @@ func (c *Client) Do(method, path string, opts ...RequestOption) *Response {
 		Body:    body,
 		Cookies: res.Cookies(),
 	}
+}
+
+// readBody reads a response fully into memory, so that it can be inspected
+// more than once and the connection released.
+func (c *Client) readBody(method, path string, res *http.Response) []byte {
+	c.tb.Helper()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		// coverage: aborts the running test; a truncated response means the
+		// server died mid-write.
+		c.tb.Fatalf("testclient: %s %s: the response body could not be read: %v", method, path, err)
+	}
+	return body
 }
 
 // Response is a completed request, read fully into memory so that it can be

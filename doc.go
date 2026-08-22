@@ -159,6 +159,57 @@
 // end, such as how long the request took, has to wrap the writer and fill the
 // value in as the response starts.
 //
+// # Rate limiting
+//
+// Rate limiting is built in and off until a policy names a [Quota]. A policy is
+// several quotas at once, because one number cannot tell a burst from sustained
+// abuse:
+//
+//	app := badele.New(badele.AppOptions{Title: "Shop"},
+//		badele.WithRateLimit(badele.RateLimitOptions{
+//			Storage: NewRedisRateLimitStorage(settings.RedisAddr),
+//			Tracker: UserOrIPTracker,
+//			Quotas: []badele.Quota{
+//				{Name: "short", Window: time.Second, Limit: 3},
+//				{Name: "medium", Window: 10 * time.Second, Limit: 20},
+//				{Name: "long", Window: time.Minute, Limit: 100},
+//			},
+//		}),
+//	)
+//
+// Every quota is counted for every request, so a client that overruns the short
+// window still accrues against the long one and cannot launder a flood by
+// pausing between bursts. A refused request is answered with 429, a Retry-After
+// and the RateLimit headers describing the whole policy.
+//
+// Three decisions are the application's. [RateLimitStorage] says where the
+// counters live, defaulting to a bounded in-process table that is right for one
+// process and wrong for several. [RateLimitTracker] says whose budget a request
+// is spent from, defaulting to [IPTracker], and is where an API key, a tenant
+// or a resolved user identity belongs instead. [ClientIPOptions] says which
+// address a request is attributed to, believing no forwarding header until a
+// proxy is named, because a header any client can write is a budget any client
+// can escape.
+//
+// Narrowing works like everything else here. [RateLimit] replaces the quotas
+// for one route, which is what a login route wants, and [SkipRateLimit] exempts
+// one, which is what a health check wants:
+//
+//	r.Get("/health", health, badele.SkipRateLimit())
+//	r.Post("/login", login, badele.RateLimit(badele.Quota{Name: "login", Window: time.Minute, Limit: 5}))
+//
+// The count happens before the route's guards and dependencies, so a client
+// past its limit is refused before anything expensive runs on its behalf and a
+// request a guard rejects is still counted, which is the half that matters for
+// brute force. [RateLimitOptions.AfterDependencies] moves it after them, for a
+// tracker that keys on an identity a dependency produced, and gives up the
+// other half. A storage that cannot answer refuses the request with 503 unless
+// [RateLimitOptions.FailOpen] trades that for availability.
+//
+// [WSOptions.MessageLimits] applies the same quotas, storage and tracker to the
+// messages a connected peer sends, which is the one thing the other WebSocket
+// bounds do not cover.
+//
 // # WebSockets
 //
 // [Router.WS] registers a WebSocket route. The handshake is an ordinary GET,
@@ -426,9 +477,17 @@
 // encoding/json/v2, CORS denies every cross-origin request until it is
 // configured, a WebSocket handshake from another origin is refused until it is
 // allowed, the connections and the event streams one application holds are both
-// capped, a write to a client that stopped reading gives up, and a panic
-// becomes a generic 500 with the stack recorded only in the log. Each of these can be relaxed deliberately; none of them is relaxed
-// by omission.
+// capped, a write to a client that stopped reading gives up, no forwarding
+// header is believed until a proxy is named, and a panic becomes a generic 500
+// with the stack recorded only in the log. Each of these can be relaxed
+// deliberately; none of them is relaxed by omission.
+//
+// Rate limiting is the deliberate exception, and is off until a quota is
+// declared. There is no limit that is right for every application, and a
+// default one would be a number nobody chose refusing traffic nobody expected.
+// What is safe by default is what happens once one is declared: the counters
+// are bounded, the address is not taken from a header anyone can write, and a
+// storage that stops answering stops traffic rather than stopping the limit.
 //
 // # Testing
 //

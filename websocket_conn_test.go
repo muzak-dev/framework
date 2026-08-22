@@ -731,7 +731,7 @@ func TestWebSocketRefusesAHandshakeWhileDraining(t *testing.T) {
 	server := httptest.NewServer(app)
 	t.Cleanup(server.Close)
 
-	app.websockets.shutdown(time.Second)
+	app.websockets.shutdown(time.Second, wsCloseGoingAway)
 	_, response := dialRaw(t, server.URL, "/ws")
 	if response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusServiceUnavailable)
@@ -740,15 +740,15 @@ func TestWebSocketRefusesAHandshakeWhileDraining(t *testing.T) {
 
 func TestWebSocketShutdownGivesUpOnAStuckHandler(t *testing.T) {
 	t.Parallel()
-	var registry wsRegistry
+	var registry liveRegistry[*WSConn]
 	conn, _ := newPipeConns(t, WSOptions{CloseGracePeriod: -1, WriteTimeout: 10 * time.Millisecond})
-	if !registry.add(conn) {
+	if registry.add(conn) != admitted {
 		t.Fatal("the connection was not accepted")
 	}
 	// Nothing ever removes it, which is what a handler that ignores its closed
 	// connection looks like from the register's side.
 	start := time.Now()
-	if closed := registry.shutdown(20 * time.Millisecond); closed != 1 {
+	if closed := registry.shutdown(20*time.Millisecond, wsCloseGoingAway); closed != 1 {
 		t.Errorf("shutdown closed %d connections, want 1", closed)
 	}
 	if elapsed := time.Since(start); elapsed > wsTestTimeout {

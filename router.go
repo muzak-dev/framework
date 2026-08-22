@@ -78,6 +78,7 @@ type routerConfig struct {
 	maxUploadSize      int64
 	maxFileSize        int64
 	ws                 *WSOptions
+	sse                *SSEOptions
 	allowUnknownFields *bool
 	deprecated         bool
 	hidden             bool
@@ -97,6 +98,7 @@ type routeConfig struct {
 	maxUploadSize      int64
 	maxFileSize        int64
 	ws                 *WSOptions
+	sse                *SSEOptions
 	allowUnknownFields *bool
 	skipValidation     bool
 	deprecated         bool
@@ -303,6 +305,10 @@ type Route struct {
 	// websocket is non-nil for a route registered with [Router.WS], and holds
 	// the configuration its connections are built with.
 	websocket *wsConfig
+
+	// sse is non-nil for a route registered with [Router.SSE], and holds the
+	// configuration its event streams are built with.
+	sse *sseConfig
 
 	// cfg is the configuration declared directly on the route, retained until
 	// the application is built and the inherited configuration is known.
@@ -530,6 +536,8 @@ type inherited struct {
 	maxFileSize        int64
 	ws                 WSOptions
 	wsMaxConnections   int
+	sse                SSEOptions
+	sseMaxStreams      int
 	allowUnknownFields bool
 	deprecated         bool
 	hidden             bool
@@ -549,6 +557,8 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		maxFileSize:        in.maxFileSize,
 		ws:                 in.ws,
 		wsMaxConnections:   in.wsMaxConnections,
+		sse:                in.sse,
+		sseMaxStreams:      in.sseMaxStreams,
 		allowUnknownFields: in.allowUnknownFields,
 		deprecated:         in.deprecated || cfg.deprecated,
 		hidden:             in.hidden || cfg.hidden,
@@ -564,6 +574,9 @@ func (in inherited) merge(cfg routerConfig) inherited {
 	}
 	if cfg.ws != nil {
 		out.ws = out.ws.overlay(*cfg.ws)
+	}
+	if cfg.sse != nil {
+		out.sse = out.sse.overlay(*cfg.sse)
 	}
 	if cfg.allowUnknownFields != nil {
 		out.allowUnknownFields = *cfg.allowUnknownFields
@@ -680,7 +693,19 @@ func (rt *Route) resolve(in inherited) error {
 	if rt.websocket != nil {
 		return rt.resolveWebSocket(in)
 	}
+	if rt.sse != nil {
+		return rt.resolveSSE(in)
+	}
 	return nil
+}
+
+// answersHead reports whether a GET route can also answer a HEAD request,
+// which is true of every route whose response is a body rather than a
+// conversation. A WebSocket cannot be upgraded from a HEAD, and an event
+// stream answering one would run its handler with every write discarded, so
+// neither is offered.
+func (rt *Route) answersHead() bool {
+	return rt.websocket == nil && rt.sse == nil
 }
 
 // validatePrefix rejects a prefix that would produce a malformed path.

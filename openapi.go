@@ -399,14 +399,23 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		}
 	}
 
-	if rt.websocket != nil {
+	switch {
+	case rt.websocket != nil:
 		// A WebSocket route has no response body to describe. What it has is a
 		// handshake, and what OpenAPI can say about one is that it answers 101
 		// and the conversation continues off the document.
 		op.Responses[strconv.Itoa(http.StatusSwitchingProtocols)] = &Response{
 			Description: "Switching Protocols. The connection is upgraded and the conversation continues over WebSocket.",
 		}
-	} else {
+	case rt.sse != nil:
+		// An event stream answers 200 like any other route, and then keeps
+		// answering. The schema describes one event's data rather than the
+		// whole body, because the body has no end to describe.
+		op.Responses[strconv.Itoa(http.StatusOK)] = &Response{
+			Description: "An event stream. The schema describes the data field of a single event.",
+			Content:     builder.eventStreamContent(rt.outType),
+		}
+	default:
 		op.Responses[strconv.Itoa(rt.Status)] = &Response{
 			Description: orDefault(http.StatusText(rt.Status), "Success"),
 			Content:     builder.responseContent(rt.outType),
@@ -657,6 +666,21 @@ func (b *schemaBuilder) responseContent(t reflect.Type) map[string]MediaType {
 		return map[string]MediaType{"text/html": {Schema: &Schema{Type: "string"}}}
 	}
 	return map[string]MediaType{"application/json": {Schema: b.schemaFor(t)}}
+}
+
+// eventStreamContent describes the events a server-sent events route streams,
+// or nothing at all for one whose output type is [Empty], which is how a
+// stream of text that is not JSON declares itself.
+//
+// OpenAPI 3.1 has no way to say "many of these, one after another", so the
+// schema given for text/event-stream is the one a single event's data field
+// carries. That is what the tools which understand event streams read it as,
+// and it is the only part a client has to be able to decode.
+func (b *schemaBuilder) eventStreamContent(t reflect.Type) map[string]MediaType {
+	if t == emptyType {
+		return nil
+	}
+	return map[string]MediaType{"text/event-stream": {Schema: b.schemaFor(t)}}
 }
 
 // errorResponse describes a failure carrying the standard error envelope.

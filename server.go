@@ -263,8 +263,17 @@ func (a *App) Shutdown(ctx context.Context) error {
 		// A hijacked connection is no longer one net/http tracks, so a
 		// WebSocket would otherwise be left open through the whole shutdown
 		// with its peer none the wiser.
-		if closed := a.websockets.shutdown(a.opts.ShutdownTimeout); closed > 0 {
+		closed := a.websockets.shutdown(a.opts.ShutdownTimeout, wsCloseGoingAway)
+		if closed > 0 {
 			log.Info(fmt.Sprintf("Closed %d websocket %s", closed, plural(closed, "connection")))
+		}
+
+		// An event stream is tracked by net/http, which is exactly why it has
+		// to be ended here: waiting for a handler that is streaming means
+		// waiting for the whole shutdown deadline, once per stream.
+		ended := a.streams.shutdown(a.opts.ShutdownTimeout, (*sseStream).shuttingDown)
+		if ended > 0 {
+			log.Info(fmt.Sprintf("Ended %d event %s", ended, plural(ended, "stream")))
 		}
 
 		timeout := a.opts.ShutdownTimeout

@@ -135,6 +135,12 @@ type AppOptions struct {
 	// [WithWebSocket]. The zero value bounds message and write sizes and
 	// refuses a cross-origin handshake.
 	WebSocket WSOptions
+
+	// SSE configures the event streams of every route registered with
+	// [Router.SSE], and is narrowed for a router or a route with [WithSSE].
+	// The zero value bounds writes, holds an idle stream open with a periodic
+	// keepalive, and caps how many streams the application serves at once.
+	SSE SSEOptions
 }
 
 // App is a Badele application: a root router plus the server, middleware,
@@ -165,7 +171,13 @@ type App struct {
 
 	// websockets tracks the open WebSocket connections, which net/http cannot
 	// do for us because a hijacked connection is no longer one of its own.
-	websockets wsRegistry
+	websockets liveRegistry[*WSConn]
+
+	// streams tracks the open server-sent event streams. net/http does know
+	// about those, which is the problem: a shutdown would wait for every one
+	// of them until its deadline, because a handler that is still streaming is
+	// a handler that has not returned.
+	streams liveRegistry[*sseStream]
 
 	buildOnce sync.Once
 	buildErr  error
@@ -353,8 +365,11 @@ func (a *App) build() {
 		maxFileSize:      a.opts.MaxFileSize,
 		ws:               a.opts.WebSocket,
 		wsMaxConnections: a.opts.WebSocket.MaxConnections,
+		sse:              a.opts.SSE,
+		sseMaxStreams:    a.opts.SSE.MaxStreams,
 	}, emit, state)
 	a.websockets.limit = wsConnectionLimit(a.opts.WebSocket.MaxConnections)
+	a.streams.limit = sseStreamLimit(a.opts.SSE.MaxStreams)
 	a.lifecycle.components = state.lifecycles
 	a.frontends = state.frontends
 	slices.SortStableFunc(a.frontends, func(x, y *frontend) int {
@@ -426,9 +441,11 @@ func allowHeader(methods map[string]*Route) string {
 	for method := range methods {
 		names = append(names, method)
 	}
-	// A GET route answers HEAD automatically, except a WebSocket route: there
-	// is no way to upgrade a HEAD, so promising one would be a lie.
-	if get, hasGet := methods[http.MethodGet]; hasGet && get.websocket == nil {
+	// A GET route answers HEAD automatically, unless it is one whose body is a
+	// conversation: there is no way to upgrade a HEAD, and answering one from
+	// an event stream would run a handler whose every write is discarded until
+	// it gave up, so promising either would be a lie.
+	if get, hasGet := methods[http.MethodGet]; hasGet && get.answersHead() {
 		if _, hasHead := methods[http.MethodHead]; !hasHead {
 			names = append(names, http.MethodHead)
 		}
@@ -517,7 +534,7 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 func (a *App) dispatchFallback(c *Context, entry *pathEntry) {
 	switch c.r.Method {
 	case http.MethodHead:
-		if route, ok := entry.methods[http.MethodGet]; ok && route.websocket == nil {
+		if route, ok := entry.methods[http.MethodGet]; ok && route.answersHead() {
 			// net/http discards the body of a HEAD response, so running the
 			// GET handler yields correct headers with no body.
 			a.run(c, route)

@@ -85,7 +85,8 @@ func TestWebSocketRefusesAPingFlood(t *testing.T) {
 }
 
 func TestWebSocketDoesNotAllocateWhatIsMerelyDeclared(t *testing.T) {
-	t.Parallel()
+	// This test is not parallel: it measures the whole process's live heap, so
+	// anything else running at the same time is counted as growth here.
 	// A frame header is six bytes and can declare a payload the size of the
 	// whole read limit. Committing that memory before the bytes arrive would
 	// make a handful of connections the cheapest denial of service there is.
@@ -537,10 +538,7 @@ func TestWebSocketSurvivesAnAttackStorm(t *testing.T) {
 	if left := handlers.Load(); left != 0 {
 		t.Errorf("%d handlers are still running after every attacker disconnected", left)
 	}
-	app.websockets.mu.Lock()
-	tracked := len(app.websockets.conns)
-	app.websockets.mu.Unlock()
-	if tracked != 0 {
+	if tracked := app.websockets.count(); tracked != 0 {
 		t.Errorf("the register still holds %d connections, so a shutdown would wait on them", tracked)
 	}
 
@@ -680,7 +678,8 @@ func TestWebSocketHandshakeSlowlorisIsBounded(t *testing.T) {
 }
 
 func TestWebSocketReadingManyMessagesDoesNotGrow(t *testing.T) {
-	t.Parallel()
+	// Not parallel, for the reason given on the other test that weighs the
+	// heap: the reading is process-wide.
 	// Nothing a message passes through is retained, so a long conversation
 	// costs what one message costs rather than what all of them do.
 	_, server := newWSTestApp(t, func(app *App) {

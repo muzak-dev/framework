@@ -16,7 +16,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -417,20 +416,22 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := a.websockets.admits(); err != nil {
-		// Refusing before the upgrade is what lets a client shut out by a
-		// draining or a full server read an ordinary error response.
-		if errors.Is(err, errWSTooManyConnections) {
-			c.w.Header().Set("Retry-After", "5")
-		}
-		return nil, err
+	// Refusing before the upgrade is what lets a client shut out by a draining
+	// or a full server read an ordinary error response.
+	switch a.websockets.admits() {
+	case registryDraining:
+		return nil, errWSShuttingDown
+	case registryFull:
+		c.w.Header().Set("Retry-After", "5")
+		return nil, errWSTooManyConnections
+	case admitted:
 	}
 	subprotocol := wsSubprotocol(c.r, cfg.opts.Subprotocols)
 	conn, err := a.upgrade(c, cfg, accept, subprotocol)
 	if err != nil {
 		return nil, err
 	}
-	if !a.websockets.add(conn) {
+	if a.websockets.add(conn) != admitted {
 		// coverage: this is the losing side of a race between a handshake and
 		// a shutdown or a full register, narrowed to the microseconds between
 		// the check above and the upgrade, so it is reasoned about rather than
@@ -447,6 +448,13 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 		go conn.keepalive(c.Context(), cfg.opts.PingInterval, cfg.opts.PongTimeout)
 	}
 	return conn, nil
+}
+
+// wsCloseGoingAway ends a connection because the server is going away, which
+// is what the register calls for every connection it holds. A peer is told
+// rather than left to discover a connection that stopped answering.
+func wsCloseGoingAway(conn *WSConn) {
+	_ = conn.Close(WSStatusGoingAway, "the server is shutting down")
 }
 
 // errWSShuttingDown reports a handshake that arrived while the server was
@@ -759,105 +767,4 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 	// The handshake is long since answered, so there is no response left for
 	// the router to write.
 	return nil
-}
-
-// wsRegistry tracks the open WebSocket connections of an application, which is
-// what makes a graceful shutdown possible: a hijacked connection is invisible
-// to net/http's own draining, so nothing else would ever tell these peers that
-// the server is going away.
-type wsRegistry struct {
-	mu sync.Mutex
-	// limit is how many connections may be held at once, and zero means as
-	// many as the process can carry.
-	limit    int
-	conns    map[*WSConn]struct{}
-	draining bool
-	// drained is closed by the last connection to go, which is what a
-	// shutdown waits on. It is a channel rather than a wait group because a
-	// shutdown that gives up must leave nothing behind waiting.
-	drained chan struct{}
-}
-
-// admits reports whether another connection can be served, and why not when it
-// cannot.
-func (g *wsRegistry) admits() error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.admitsLocked()
-}
-
-// admitsLocked is admits with the lock already held.
-func (g *wsRegistry) admitsLocked() error {
-	switch {
-	case g.draining:
-		return errWSShuttingDown
-	case g.limit > 0 && len(g.conns) >= g.limit:
-		return errWSTooManyConnections
-	default:
-		return nil
-	}
-}
-
-// add records a new connection, reporting false when the application has since
-// stopped admitting them.
-func (g *wsRegistry) add(conn *WSConn) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.admitsLocked() != nil {
-		return false
-	}
-	if g.conns == nil {
-		g.conns = make(map[*WSConn]struct{})
-	}
-	g.conns[conn] = struct{}{}
-	return true
-}
-
-// remove forgets a connection whose handler has finished, and tells a waiting
-// shutdown when it was the last one.
-func (g *wsRegistry) remove(conn *WSConn) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	delete(g.conns, conn)
-	if len(g.conns) == 0 && g.drained != nil {
-		close(g.drained)
-		g.drained = nil
-	}
-}
-
-// shutdown tells every open connection that the server is going away and waits
-// for the handlers to return, giving up after timeout. It returns how many
-// connections it asked to close.
-func (g *wsRegistry) shutdown(timeout time.Duration) int {
-	if timeout <= 0 {
-		timeout = DefaultShutdownTimeout
-	}
-	g.mu.Lock()
-	g.draining = true
-	open := make([]*WSConn, 0, len(g.conns))
-	for conn := range g.conns {
-		open = append(open, conn)
-	}
-	if len(open) > 0 {
-		g.drained = make(chan struct{})
-	}
-	drained := g.drained
-	g.mu.Unlock()
-	if len(open) == 0 {
-		return 0
-	}
-
-	// Closing concurrently matters: a peer that has stopped reading holds up
-	// its own goodbye until the write timeout, and one such peer should not
-	// delay everyone else's.
-	for _, conn := range open {
-		go func() { _ = conn.Close(WSStatusGoingAway, "the server is shutting down") }()
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-drained:
-	case <-timer.C:
-	}
-	return len(open)
 }

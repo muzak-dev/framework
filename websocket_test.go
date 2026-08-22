@@ -918,19 +918,19 @@ func TestWebSocketShutdownClosesOpenConnections(t *testing.T) {
 
 func TestWebSocketRefusesAHandshakeWhileShuttingDown(t *testing.T) {
 	t.Parallel()
-	var registry wsRegistry
+	var registry liveRegistry[*WSConn]
 	// A timeout of zero falls back to the default rather than giving up at
 	// once, which is what an application that disabled its own would get.
-	if closed := registry.shutdown(0); closed != 0 {
+	if closed := registry.shutdown(0, wsCloseGoingAway); closed != 0 {
 		t.Errorf("shutdown of an empty register closed %d connections, want 0", closed)
 	}
-	if registry.add(&WSConn{}) {
+	if registry.add(&WSConn{}) != registryDraining {
 		t.Error("a connection was accepted after the register began draining")
 	}
 	// Forgetting a connection that was never tracked must not unbalance the
 	// wait group, which a second shutdown would then hang on.
 	registry.remove(&WSConn{})
-	if closed := registry.shutdown(time.Second); closed != 0 {
+	if closed := registry.shutdown(time.Second, wsCloseGoingAway); closed != 0 {
 		t.Errorf("the second shutdown closed %d connections, want 0", closed)
 	}
 }

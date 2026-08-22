@@ -257,6 +257,14 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 	}
 
 	if name, ok := resolveFile(files, relative); ok {
+		if !isRead(c.r.Method) {
+			// The file is there. What is not allowed is the method, and
+			// answering 404 would say the opposite.
+			c.w.Header().Set("Allow", allowedOnFiles)
+			a.fail(c, NewHTTPErrorf(http.StatusMethodNotAllowed,
+				"%s is not allowed here; allowed methods are %s", c.r.Method, allowedOnFiles))
+			return
+		}
 		f.write(c, files, name, http.StatusOK)
 		return
 	}
@@ -302,8 +310,8 @@ func resolveFile(files fs.FS, relative string) (string, bool) {
 func (a *App) serveFrontendFallback(c *Context, f *frontend, files fs.FS) {
 	// Only a read can be answered by a file. Anything else naming a path that
 	// exists solely in the frontend is a request for something that is not
-	// there.
-	if c.r.Method != http.MethodGet && c.r.Method != http.MethodHead {
+	// there, which is a 404 rather than the 405 a real file would give.
+	if !isRead(c.r.Method) {
 		a.fail(c, frontendNotFound(c.r))
 		return
 	}
@@ -411,4 +419,14 @@ func (a *App) frontendFor(requestPath string) (*frontend, string, bool) {
 		}
 	}
 	return nil, "", false
+}
+
+// allowedOnFiles is the Allow header of a path served from a filesystem, which
+// can only be read.
+const allowedOnFiles = "GET, HEAD"
+
+// isRead reports whether a method asks for a representation rather than acting
+// on one.
+func isRead(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
 }

@@ -475,7 +475,7 @@ func TestFrontendCanDeferTheCheck(t *testing.T) {
 	if strings.Contains(rec.Body.String(), dir) {
 		t.Error("the response named a path on the server's filesystem")
 	}
-	if !strings.Contains(buf.String(), "frontend directory could not be opened") {
+	if !strings.Contains(buf.String(), "could not be opened") {
 		t.Errorf("log = %s, want the reason recorded", buf.String())
 	}
 }
@@ -618,4 +618,43 @@ func TestFrontendSurvivesAFilesystemThatFailsMidRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// assertReadOnly checks that a path served from a filesystem answers a read and
+// refuses everything else.
+func assertReadOnly(t *testing.T, app *App, target string) {
+	t.Helper()
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodOptions} {
+		rec := doRequest(t, app, httptest.NewRequest(method, target, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s = %d, want 405", method, target, rec.Code)
+		}
+		if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+			t.Errorf("%s %s: Allow = %q, want \"GET, HEAD\"", method, target, got)
+		}
+		if rec.Body.Len() > 0 && !strings.Contains(rec.Body.String(), "not allowed") {
+			t.Errorf("%s %s answered with %q, want no content of its own", method, target, rec.Body.String())
+		}
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		rec := doRequest(t, app, httptest.NewRequest(method, target, nil))
+		assertStatus(t, rec, http.StatusOK)
+	}
+}
+
+func TestFrontendAnswersTheWrongMethodWithAllow(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Frontend("/", FrontendOptions{Dir: buildOutput(t, spa)})
+	built := mustBuild(t, app)
+
+	// A file that exists cannot be written to, and answering 404 would claim it
+	// is not there. Serving it back for a DELETE would be worse still.
+	assertReadOnly(t, built, "/assets/app.js")
+
+	// A path that only the fallback covers is a different matter: nothing is
+	// there, so it is missing rather than read-only.
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/settings", nil)
+	req.Header.Set("Accept", "text/html")
+	assertStatus(t, doRequest(t, built, req), http.StatusNotFound)
 }

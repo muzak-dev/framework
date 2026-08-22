@@ -131,6 +131,35 @@ type WSOptions struct {
 	// to [DefaultWSPongTimeout]. It is meaningful only alongside PingInterval.
 	PongTimeout time.Duration
 
+	// MessageLimits bounds how fast a peer may send messages, using the same
+	// quotas, storage and tracker as [RateLimitOptions] does for requests. It
+	// is unset by default, which leaves a connected peer free to send as fast
+	// as it likes within ReadLimit and ReadTimeout.
+	//
+	// ReadLimit bounds what one message costs and MaxConnections bounds how
+	// many peers there are, but neither bounds a peer that stays inside both
+	// and simply never pauses. This is what does:
+	//
+	//	badele.WithWebSocket(badele.WSOptions{
+	//		MessageLimits: []badele.Quota{{Name: "ws-messages", Window: time.Second, Limit: 20}},
+	//	})
+	//
+	// Messages are what is counted, one per message the handler reads, which
+	// bounds the scheduling a chatty peer costs; ReadLimit is what bounds the
+	// bytes. A peer that goes over is closed with
+	// [WSStatusPolicyViolation] rather than left connected and ignored,
+	// because a message silently dropped is a protocol nobody can debug. The
+	// count happens after the message has been read, so the limit bounds a
+	// sustained rate rather than refusing the message that crossed it.
+	//
+	// Counting a message costs whatever a storage round trip costs, so a
+	// shared storage on a chatty connection is a real expense; prefer a window
+	// long enough that the count is not the conversation's bottleneck. The
+	// quotas share a namespace with those of [RateLimitOptions], so give them
+	// names of their own unless a shared budget is what is wanted. A route
+	// marked [SkipRateLimit] counts no messages either.
+	MessageLimits []Quota
+
 	// Subprotocols lists the subprotocols the route can speak, such as
 	// "graphql-transport-ws". The client's own list is in preference order, so
 	// the first of its choices that appears here is the one negotiated, and a
@@ -188,6 +217,9 @@ func (o WSOptions) overlay(over WSOptions) WSOptions {
 	}
 	if over.PongTimeout != 0 {
 		o.PongTimeout = over.PongTimeout
+	}
+	if over.MessageLimits != nil {
+		o.MessageLimits = over.MessageLimits
 	}
 	if over.Subprotocols != nil {
 		o.Subprotocols = over.Subprotocols
@@ -267,6 +299,9 @@ type WSHandler[In any] func(ctx *Context, in In, conn *WSConn) error
 type wsConfig struct {
 	opts        WSOptions
 	allowOrigin func(r *http.Request, origin string) bool
+	// messages is the resolved policy for [WSOptions.MessageLimits], and is
+	// nil for a route that does not bound how fast a peer may send.
+	messages *rateLimitConfig
 }
 
 // WS registers a WebSocket handler at the given path template.
@@ -375,6 +410,13 @@ func (rt *Route) resolveWebSocket(in inherited) error {
 			return fmt.Errorf("badele: WS %s: subprotocol %q is not a valid token", rt.Path, wsShorten(name))
 		}
 	}
+	if limits := rt.websocket.opts.MessageLimits; len(limits) > 0 && !rt.skipRateLimit {
+		messages, err := newRateLimitConfig(rt.rateLimitOpts, limits)
+		if err != nil {
+			return fmt.Errorf("badele: WS %s: MessageLimits: %w", rt.Path, err)
+		}
+		rt.websocket.messages = messages
+	}
 	rt.websocket.allowOrigin = wsOriginPolicy(rt.websocket.opts)
 	rt.responses = append(rt.responses, responseDoc{
 		code:        http.StatusUpgradeRequired,
@@ -416,6 +458,16 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Whose budget the messages are counted against is settled here, while
+	// there is still a response to refuse the handshake with: a tracker that
+	// insists on a credential has no way to say so once the connection has
+	// been upgraded.
+	messageKey := ""
+	if cfg.messages != nil {
+		if messageKey, err = cfg.messages.key(c); err != nil {
+			return nil, err
+		}
+	}
 	// Refusing before the upgrade is what lets a client shut out by a draining
 	// or a full server read an ordinary error response.
 	switch a.websockets.admits() {
@@ -439,6 +491,9 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 		// unaccounted for; there is no response left to refuse it with by now.
 		_ = conn.Close(WSStatusGoingAway, "the server is shutting down")
 		return nil, errWSShuttingDown
+	}
+	if cfg.messages != nil {
+		conn.messages = &wsMessageLimiter{cfg: cfg.messages, key: messageKey, logger: c.logger, requestID: c.RequestID()}
 	}
 	// The request's cancellation is watched once here rather than once per
 	// message, and it is watched before anything else can touch the

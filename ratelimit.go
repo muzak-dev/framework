@@ -541,6 +541,59 @@ func resetSeconds(reset time.Duration) int {
 	return int((reset + time.Second - 1) / time.Second)
 }
 
+// wsMessageLimiter counts the messages one WebSocket connection sends.
+//
+// The key is resolved once, during the handshake, and kept for the life of the
+// connection. It has to be settled there because a tracker that refuses is
+// refusing a request, and once the connection has been upgraded there is no
+// response left to refuse it with. Keeping it also means a peer cannot change
+// which budget it spends from part way through a conversation.
+//
+// Nothing of the request is retained beyond the key and the identifier, both
+// of them copied: a connection outlives its handler's reach into the pooled
+// [Context] by far too much for anything else to be safe.
+type wsMessageLimiter struct {
+	cfg       *rateLimitConfig
+	key       string
+	logger    *slog.Logger
+	requestID string
+}
+
+// allow counts one message and returns the status the connection should be
+// closed with, or zero when the peer may carry on.
+func (l *wsMessageLimiter) allow(ctx context.Context) (WSStatus, string) {
+	for _, quota := range l.cfg.quotas {
+		count, _, err := l.cfg.storage.Increment(ctx, quota.Name, l.key, quota.Window)
+		if err != nil {
+			return l.storageFailed(ctx, quota, err)
+		}
+		if count > quota.Limit {
+			// The reason travels in a close frame, which holds 123 bytes, so
+			// it says what happened rather than which quota said so.
+			return WSStatusPolicyViolation, "you are sending messages faster than this endpoint allows"
+		}
+	}
+	return 0, ""
+}
+
+// storageFailed decides what to do about a storage that could not count a
+// message. The key is never logged, because it carries whatever the tracker
+// read from the client.
+func (l *wsMessageLimiter) storageFailed(ctx context.Context, quota Quota, err error) (WSStatus, string) {
+	if l.cfg.failOpen {
+		l.logger.WarnContext(ctx, "badele: the rate limit storage failed; the websocket message was not counted",
+			slog.String("quota", quota.Name),
+			slog.String(RequestIDKey, l.requestID),
+			slog.String("error", err.Error()))
+		return 0, ""
+	}
+	l.logger.ErrorContext(ctx, "badele: the rate limit storage failed; closing the websocket connection",
+		slog.String("quota", quota.Name),
+		slog.String(RequestIDKey, l.requestID),
+		slog.String("error", err.Error()))
+	return WSStatusTryAgainLater, "the server cannot count messages at the moment; reconnect shortly"
+}
+
 // resolveRateLimiting completes the rate limiting of every route once the
 // whole routing tree is known.
 //
@@ -589,11 +642,15 @@ func (a *App) resolveRateLimiting(state *buildState) {
 	}
 }
 
-// rateLimiters returns every resolved policy attached to a route.
+// rateLimiters returns every resolved policy attached to a route, which is its
+// request policy and, for a WebSocket route, its message policy.
 func (rt *Route) rateLimiters() []*rateLimitConfig {
 	var configs []*rateLimitConfig
 	if rt.rateLimit != nil {
 		configs = append(configs, rt.rateLimit)
+	}
+	if rt.websocket != nil && rt.websocket.messages != nil {
+		configs = append(configs, rt.websocket.messages)
 	}
 	return configs
 }

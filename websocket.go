@@ -263,6 +263,11 @@ type WSConn struct {
 	// nanoseconds, for the keepalive to compare against.
 	lastPong atomic.Int64
 
+	// messages bounds how fast the peer may send, and is nil unless
+	// [WSOptions.MessageLimits] asked for a bound. It is written once, before
+	// the handler can reach the connection, and only read afterwards.
+	messages *wsMessageLimiter
+
 	// done is closed when the connection fails, which is what lets a goroutine
 	// waiting for a semaphore give up.
 	done chan struct{}
@@ -316,13 +321,24 @@ func (c *WSConn) Subprotocol() string { return c.subprotocol }
 // kept for as long as it is useful. A message larger than the connection's
 // read limit is refused with [WSStatusMessageTooBig] before any of it is
 // buffered, which is what keeps a peer from choosing how much memory the
-// server spends.
+// server spends. A peer sending faster than [WSOptions.MessageLimits] allows
+// is closed rather than read from again.
 func (c *WSConn) Read(ctx context.Context) (WSMessageType, []byte, error) {
 	if err := c.acquire(ctx, c.readSem); err != nil {
 		return 0, nil, err
 	}
 	defer c.release(c.readSem)
-	return c.readMessage(ctx)
+	typ, payload, err := c.readMessage(ctx)
+	if err != nil || c.messages == nil {
+		return typ, payload, err
+	}
+	// The message is counted once it is whole, so the count measures the rate
+	// a peer sustains rather than refusing the one message that crossed the
+	// line. The message itself is dropped along with the connection.
+	if status, reason := c.messages.allow(ctx); status != 0 {
+		return 0, nil, c.abort(status, reason)
+	}
+	return typ, payload, nil
 }
 
 // ReadText reads the next message and returns it as text.

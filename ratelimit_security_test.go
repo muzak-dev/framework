@@ -168,3 +168,199 @@ func TestRateLimitLeavesNothingRunning(t *testing.T) {
 	}
 	assertNoGoroutineLeaks(t)
 }
+
+// wsMessageLimited builds an application whose WebSocket route bounds how fast
+// a peer may send.
+func wsMessageLimited(t *testing.T, limits []Quota, opts ...RouterOption) (*App, *httptest.Server) {
+	t.Helper()
+	return newWSTestApp(t, func(app *App) {
+		app.WS("/ws", wsEcho, WithWebSocket(WSOptions{MessageLimits: limits}))
+	}, opts...)
+}
+
+func TestWSMessageLimitClosesAFloodingPeer(t *testing.T) {
+	t.Parallel()
+	_, server := wsMessageLimited(t, []Quota{{Name: "ws-messages", Window: time.Hour, Limit: 2}})
+	conn := dialWS(t, server.URL, "/ws")
+
+	for i := range 2 {
+		conn.text("hello " + strconv.Itoa(i))
+		conn.expectText("hello " + strconv.Itoa(i))
+	}
+	conn.text("one too many")
+	reason := conn.expectClose(uint16(WSStatusPolicyViolation))
+	if !strings.Contains(reason, "faster than this endpoint allows") {
+		t.Errorf("close reason = %q, want it to say the peer was sending too fast", reason)
+	}
+	conn.expectEOF()
+}
+
+func TestWSMessageLimitLeavesAnUnlimitedRouteAlone(t *testing.T) {
+	t.Parallel()
+	_, server := wsMessageLimited(t, nil)
+	conn := dialWS(t, server.URL, "/ws")
+	for i := range 20 {
+		conn.text(strconv.Itoa(i))
+		conn.expectText(strconv.Itoa(i))
+	}
+}
+
+func TestWSMessageLimitIsPerClient(t *testing.T) {
+	t.Parallel()
+	// Every connection from these tests arrives from the loopback address, so
+	// a tracker keyed on a header is what gives two peers two budgets.
+	_, server := wsMessageLimited(t,
+		[]Quota{{Name: "ws-per-tenant", Window: time.Hour, Limit: 1}},
+		WithRateLimit(RateLimitOptions{
+			Tracker: func(ctx *Context) (string, error) { return "tenant:" + ctx.Header("X-Tenant"), nil },
+		}))
+
+	first := dialWS(t, server.URL, "/ws", "X-Tenant", "one")
+	first.text("hello")
+	first.expectText("hello")
+
+	second := dialWS(t, server.URL, "/ws", "X-Tenant", "two")
+	second.text("hello")
+	second.expectText("hello")
+
+	// The budget belongs to the client, not the connection, so opening a
+	// second connection does not buy a second budget.
+	third := dialWS(t, server.URL, "/ws", "X-Tenant", "one")
+	third.text("hello")
+	third.expectClose(uint16(WSStatusPolicyViolation))
+}
+
+func TestWSMessageLimitRefusesTheHandshakeWhenTheTrackerDoes(t *testing.T) {
+	t.Parallel()
+	_, server := wsMessageLimited(t,
+		[]Quota{{Name: "ws-key", Window: time.Hour, Limit: 5}},
+		WithRateLimit(RateLimitOptions{
+			Tracker: func(ctx *Context) (string, error) {
+				if key := ctx.Header("X-API-Key"); key != "" {
+					return "apikey:" + key, nil
+				}
+				return "", NewHTTPError(http.StatusUnauthorized, "an API key is required")
+			},
+		}))
+
+	_, response := dialRaw(t, server.URL, "/ws")
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Errorf("handshake status = %d, want 401; a tracker has no way to refuse once the connection is upgraded", response.StatusCode)
+	}
+}
+
+func TestWSMessageLimitClosesWhenTheStorageCannotCount(t *testing.T) {
+	t.Parallel()
+	storage := newRecordingStorage()
+	logger, logs := captureLogger(t)
+	app := New(AppOptions{Title: "Test API", Version: "1.0.0", Logger: logger},
+		WithRateLimit(RateLimitOptions{Storage: storage}))
+	app.WS("/ws", wsEcho, WithWebSocket(WSOptions{
+		MessageLimits: []Quota{{Name: "ws-storage", Window: time.Hour, Limit: 10}},
+	}))
+	mustBuild(t, app)
+	server := httptest.NewServer(app)
+	t.Cleanup(server.Close)
+
+	conn := dialWS(t, server.URL, "/ws")
+	conn.text("fine")
+	conn.expectText("fine")
+
+	storage.fail(errors.New("connection refused"))
+	conn.text("counted against a storage that is gone")
+	conn.expectClose(uint16(WSStatusTryAgainLater))
+	waitForLog(t, logs, "closing the websocket connection")
+}
+
+func TestWSMessageLimitCanFailOpen(t *testing.T) {
+	t.Parallel()
+	storage := newRecordingStorage()
+	storage.fail(errors.New("connection refused"))
+	logger, logs := captureLogger(t)
+	app := New(AppOptions{Title: "Test API", Version: "1.0.0", Logger: logger},
+		WithRateLimit(RateLimitOptions{Storage: storage, FailOpen: true}))
+	app.WS("/ws", wsEcho, WithWebSocket(WSOptions{
+		MessageLimits: []Quota{{Name: "ws-open", Window: time.Hour, Limit: 1}},
+	}))
+	mustBuild(t, app)
+	server := httptest.NewServer(app)
+	t.Cleanup(server.Close)
+
+	conn := dialWS(t, server.URL, "/ws")
+	for i := range 5 {
+		conn.text(strconv.Itoa(i))
+		conn.expectText(strconv.Itoa(i))
+	}
+	waitForLog(t, logs, "the websocket message was not counted")
+}
+
+func TestWSMessageLimitIsSkippedWithTheRest(t *testing.T) {
+	t.Parallel()
+	_, server := newWSTestApp(t, func(app *App) {
+		app.WS("/ws", wsEcho,
+			WithWebSocket(WSOptions{MessageLimits: []Quota{{Name: "ws-skipped", Window: time.Hour, Limit: 1}}}),
+			SkipRateLimit())
+	})
+	conn := dialWS(t, server.URL, "/ws")
+	for i := range 5 {
+		conn.text(strconv.Itoa(i))
+		conn.expectText(strconv.Itoa(i))
+	}
+}
+
+func TestWSMessageLimitSharesTheApplicationStorage(t *testing.T) {
+	t.Parallel()
+	storage := newManagedStorage()
+	app := New(quietOptions(), WithRateLimit(RateLimitOptions{
+		Storage: storage,
+		Quotas:  []Quota{{Name: "ws-handshakes", Window: time.Hour, Limit: 10}},
+	}))
+	app.WS("/ws", wsEcho, WithWebSocket(WSOptions{
+		MessageLimits: []Quota{{Name: "ws-messages", Window: time.Hour, Limit: 10}},
+	}))
+	mustBuild(t, app)
+
+	ctx := context.Background()
+	if err := app.StartLifecycle(ctx); err != nil {
+		t.Fatalf("StartLifecycle() = %v", err)
+	}
+	if err := app.StopLifecycle(ctx); err != nil {
+		t.Fatalf("StopLifecycle() = %v", err)
+	}
+	if starts, _ := storage.counts(); starts != 1 {
+		t.Errorf("storage started %d times, want once for the request and message policies together", starts)
+	}
+}
+
+func TestWSMessageLimitBuildErrors(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.WS("/ws", wsEcho, WithWebSocket(WSOptions{
+		MessageLimits: []Quota{{Name: "bad name", Window: time.Hour, Limit: 1}},
+	}))
+	if message := buildError(t, app); !strings.Contains(message, "MessageLimits") {
+		t.Errorf("build error = %q, want it to name the option at fault", message)
+	}
+}
+
+func TestWSMessageLimitLeavesNothingRunning(t *testing.T) {
+	// Each connection is a different client, so every one of them is closed
+	// by the limiter rather than the first one spending the budget for all.
+	_, server := wsMessageLimited(t,
+		[]Quota{{Name: "ws-leak", Window: time.Hour, Limit: 2}},
+		WithRateLimit(RateLimitOptions{
+			Tracker: func(ctx *Context) (string, error) { return "tenant:" + ctx.Header("X-Tenant"), nil },
+		}))
+	for i := range 10 {
+		conn := dialWS(t, server.URL, "/ws", "X-Tenant", strconv.Itoa(i))
+		conn.text("one")
+		conn.expectText("one")
+		conn.text("two")
+		conn.expectText("two")
+		conn.text("three")
+		conn.expectClose(uint16(WSStatusPolicyViolation))
+		conn.expectEOF()
+	}
+	server.Close()
+	assertNoGoroutineLeaks(t)
+}

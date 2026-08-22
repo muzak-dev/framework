@@ -408,6 +408,21 @@ func (w *responseWriter) Write(b []byte) (int, error) {
 // wrapper.
 func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// FlushError pushes what has been written so far to the client.
+//
+// A wrapper that does not forward a flush is a wrapper that turns a stream
+// into a response the client receives all at once at the end, which is the one
+// thing a stream cannot survive. The controller is used rather than a type
+// assertion so that a writer underneath which spells flushing either way is
+// reached.
+func (w *responseWriter) FlushError() error {
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// Flush is the older spelling of [responseWriter.FlushError], kept because a
+// wrapper written before the newer one existed looks for it by name.
+func (w *responseWriter) Flush() { _ = w.FlushError() }
+
 // markHijacked records that the connection was taken over by a handler, so
 // that nothing later in the chain writes an HTTP response onto a socket that
 // has stopped speaking HTTP. The status is the one the handshake wrote.

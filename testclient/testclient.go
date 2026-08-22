@@ -149,6 +149,7 @@ type request struct {
 	query        url.Values
 	body         io.Reader
 	subprotocols []string
+	sseComments  bool
 	err          error
 }
 

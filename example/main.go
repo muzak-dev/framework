@@ -49,8 +49,15 @@ func main() {
 		Description: "The Bigger Applications example, rebuilt on Badele.",
 		Contact:     &badele.Contact{Email: settings.AdminEmail},
 		Addr:        settings.Addr,
+		// Which address a request is attributed to. Nothing is believed from a
+		// header until the proxy that wrote it is named here.
+		ClientIP: badele.ClientIPOptions{TrustedProxies: settings.TrustedProxies},
 	},
 		badele.WithDependencies(core.GetQueryToken),
+		// The application-wide budget, counted before the guard above runs so
+		// that a request the guard rejects still costs the client something.
+		// Routers narrow it below where they have a reason to.
+		badele.WithRateLimit(core.RateLimitPolicy()),
 		badele.WithSingleton(settings),
 		badele.WithSingleton(models),
 		badele.WithSingleton(store, store.Lifecycle()),

@@ -11,7 +11,12 @@ import (
 
 // Items returns the items router.
 func Items() *badele.Router {
-	r := badele.NewRouter(badele.WithTags("items"))
+	r := badele.NewRouter(badele.WithTags("items"),
+		// This is the one router whose routes resolve a caller, so it is the
+		// one router where the budget is worth spending per caller rather than
+		// per address. Deferring the count is what lets the tracker see the
+		// resolved user; the quotas themselves are inherited unchanged.
+		badele.WithRateLimit(badele.RateLimitOptions{AfterDependencies: true}))
 
 	r.Get("/items/", handlers.ListItems,
 		badele.Summary("List items"))
@@ -55,6 +60,12 @@ func Items() *badele.Router {
 		badele.WithWebSocket(badele.WSOptions{
 			ReadLimit:    64 << 10,
 			PingInterval: 30 * time.Second,
+			// ReadLimit bounds what one message costs and MaxConnections
+			// bounds how many peers there are; this is what bounds a peer that
+			// stays inside both and never pauses.
+			MessageLimits: []badele.Quota{
+				{Name: "ws-messages", Window: time.Second, Limit: 10},
+			},
 		}))
 
 	return r

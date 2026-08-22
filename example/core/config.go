@@ -29,6 +29,13 @@ type Settings struct {
 	// AdminToken guards the admin subtree. It is marked secret so that a
 	// malformed value never appears in a start-up error.
 	AdminToken string `env:"ADMIN_TOKEN" default:"coneofsilence" secret:"true"`
+	// TrustedProxies lists the proxies whose X-Forwarded-For header is
+	// believed, as a comma-separated list of addresses or CIDR prefixes. It is
+	// empty by default, so every request is attributed to the peer that made
+	// it: a forwarding header is written by whatever sent the request, and
+	// believing one from an unknown sender hands every client the ability to
+	// choose which budget it spends.
+	TrustedProxies []string `env:"TRUSTED_PROXIES" required:"false"`
 }
 
 // LoadSettings reads the configuration, stopping the process if a required

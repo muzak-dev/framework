@@ -19,7 +19,10 @@ func Meta() *badele.Router {
 	r.Get("/healthz", handlers.Health,
 		badele.Summary("Liveness probe"),
 		// Routable, but left out of the documentation.
-		badele.Hidden())
+		badele.Hidden(),
+		// A monitor polling every second is the one client that should never
+		// be told to slow down.
+		badele.SkipRateLimit())
 
 	return r
 }

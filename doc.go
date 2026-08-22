@@ -159,6 +159,42 @@
 // end, such as how long the request took, has to wrap the writer and fill the
 // value in as the response starts.
 //
+// # Serving a frontend
+//
+// [Router.Frontend] serves the static output of a frontend build, which is what
+// React, Vue, Svelte, Angular, Solid and Astro produce:
+//
+//	app.Frontend("/", badele.FrontendOptions{Dir: "dist"})
+//
+// Routes win. A request is matched against every registered route first and
+// reaches the frontend only when none of them answered, so mounting at the root
+// cannot shadow an API. Middleware applies, and so do the guards of the router
+// the frontend was registered on, which is what lets a frontend sit behind the
+// same authentication as everything else.
+//
+// A path with no file behind it falls back to one, chosen from what the build
+// produced: a 404.html is served with 404, and failing that an index.html is
+// served with 200 for a browser navigation, which is what a client-side router
+// needs in order to take over. A missing script or stylesheet still answers
+// 404, because handing those an HTML document turns a missing file into a parse
+// error somewhere further from the cause. Name the file with
+// [FrontendOptions.Fallback] or [FrontendOptions.NotFound] to decide instead,
+// or set [FrontendOptions.NoFallback] for a plain 404.
+//
+// [FrontendOptions.FS] serves the frontend from an [io/fs.FS] rather than from
+// disk, which is how it gets built into the binary and the deployment becomes
+// one file:
+//
+//	//go:embed all:dist
+//	var assets embed.FS
+//
+//	app.Frontend("/", badele.FrontendOptions{FS: assets, Dir: "dist"})
+//
+// Nothing is rendered on the server and nothing is built here. A directory is
+// never listed, a symbolic link cannot lead out of the build output, and a
+// directory that does not exist is reported when the application is built
+// rather than on the first request.
+//
 // # What is generated
 //
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs

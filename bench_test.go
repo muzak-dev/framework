@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // benchOut is the response model used across the benchmarks.
@@ -376,4 +377,78 @@ func BenchmarkValidation(b *testing.B) {
 
 	b.Run("validated", func(b *testing.B) { run(b) })
 	b.Run("skipped", func(b *testing.B) { run(b, SkipValidation()) })
+}
+
+// BenchmarkRateLimit measures a request through a rate limited route against
+// the same route unlimited.
+//
+// The pair is what makes the cost readable: the difference is what resolving
+// the client, building the key and counting the quotas add, separate from
+// routing, binding and encoding. The one-quota and three-quota cases are both
+// measured because the storage is consulted once per quota, which is the part
+// of the cost that grows with the policy.
+func BenchmarkRateLimit(b *testing.B) {
+	run := func(b *testing.B, opts ...RouteOption) {
+		app := New(AppOptions{
+			LoggerOptions:    LoggerOptions{Format: LogFormatNone},
+			DisableAccessLog: true,
+			DisableDocs:      true,
+		})
+		app.Get("/ping", func(ctx *Context, _ Empty) (rtOut, error) {
+			return rtOut{OK: true}, nil
+		}, opts...)
+		if err := app.Build(); err != nil {
+			b.Fatalf("Build: %v", err)
+		}
+		// A window long enough that nothing is refused, and a limit high
+		// enough that the benchmark measures counting rather than rejecting.
+		req := httptest.NewRequest("GET", "/ping", nil)
+		w := newDiscardWriter()
+		b.ReportAllocs()
+		for b.Loop() {
+			serve(app, req, w)
+		}
+	}
+
+	unlimited := int(^uint(0) >> 1)
+	b.Run("unlimited", func(b *testing.B) { run(b) })
+	b.Run("one quota", func(b *testing.B) {
+		run(b, RateLimit(Quota{Name: "bench-one", Window: time.Hour, Limit: unlimited}))
+	})
+	b.Run("three quotas", func(b *testing.B) {
+		run(b, RateLimit(
+			Quota{Name: "bench-short", Window: time.Hour, Limit: unlimited},
+			Quota{Name: "bench-medium", Window: time.Hour, Limit: unlimited},
+			Quota{Name: "bench-long", Window: time.Hour, Limit: unlimited}))
+	})
+}
+
+// BenchmarkClientIP measures resolving the client address, which every
+// IP-keyed rate limit pays for on every request.
+//
+// The forwarded case walks a chain of trusted hops, which is what a service
+// behind a load balancer and a CDN actually receives.
+func BenchmarkClientIP(b *testing.B) {
+	run := func(b *testing.B, opts ClientIPOptions, prepare func(*http.Request)) {
+		resolver, err := newClientIPResolver(opts)
+		if err != nil {
+			b.Fatalf("newClientIPResolver: %v", err)
+		}
+		req := httptest.NewRequest("GET", "/ping", nil)
+		req.RemoteAddr = "10.1.2.3:41234"
+		prepare(req)
+		b.ReportAllocs()
+		for b.Loop() {
+			resolver.resolve(req)
+		}
+	}
+
+	b.Run("peer", func(b *testing.B) {
+		run(b, ClientIPOptions{}, func(*http.Request) {})
+	})
+	b.Run("forwarded", func(b *testing.B) {
+		run(b, ClientIPOptions{TrustedProxies: []string{"10.0.0.0/8"}}, func(req *http.Request) {
+			req.Header.Set(DefaultForwardedHeader, "198.51.100.9, 10.4.4.4, 10.5.5.5")
+		})
+	})
 }

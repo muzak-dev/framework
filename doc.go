@@ -248,6 +248,94 @@
 // whatever host the answer named. The test client wraps it as
 // [badele/testclient.Client.WS].
 //
+// # Server-sent events
+//
+// [Router.SSE] registers a route whose response is a stream rather than a body.
+// It is the other half of what a WebSocket is usually reached for, and it is
+// the simpler half: the server sends, the client listens, and a browser reads
+// it natively with EventSource, reconnecting on its own when the stream drops.
+//
+//	type StreamIn struct {
+//		Room string `path:"room"`
+//	}
+//
+//	r.SSE("/rooms/{room}/stream", func(ctx *badele.Context, in StreamIn, stream *badele.SSEStream[MessageOut]) error {
+//		for message := range room(in.Room).Messages(stream.Context()) {
+//			if err := stream.Send(message); err != nil {
+//				return err
+//			}
+//		}
+//		return nil
+//	})
+//
+// The type parameter is the contract: nothing but a MessageOut can be sent, and
+// the generated document describes the stream with that type, in the same way a
+// handler's return type describes an ordinary response. Everything else about
+// the route is ordinary too, so middleware runs, guards run, dependencies
+// resolve, and the input is bound and validated before a byte of the stream is
+// written. A request that fails any of that is answered with the usual JSON
+// error and never becomes a stream at all.
+//
+// Nothing here takes a context, unlike [WSConn], because a stream belongs to
+// one request: [SSEStream.Context] governs every send and is cancelled when the
+// client disconnects or the server begins shutting down, so a handler watches
+// one thing and every send after it reports [ErrSSEStreamEnded]. Writes are
+// serialized, so any number of goroutines may write to one stream.
+//
+// [SSEStream.SendEvent] carries what a bare value cannot: a name to dispatch
+// under, an identifier to resume from, a reconnection delay, or a payload that
+// is not JSON, such as the "[DONE]" sentinel some protocols end with. A browser
+// sends the last identifier it saw back in the Last-Event-ID header when it
+// reconnects, which [SSEStream.LastEventID] reads, and that is what turns a
+// dropped connection into a stream that picks up where it left off.
+//
+// A stream is not tied to GET. [Router.SSEHandle] registers one for any method,
+// which is what a protocol that streams its answer to a posted document needs,
+// and there the input binds a request body like any other route.
+//
+// # What a stream bounds
+//
+// An event stream costs a connection and a goroutine for as long as a client
+// cares to hold it, so the same reasoning applies as to a WebSocket.
+//
+//   - A client that stops reading is given up on after
+//     [SSEOptions.WriteTimeout], rather than pinning a goroutine and a growing
+//     socket buffer for as long as it likes.
+//   - The application serves at most [SSEOptions.MaxStreams] streams at once,
+//     and answers 503 with a Retry-After beyond that.
+//   - The listener's own timeouts are cleared for the stream and replaced with
+//     a deadline per event, because a stream is a response that does not end
+//     and would otherwise die at [ServerOptions.WriteTimeout] however healthy
+//     it was. The read deadline goes too: it would cancel the request, and with
+//     it the stream, at [ServerOptions.ReadTimeout] and blame the client.
+//   - An event name or identifier carrying a line break is refused rather than
+//     repaired. An event stream is a sequence of lines, so a break in one of
+//     those fields would end it and let whatever followed be read as fields of
+//     its own, which on a stream carrying one client's input to another is
+//     event forgery.
+//   - A payload spanning several lines is written as several data lines and
+//     arrives whole, which is both what the format asks for and what stops a
+//     value from ending its own field.
+//   - A comment goes out every [SSEOptions.KeepAlive] on a stream that has said
+//     nothing, because a proxy that sees an idle connection for long enough
+//     closes it, and because a silent stream is indistinguishable from a dead
+//     one.
+//   - Nothing a handler fails with is disclosed: the stream ends and the reason
+//     goes to the log. The response header was written before the handler ran,
+//     which is what lets a client see the stream open immediately, so anything
+//     that decides whether to serve a stream at all belongs in a guard or a
+//     dependency, where there is still a response to say it in.
+//
+// Compression leaves an event stream alone, because holding events in a
+// compressor's window until something forces them out is the one thing a stream
+// cannot survive. The origin policy a WebSocket needs has no counterpart here
+// either: an EventSource is subject to the same-origin policy and to CORS like
+// any other request, so [AppOptions.CORS] governs it.
+//
+// [SSEDial] is the reading end of the same engine, so a stream route is tested
+// over a real connection rather than against a second implementation, and the
+// test client wraps it as [badele/testclient.Client.SSE].
+//
 // # Serving a frontend
 //
 // [Router.Frontend] serves the static output of a frontend build, which is what
@@ -337,7 +425,8 @@
 // rejected, duplicate members and invalid UTF-8 are refused by
 // encoding/json/v2, CORS denies every cross-origin request until it is
 // configured, a WebSocket handshake from another origin is refused until it is
-// allowed, the connections one application holds are capped, and a panic
+// allowed, the connections and the event streams one application holds are both
+// capped, a write to a client that stopped reading gives up, and a panic
 // becomes a generic 500 with the stack recorded only in the log. Each of these can be relaxed deliberately; none of them is relaxed
 // by omission.
 //

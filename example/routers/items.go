@@ -31,6 +31,21 @@ func Items() *badele.Router {
 		badele.Summary("Rename an item"),
 		badele.WithResponseDoc(http.StatusNotFound, "The item does not exist"))
 
+	// An event stream route is declared like any other too, and answers 200
+	// rather than upgrading: the guards run and the input binds before a byte
+	// of the stream is written, and the handler owns the stream until it
+	// returns.
+	r.SSE("/items/stream", handlers.StreamItems,
+		badele.Summary("Follow every change to the items"),
+		badele.WithSSE(badele.SSEOptions{
+			// A stream that says nothing for long enough is closed by proxies
+			// that believe it to be idle, so a comment goes out instead.
+			KeepAlive: 15 * time.Second,
+			// A browser reconnects on its own when a stream ends, and this is
+			// how soon.
+			Retry: 2 * time.Second,
+		}))
+
 	// A WebSocket route is declared like any other: the input is bound from
 	// the handshake, the dependency resolves before the upgrade, and the
 	// handler owns the connection until it returns.

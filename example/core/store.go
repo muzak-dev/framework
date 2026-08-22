@@ -25,6 +25,25 @@ type Item struct {
 	Name string
 }
 
+// Change is one thing that happened to an item, numbered so that a client can
+// say what it has already seen.
+type Change struct {
+	// Seq numbers the change within this process, from one.
+	Seq int
+	// Item is the item as it stands after the change.
+	Item Item
+}
+
+// changeLogSize is how many changes the store remembers for a client that
+// reconnects. A log that grew without bound would be a memory leak with a
+// respectable name.
+const changeLogSize = 128
+
+// watcherBuffer is how many changes a subscriber may fall behind by before it
+// starts losing them. Dropping is deliberate: a slow reader must not hold up
+// the write that produced the change, nor the readers that are keeping up.
+const watcherBuffer = 16
+
 // ItemStore is the example's stand-in for a database.
 //
 // Unlike [ModelRegistry] it does not implement badele.Lifecycle, so it is
@@ -34,11 +53,73 @@ type Item struct {
 type ItemStore struct {
 	mu    sync.RWMutex
 	items map[string]Item
+	// seq numbers the changes, log remembers the recent ones for a client that
+	// reconnects, and watchers are the streams following along.
+	seq      int
+	log      []Change
+	watchers map[chan Change]struct{}
 }
 
 // NewItemStore returns an empty store.
 func NewItemStore() *ItemStore {
-	return &ItemStore{items: map[string]Item{}}
+	return &ItemStore{items: map[string]Item{}, watchers: map[chan Change]struct{}{}}
+}
+
+// Watch returns a channel carrying every change made from now on, until ctx is
+// cancelled.
+//
+// A subscriber that falls more than [watcherBuffer] changes behind loses the
+// ones it did not keep up with, rather than blocking the writer. That is what
+// [ItemStore.Since] is for: a stream reads the backlog by sequence number and
+// only then follows the live changes.
+func (s *ItemStore) Watch(ctx context.Context) <-chan Change {
+	updates := make(chan Change, watcherBuffer)
+	s.mu.Lock()
+	s.watchers[updates] = struct{}{}
+	s.mu.Unlock()
+
+	// Unsubscribing when the caller's context ends is what keeps a finished
+	// stream from being sent changes nobody will read.
+	context.AfterFunc(ctx, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.watchers, updates)
+	})
+	return updates
+}
+
+// Since returns the remembered changes numbered after seq, which is how a
+// stream resumes from the last event a client saw.
+func (s *ItemStore) Since(seq int) []Change {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Change, 0, len(s.log))
+	for _, change := range s.log {
+		if change.Seq > seq {
+			out = append(out, change)
+		}
+	}
+	return out
+}
+
+// record numbers a change, remembers it and hands it to every watcher. The
+// store's lock must be held.
+func (s *ItemStore) record(item Item) {
+	s.seq++
+	change := Change{Seq: s.seq, Item: item}
+	s.log = append(s.log, change)
+	if len(s.log) > changeLogSize {
+		s.log = s.log[len(s.log)-changeLogSize:]
+	}
+	for watcher := range s.watchers {
+		select {
+		case watcher <- change:
+		default:
+			// This subscriber is behind. It loses the change rather than
+			// holding up everyone else, and picks the thread up from Since
+			// when it reconnects.
+		}
+	}
 }
 
 // Lifecycle returns the option that registers the store's seeding and teardown
@@ -59,6 +140,8 @@ func (s *ItemStore) Lifecycle() badele.SingletonOption {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			clear(s.items)
+			clear(s.watchers)
+			s.log = nil
 			return nil
 		},
 	)
@@ -94,6 +177,7 @@ func (s *ItemStore) Create(item Item) error {
 		return ErrItemExists
 	}
 	s.items[item.ID] = item
+	s.record(item)
 	return nil
 }
 
@@ -107,5 +191,6 @@ func (s *ItemStore) Rename(id, name string) (Item, error) {
 	}
 	item.Name = name
 	s.items[id] = item
+	s.record(item)
 	return item, nil
 }

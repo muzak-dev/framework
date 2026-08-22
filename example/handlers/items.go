@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"badele"
 	"badele-example/core"
@@ -111,4 +112,67 @@ func ItemSocket(ctx *badele.Context, in schemas.WSItemIn, conn *badele.WSConn) e
 			return err
 		}
 	}
+}
+
+// StreamItems streams every change to the item store as server-sent events.
+//
+// The request is an ordinary one: the guards have run and the dependency is
+// resolved by the time this starts, and what is different is the third
+// argument, which is the stream the handler owns until it returns. Everything
+// it sends is a schemas.ItemOut, which the compiler enforces and the generated
+// document describes.
+//
+//	curl -N 'http://localhost:8080/items/stream?token=jessica'
+func StreamItems(ctx *badele.Context, _ badele.Empty, stream *badele.SSEStream[schemas.ItemOut]) error {
+	store := badele.From[*core.ItemStore](ctx)
+
+	// A browser sends back the identifier of the last event it saw when its
+	// EventSource reconnects, which is what lets this pick the thread up
+	// rather than start again. The value is the client's, so one that is not a
+	// number is treated as no value at all rather than as an error.
+	seen := 0
+	if last := stream.LastEventID(); last != "" {
+		if parsed, err := strconv.Atoi(last); err == nil {
+			seen = parsed
+		}
+	}
+
+	// Subscribing before the backlog is read is what stops a change made in
+	// between from falling through the gap between the two.
+	updates := store.Watch(stream.Context())
+	for _, change := range store.Since(seen) {
+		if err := sendChange(stream, change); err != nil {
+			return err
+		}
+		seen = change.Seq
+	}
+
+	for {
+		select {
+		case <-stream.Context().Done():
+			// The client went away or the server is shutting down. Either way
+			// the conversation is over, and it is not a failure.
+			return nil
+		case change := <-updates:
+			if change.Seq <= seen {
+				// Already sent from the backlog above.
+				continue
+			}
+			if err := sendChange(stream, change); err != nil {
+				return err
+			}
+			seen = change.Seq
+		}
+	}
+}
+
+// sendChange writes one change as an event a browser can listen for by name
+// and resume from by identifier.
+func sendChange(stream *badele.SSEStream[schemas.ItemOut], change core.Change) error {
+	item := schemas.ItemOut{ID: change.Item.ID, Name: change.Item.Name}
+	return stream.SendEvent(badele.SSEEvent[schemas.ItemOut]{
+		Name: "item_update",
+		ID:   strconv.Itoa(change.Seq),
+		Data: &item,
+	})
 }

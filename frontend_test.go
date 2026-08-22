@@ -658,3 +658,135 @@ func TestFrontendAnswersTheWrongMethodWithAllow(t *testing.T) {
 	req.Header.Set("Accept", "text/html")
 	assertStatus(t, doRequest(t, built, req), http.StatusNotFound)
 }
+
+func TestStaticServesADirectoryPlainly(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{
+		"app.js":          "console.log('static')",
+		"css/site.css":    "body{}",
+		"docs/index.html": "docs home",
+	}
+	app := New(quietOptions())
+	app.Static("/static", StaticOptions{Dir: buildOutput(t, files)})
+	app.Get("/static-report", func(ctx *Context, _ Empty) (pingOut, error) { return pingOut{Pong: true}, nil })
+	built := mustBuild(t, app)
+
+	rec := fetch(t, built, "/static/app.js")
+	assertStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), "console.log") {
+		t.Errorf("body = %q, want the file", rec.Body.String())
+	}
+	rec = fetch(t, built, "/static/css/site.css")
+	assertStatus(t, rec, http.StatusOK)
+
+	// Nothing stands in for a miss. This is the difference from a frontend: a
+	// path with no file behind it is a 404 and stays one, even for a browser
+	// navigating to it.
+	rec = navigate(t, built, "/static/nowhere")
+	assertStatus(t, rec, http.StatusNotFound)
+	if got := decodeError(t, rec).Error.Status; got != http.StatusNotFound {
+		t.Errorf("envelope status = %d, want the ordinary 404 envelope", got)
+	}
+
+	// A directory has no index unless the mount asked for one, and is never
+	// listed either way.
+	rec = fetch(t, built, "/static/docs/")
+	assertStatus(t, rec, http.StatusNotFound)
+	rec = fetch(t, built, "/static")
+	assertStatus(t, rec, http.StatusNotFound)
+
+	// A path that only shares a prefix with the mount is not the mount's.
+	rec = fetch(t, built, "/static-report")
+	assertStatus(t, rec, http.StatusOK)
+}
+
+func TestStaticCanServeDirectoryIndexes(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{"index.html": "root", "docs/index.html": "docs home"}
+	app := New(quietOptions())
+	app.Static("/site", StaticOptions{Dir: buildOutput(t, files), Index: true})
+	built := mustBuild(t, app)
+
+	for _, target := range []string{"/site", "/site/", "/site/docs", "/site/docs/"} {
+		rec := navigate(t, built, target)
+		assertStatus(t, rec, http.StatusOK)
+	}
+	// Still no fallback: a path with no directory and no file behind it misses.
+	rec := navigate(t, built, "/site/nowhere")
+	assertStatus(t, rec, http.StatusNotFound)
+}
+
+func TestStaticAnswersTheWrongMethodWithAllow(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Static("/static", StaticOptions{Dir: buildOutput(t, map[string]string{"app.js": "x"})})
+	built := mustBuild(t, app)
+
+	assertReadOnly(t, built, "/static/app.js")
+	// A path with no file behind it is missing rather than read-only.
+	rec := doRequest(t, built, httptest.NewRequest(http.MethodPost, "/static/nowhere", nil))
+	assertStatus(t, rec, http.StatusNotFound)
+}
+
+func TestStaticRegistrationErrors(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		want string
+		bind func(*App)
+	}{
+		{
+			name: "path must be rooted",
+			want: "path must begin with",
+			bind: func(app *App) { app.Static("static", StaticOptions{Dir: "static"}) },
+		},
+		{
+			name: "no source",
+			want: "set Dir, FS, or both",
+			bind: func(app *App) { app.Static("/static", StaticOptions{}) },
+		},
+		{
+			name: "the directory is not there",
+			want: `static files at "/static"`,
+			bind: func(app *App) {
+				app.Static("/static", StaticOptions{Dir: filepath.Join(os.TempDir(), "badele-no-such-static")})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			app := New(quietOptions())
+			tc.bind(app)
+			if got := buildError(t, app); !strings.Contains(got, tc.want) {
+				t.Errorf("build error = %q, want it to mention %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStaticAndFrontendCoexist(t *testing.T) {
+	t.Parallel()
+	// The shape a real deployment takes: an application at the root, and a
+	// directory of assets that belongs to nothing in particular beside it.
+	app := New(quietOptions())
+	app.Static("/static", StaticOptions{Dir: buildOutput(t, map[string]string{"logo.svg": "<svg/>"})})
+	app.Frontend("/", FrontendOptions{Dir: buildOutput(t, spa)})
+	built := mustBuild(t, app)
+
+	rec := fetch(t, built, "/static/logo.svg")
+	assertStatus(t, rec, http.StatusOK)
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "svg") {
+		t.Errorf("Content-Type = %q, want an SVG", got)
+	}
+	// The more specific mount answers first, so a miss under it is a miss
+	// rather than the application document.
+	rec = navigate(t, built, "/static/nowhere.svg")
+	assertStatus(t, rec, http.StatusNotFound)
+	// Outside it, the frontend still routes on the client's behalf.
+	rec = navigate(t, built, "/dashboard")
+	assertStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), "<div id=root>") {
+		t.Errorf("body = %q, want the application document", rec.Body.String())
+	}
+}

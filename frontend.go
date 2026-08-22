@@ -90,6 +90,14 @@ type frontend struct {
 	// what the build produced, empty when there is nothing to fall back to.
 	fallback string
 	notFound string
+
+	// index reports whether a directory is served by the index.html inside it,
+	// which is what a frontend expects and what a plain file mount does not.
+	index bool
+
+	// kind names the mount in a message, so that a problem with a static file
+	// mount is not reported as a problem with a frontend.
+	kind string
 }
 
 // Frontend serves a built frontend at path.
@@ -134,7 +142,7 @@ func (r *Router) Frontend(mountPath string, opts FrontendOptions) {
 		r.errs = append(r.errs, fmt.Errorf("badele: frontend at %q: NoFallback cannot be combined with Fallback or NotFound", mountPath))
 		return
 	}
-	r.frontends = append(r.frontends, &frontend{path: mountPath, opts: opts})
+	r.frontends = append(r.frontends, &frontend{path: mountPath, opts: opts, index: true, kind: "frontend"})
 }
 
 // resolve computes a frontend's final mount path and guard chain, and verifies
@@ -151,7 +159,7 @@ func (f *frontend) resolve(in inherited) error {
 	}
 	files, err := f.resolveFS()
 	if err != nil {
-		return fmt.Errorf("badele: frontend at %q: %w", f.mountPath(), err)
+		return fmt.Errorf("badele: %s at %q: %w", f.kind, f.mountPath(), err)
 	}
 	for _, named := range []struct{ what, name string }{
 		{"Fallback", f.opts.Fallback},
@@ -161,7 +169,7 @@ func (f *frontend) resolve(in inherited) error {
 			continue
 		}
 		if _, err := fs.Stat(files, named.name); err != nil {
-			return fmt.Errorf("badele: frontend at %q: %s file %q: %w", f.mountPath(), named.what, named.name, err)
+			return fmt.Errorf("badele: %s at %q: %s file %q: %w", f.kind, f.mountPath(), named.what, named.name, err)
 		}
 	}
 	f.fallback, f.notFound = f.resolveFallback(files)
@@ -248,7 +256,8 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 
 	files, err := f.fsys()
 	if err != nil {
-		a.logger.ErrorContext(c.Context(), "badele: the frontend directory could not be opened",
+		a.logger.ErrorContext(c.Context(), "badele: the directory behind a mount could not be opened",
+			slog.String("kind", f.kind),
 			slog.String("mount", f.mountPath()),
 			slog.String(RequestIDKey, c.RequestID()),
 			slog.String("error", err.Error()))
@@ -256,7 +265,7 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 		return
 	}
 
-	if name, ok := resolveFile(files, relative); ok {
+	if name, ok := resolveFile(files, relative, f.index); ok {
 		if !isRead(c.r.Method) {
 			// The file is there. What is not allowed is the method, and
 			// answering 404 would say the opposite.
@@ -277,11 +286,14 @@ var errFrontendUnavailable = errors.New("badele: the frontend is unavailable")
 
 // resolveFile finds the file a relative request path names, following the
 // convention that a directory is served by the index.html inside it.
-func resolveFile(files fs.FS, relative string) (string, bool) {
+func resolveFile(files fs.FS, relative string, index bool) (string, bool) {
 	// A trailing slash names the same directory as the path without one, and
 	// fs rejects it outright, so it is dropped before anything looks at it.
 	relative = strings.TrimSuffix(relative, "/")
 	if relative == "" {
+		if !index {
+			return "", false
+		}
 		relative = "index.html"
 	}
 	// A path that fs rejects is one no file can be reached through, which is
@@ -294,6 +306,9 @@ func resolveFile(files fs.FS, relative string) (string, bool) {
 		return "", false
 	}
 	if info.IsDir() {
+		if !index {
+			return "", false
+		}
 		nested := path.Join(relative, "index.html")
 		if info, err := fs.Stat(files, nested); err == nil && !info.IsDir() {
 			return nested, true
@@ -429,4 +444,65 @@ const allowedOnFiles = "GET, HEAD"
 // on one.
 func isRead(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead
+}
+
+// StaticOptions describes a directory of files to serve.
+//
+// It is the plain form: files are served as they are found and nothing stands
+// in for a path with no file behind it. A frontend wants more than that, so a
+// single page application belongs in [Router.Frontend] rather than here.
+type StaticOptions struct {
+	// Dir is the directory holding the files, or the subdirectory within FS
+	// when both are set.
+	Dir string
+
+	// FS serves the files from a filesystem rather than from disk, which is
+	// what an [embed.FS] of assets belonging to a library looks like.
+	FS fs.FS
+
+	// Index serves a directory with the index.html inside it, as a web server
+	// does for a site of pages. It is off by default, because a mount of
+	// scripts and stylesheets has no index and asking for a directory is a
+	// mistake worth reporting.
+	Index bool
+
+	// SkipCheck stops the directory being verified when the application is
+	// built, for one that something else fills in later.
+	SkipCheck bool
+}
+
+// Static serves a directory of files at path.
+//
+//	app.Static("/static", badele.StaticOptions{Dir: "static"})
+//
+// It is the same machinery [Router.Frontend] is built on, without the part
+// that makes a frontend work: nothing stands in for a path with no file behind
+// it, so a miss is a 404 and stays one. Reach for it to publish assets, and
+// for [Router.Frontend] to serve an application whose routing happens in the
+// browser.
+//
+// Everything else matches a frontend mount. Routes are matched first, the
+// guards of the router apply, a directory is never listed, a symbolic link
+// cannot lead out of the directory, and a method other than GET or HEAD on a
+// file that exists is answered 405 rather than served.
+func (r *Router) Static(mountPath string, opts StaticOptions) {
+	if !strings.HasPrefix(mountPath, "/") {
+		r.errs = append(r.errs, fmt.Errorf("badele: static files at %q: path must begin with %q", mountPath, "/"))
+		return
+	}
+	if opts.Dir == "" && opts.FS == nil {
+		r.errs = append(r.errs, fmt.Errorf("badele: static files at %q: set Dir, FS, or both", mountPath))
+		return
+	}
+	r.frontends = append(r.frontends, &frontend{
+		path:  mountPath,
+		index: opts.Index,
+		kind:  "static files",
+		opts: FrontendOptions{
+			Dir:        opts.Dir,
+			FS:         opts.FS,
+			NoFallback: true,
+			SkipCheck:  opts.SkipCheck,
+		},
+	})
 }

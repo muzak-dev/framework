@@ -72,3 +72,16 @@ func (in *ItemRenameIn) Validate(v *badele.Validation) {
 func (in *ItemParams) Validate(v *badele.Validation) {
 	v.String(&in.ID).Trim().Lower().Required().MaxLen(32)
 }
+
+// WSItemIn is the input of the item's WebSocket route.
+//
+// A handshake carries no body, so every field comes from the path, the query
+// string, a header or a cookie. The pointer makes the query parameter
+// optional: it stays nil when the client did not send one, which is how an
+// absent value is told from a zero one.
+type WSItemIn struct {
+	// ItemID is read from the path template.
+	ItemID string `path:"item_id" doc:"The item being talked about"`
+	// Q is an optional number echoed back on every message.
+	Q *int `query:"q" doc:"An optional number echoed back with each reply"`
+}

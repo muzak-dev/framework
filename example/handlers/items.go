@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	"badele"
@@ -78,5 +79,36 @@ func asHTTPError(err error) error {
 		return badele.NewHTTPError(http.StatusConflict, "Item already exists")
 	default:
 		return err
+	}
+}
+
+// ItemSocket answers a WebSocket conversation about one item.
+//
+// The handshake has already succeeded by the time this runs: the input is
+// bound, the guards have passed and the dependency is resolved, so what is
+// left is the conversation itself. Returning ends it, and Badele closes the
+// connection; returning nil closes it normally.
+func ItemSocket(ctx *badele.Context, in schemas.WSItemIn, conn *badele.WSConn) error {
+	session := badele.From[core.SessionOrToken](ctx)
+
+	for {
+		message, err := conn.ReadText(ctx.Context())
+		if err != nil {
+			// The peer closed, or the connection was lost. Either way there is
+			// nothing left to say.
+			return nil
+		}
+		if err := conn.WriteText(ctx.Context(), "credential: "+session.Value); err != nil {
+			return err
+		}
+		if in.Q != nil {
+			if err := conn.WriteText(ctx.Context(), fmt.Sprintf("q is %d", *in.Q)); err != nil {
+				return err
+			}
+		}
+		if err := conn.WriteText(ctx.Context(),
+			fmt.Sprintf("you said %q, about item %s", message, in.ItemID)); err != nil {
+			return err
+		}
 	}
 }

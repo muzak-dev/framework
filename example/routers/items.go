@@ -2,6 +2,7 @@ package routers
 
 import (
 	"net/http"
+	"time"
 
 	"badele"
 	"badele-example/core"
@@ -29,6 +30,17 @@ func Items() *badele.Router {
 	r.Put("/items/{item_id}", handlers.RenameItem,
 		badele.Summary("Rename an item"),
 		badele.WithResponseDoc(http.StatusNotFound, "The item does not exist"))
+
+	// A WebSocket route is declared like any other: the input is bound from
+	// the handshake, the dependency resolves before the upgrade, and the
+	// handler owns the connection until it returns.
+	r.WS("/items/{item_id}/ws", handlers.ItemSocket,
+		badele.Summary("Talk to an item over a WebSocket"),
+		badele.Needs(core.GetSessionOrToken),
+		badele.WithWebSocket(badele.WSOptions{
+			ReadLimit:    64 << 10,
+			PingInterval: 30 * time.Second,
+		}))
 
 	return r
 }

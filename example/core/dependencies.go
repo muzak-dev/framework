@@ -54,3 +54,33 @@ func GetCurrentUser(ctx *badele.Context) (CurrentUser, error) {
 	_ = token
 	return CurrentUser{Username: "fakecurrentuser"}, nil
 }
+
+// SessionOrToken is the caller of a WebSocket route, resolved from either a
+// session cookie or a query parameter.
+//
+// A browser cannot set headers on a WebSocket handshake, so the two places a
+// credential can arrive are a cookie the browser attaches itself and a query
+// parameter the page puts in the URL. Both are covered here, which is what
+// [GetSessionOrToken] exists to show.
+type SessionOrToken struct {
+	// Value is the credential that was presented.
+	Value string
+	// FromCookie reports which of the two it came from.
+	FromCookie bool
+}
+
+// GetSessionOrToken resolves the caller of a WebSocket route.
+//
+// It runs during the handshake, before a single byte is upgraded, so a caller
+// with no credential receives an ordinary JSON error rather than a connection
+// that closes a moment later.
+func GetSessionOrToken(ctx *badele.Context) (SessionOrToken, error) {
+	if cookie, err := ctx.Cookie("session"); err == nil && cookie.Value != "" {
+		return SessionOrToken{Value: cookie.Value, FromCookie: true}, nil
+	}
+	if token := ctx.Query("token"); token != "" {
+		return SessionOrToken{Value: token}, nil
+	}
+	return SessionOrToken{}, badele.NewHTTPError(http.StatusUnauthorized,
+		"a session cookie or a token query parameter is required")
+}

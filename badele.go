@@ -348,11 +348,13 @@ func (a *App) build() {
 
 	a.routers = countRouters(a.Router)
 	a.finalize(inherited{
-		maxBodySize:   a.opts.MaxBodySize,
-		maxUploadSize: a.opts.MaxUploadSize,
-		maxFileSize:   a.opts.MaxFileSize,
-		ws:            a.opts.WebSocket,
+		maxBodySize:      a.opts.MaxBodySize,
+		maxUploadSize:    a.opts.MaxUploadSize,
+		maxFileSize:      a.opts.MaxFileSize,
+		ws:               a.opts.WebSocket,
+		wsMaxConnections: a.opts.WebSocket.MaxConnections,
 	}, emit, state)
+	a.websockets.limit = wsConnectionLimit(a.opts.WebSocket.MaxConnections)
 	a.lifecycle.components = state.lifecycles
 	a.frontends = state.frontends
 	slices.SortStableFunc(a.frontends, func(x, y *frontend) int {

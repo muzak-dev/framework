@@ -37,7 +37,28 @@ const (
 	// at ten seconds. It applies only when [WSOptions.PingInterval] asks for
 	// keepalive at all.
 	DefaultWSPongTimeout = 10 * time.Second
+	// DefaultWSReadTimeout bounds how long one message may take to arrive once
+	// it has begun, at thirty seconds.
+	DefaultWSReadTimeout = 30 * time.Second
+	// DefaultWSMaxConnections is how many WebSocket connections one
+	// application holds open at once by default, at 1024. It is close to the
+	// file descriptor budget a process is usually given, which is the resource
+	// that runs out first.
+	DefaultWSMaxConnections = 1024
 )
+
+// wsConnectionLimit resolves how many connections an application will hold at
+// once, where zero asks for the default and a negative value removes the limit.
+func wsConnectionLimit(configured int) int {
+	switch {
+	case configured == 0:
+		return DefaultWSMaxConnections
+	case configured < 0:
+		return 0
+	default:
+		return configured
+	}
+}
 
 // wsGUID is the constant RFC 6455 appends to the client's key before hashing
 // it. It has no cryptographic role; it exists so that a server which merely
@@ -67,6 +88,29 @@ type WSOptions struct {
 	// negative value removes the bound, which is only appropriate when
 	// something else imposes one.
 	WriteTimeout time.Duration
+
+	// ReadTimeout bounds how long one message may take to arrive once its
+	// first frame has, defaulting to [DefaultWSReadTimeout]. It is what stops
+	// a peer dribbling a message out a byte at a time and holding a goroutine
+	// for as long as it cares to.
+	//
+	// It does not bound how long a connection may sit idle between messages,
+	// because waiting is what most connections are for. Use PingInterval to
+	// notice a peer that has stopped answering at all. A negative value
+	// removes the bound.
+	ReadTimeout time.Duration
+
+	// MaxConnections is how many WebSocket connections the application will
+	// hold open at once, defaulting to [DefaultWSMaxConnections]. A handshake
+	// arriving once the limit is reached is refused with 503 and a Retry-After
+	// header rather than accepted into a process that has no room for it.
+	//
+	// Unlike every other field here it may only be set on the application: the
+	// resource it protects is the process, not a route, so a router or a route
+	// that sets it is refused when the application is built. A negative value
+	// removes the limit, which is only appropriate where something else is
+	// counting.
+	MaxConnections int
 
 	// CloseGracePeriod is how long a closing connection waits for the peer's
 	// close frame before the transport is torn down, defaulting to
@@ -131,6 +175,12 @@ func (o WSOptions) overlay(over WSOptions) WSOptions {
 	if over.WriteTimeout != 0 {
 		o.WriteTimeout = over.WriteTimeout
 	}
+	if over.ReadTimeout != 0 {
+		o.ReadTimeout = over.ReadTimeout
+	}
+	if over.MaxConnections != 0 {
+		o.MaxConnections = over.MaxConnections
+	}
 	if over.CloseGracePeriod != 0 {
 		o.CloseGracePeriod = over.CloseGracePeriod
 	}
@@ -169,6 +219,7 @@ func (o WSOptions) withDefaults() WSOptions {
 		o.ReadLimit = math.MaxInt
 	}
 	o.WriteTimeout = orDefaultDuration(o.WriteTimeout, DefaultWSWriteTimeout)
+	o.ReadTimeout = orDefaultDuration(o.ReadTimeout, DefaultWSReadTimeout)
 	o.CloseGracePeriod = orDefaultDuration(o.CloseGracePeriod, DefaultWSCloseGracePeriod)
 	if o.PingInterval < 0 {
 		o.PingInterval = 0
@@ -312,7 +363,19 @@ func (rt *Route) resolveWebSocket(in inherited) error {
 	if rt.cfg.ws != nil {
 		opts = opts.overlay(*rt.cfg.ws)
 	}
+	if opts.MaxConnections != in.wsMaxConnections {
+		return fmt.Errorf("badele: WS %s: MaxConnections may only be set on the application, because the connections it bounds belong to the process rather than to one route", rt.Path)
+	}
 	rt.websocket.opts = opts.withDefaults()
+	for _, name := range rt.websocket.opts.Subprotocols {
+		// A subprotocol is echoed into the handshake response, so one that is
+		// not a token could carry a line break into the header block. It is
+		// refused here rather than sanitised, because a name that needs
+		// sanitising is a mistake to fix rather than to paper over.
+		if !isHTTPToken(name) {
+			return fmt.Errorf("badele: WS %s: subprotocol %q is not a valid token", rt.Path, wsShorten(name))
+		}
+	}
 	rt.websocket.allowOrigin = wsOriginPolicy(rt.websocket.opts)
 	rt.responses = append(rt.responses, responseDoc{
 		code:        http.StatusUpgradeRequired,
@@ -354,10 +417,13 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !a.websockets.accepting() {
+	if err := a.websockets.admits(); err != nil {
 		// Refusing before the upgrade is what lets a client shut out by a
-		// draining server read an ordinary error response.
-		return nil, errWSShuttingDown
+		// draining or a full server read an ordinary error response.
+		if errors.Is(err, errWSTooManyConnections) {
+			c.w.Header().Set("Retry-After", "5")
+		}
+		return nil, err
 	}
 	subprotocol := wsSubprotocol(c.r, cfg.opts.Subprotocols)
 	conn, err := a.upgrade(c, cfg, accept, subprotocol)
@@ -366,11 +432,10 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 	}
 	if !a.websockets.add(conn) {
 		// coverage: this is the losing side of a race between a handshake and
-		// a shutdown, narrowed to the microseconds between the check above and
-		// the upgrade, so it is reasoned about rather than provoked. The
-		// server began draining in that window, so the connection is told to
-		// go away rather than left unaccounted for; there is no response left
-		// to refuse it with by now.
+		// a shutdown or a full register, narrowed to the microseconds between
+		// the check above and the upgrade, so it is reasoned about rather than
+		// provoked. The connection is told to go away rather than left
+		// unaccounted for; there is no response left to refuse it with by now.
 		_ = conn.Close(WSStatusGoingAway, "the server is shutting down")
 		return nil, errWSShuttingDown
 	}
@@ -385,10 +450,14 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 }
 
 // errWSShuttingDown reports a handshake that arrived while the server was
-// draining. It carries no status because the connection is already upgraded by
-// the time it is returned.
+// draining.
 var errWSShuttingDown = NewHTTPError(http.StatusServiceUnavailable,
 	"the server is shutting down and is not accepting new websocket connections")
+
+// errWSTooManyConnections reports a handshake refused because the application
+// is already holding as many connections as it is allowed to.
+var errWSTooManyConnections = NewHTTPError(http.StatusServiceUnavailable,
+	"the server is holding as many websocket connections as it is configured to; try again shortly")
 
 // checkHandshake verifies that the request is a WebSocket handshake this route
 // will serve, and returns the value for the Sec-WebSocket-Accept header.
@@ -410,7 +479,22 @@ func (cfg *wsConfig) checkHandshake(c *Context) (string, error) {
 	if version := r.Header.Get("Sec-WebSocket-Version"); version != "13" {
 		wsUpgradeHeaders(c.w.Header())
 		return "", NewHTTPErrorf(http.StatusUpgradeRequired,
-			"websocket version %q is not supported; this server speaks version 13", version)
+			"websocket version %q is not supported; this server speaks version 13", wsShorten(version))
+	}
+	for _, name := range [...]string{"Sec-WebSocket-Key", "Sec-WebSocket-Version"} {
+		if len(r.Header.Values(name)) > 1 {
+			// One handshake describes itself once. Two answers to the same
+			// question invite this end and whatever is in front of it to read
+			// different ones.
+			return "", NewHTTPErrorf(http.StatusBadRequest, "the %s header was sent more than once", name)
+		}
+	}
+	if r.ContentLength > 0 || len(r.TransferEncoding) > 0 {
+		// A handshake carries no body. Accepting one would leave whatever went
+		// unread on the connection, to be taken for frames the moment it is
+		// upgraded, which is a way of writing a peer's frames for it.
+		return "", NewHTTPError(http.StatusBadRequest,
+			"a websocket handshake cannot carry a request body")
 	}
 	if err := cfg.checkOrigin(r); err != nil {
 		return "", err
@@ -434,7 +518,19 @@ func (cfg *wsConfig) checkOrigin(r *http.Request) error {
 		return nil
 	}
 	return NewHTTPErrorf(http.StatusForbidden,
-		"the origin %q may not open a websocket connection here", origin)
+		"the origin %q may not open a websocket connection here", wsShorten(origin))
+}
+
+// wsShorten bounds a client-supplied value on its way into an error message.
+// The value is escaped by the encoder that writes it, so what is left to guard
+// against is the size: a header the size of the header limit should not become
+// a response body the size of the header limit.
+func wsShorten(value string) string {
+	const most = 128
+	if len(value) <= most {
+		return value
+	}
+	return value[:most] + "..."
 }
 
 // wsUpgradeHeaders describes what the request should have asked for, so that a
@@ -453,8 +549,11 @@ func wsUpgradeHeaders(h http.Header) {
 // exists to prove that both ends understood the handshake rather than to
 // protect anything.
 func wsAcceptKey(key string) (string, error) {
+	// Sixteen bytes of base64 are exactly twenty four characters, so the length
+	// is checked before anything is decoded and a header of any size cannot
+	// buy so much as an allocation.
 	raw, err := base64.StdEncoding.DecodeString(key)
-	if err != nil || len(raw) != 16 {
+	if len(key) != 24 || err != nil || len(raw) != 16 {
 		return "", NewHTTPError(http.StatusBadRequest,
 			"the Sec-WebSocket-Key header is missing or is not sixteen base64 encoded bytes")
 	}
@@ -478,6 +577,23 @@ func wsSubprotocol(r *http.Request, offered []string) string {
 		}
 	}
 	return ""
+}
+
+// isHTTPToken reports whether a string is a token as RFC 9110 defines one,
+// which is what a header value made of a bare name has to be.
+func isHTTPToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		switch c := s[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // headerHasToken reports whether a comma separated header carries a token,
@@ -650,7 +766,10 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 // to net/http's own draining, so nothing else would ever tell these peers that
 // the server is going away.
 type wsRegistry struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// limit is how many connections may be held at once, and zero means as
+	// many as the process can carry.
+	limit    int
 	conns    map[*WSConn]struct{}
 	draining bool
 	// drained is closed by the last connection to go, which is what a
@@ -659,19 +778,32 @@ type wsRegistry struct {
 	drained chan struct{}
 }
 
-// accepting reports whether new connections are still being served.
-func (g *wsRegistry) accepting() bool {
+// admits reports whether another connection can be served, and why not when it
+// cannot.
+func (g *wsRegistry) admits() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return !g.draining
+	return g.admitsLocked()
 }
 
-// add records a new connection, reporting false when the server has begun
-// shutting down and the connection should not be served.
+// admitsLocked is admits with the lock already held.
+func (g *wsRegistry) admitsLocked() error {
+	switch {
+	case g.draining:
+		return errWSShuttingDown
+	case g.limit > 0 && len(g.conns) >= g.limit:
+		return errWSTooManyConnections
+	default:
+		return nil
+	}
+}
+
+// add records a new connection, reporting false when the application has since
+// stopped admitting them.
 func (g *wsRegistry) add(conn *WSConn) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.draining {
+	if g.admitsLocked() != nil {
 		return false
 	}
 	if g.conns == nil {

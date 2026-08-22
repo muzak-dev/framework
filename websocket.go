@@ -243,6 +243,7 @@ type WSConn struct {
 	client       bool
 	subprotocol  string
 	readLimit    int64
+	readTimeout  time.Duration
 	writeTimeout time.Duration
 	closeGrace   time.Duration
 
@@ -285,6 +286,7 @@ func newWSConn(rwc io.ReadWriteCloser, br *bufio.Reader, client bool, subprotoco
 		client:       client,
 		subprotocol:  subprotocol,
 		readLimit:    opts.ReadLimit,
+		readTimeout:  opts.ReadTimeout,
 		writeTimeout: opts.WriteTimeout,
 		closeGrace:   opts.CloseGracePeriod,
 		readSem:      make(chan struct{}, 1),
@@ -525,6 +527,25 @@ func (c *WSConn) abort(status WSStatus, reason string) error {
 	return c.fail(&WSCloseError{Status: status, Reason: reason})
 }
 
+// wsMaxFramesPerMessage bounds how many frames may arrive before one message is
+// complete.
+//
+// Without it a peer can hold a read open forever without ever reaching the read
+// limit, by fragmenting a message into empty continuation frames or by
+// interleaving an endless run of pings, neither of which grows the message it
+// is supposedly sending. The bound is generous enough that no honest peer meets
+// it and low enough that a dishonest one is cut off.
+const wsMaxFramesPerMessage = 1 << 16
+
+// wsReadChunk bounds how much of a frame is committed to memory before the
+// bytes for it have actually arrived.
+//
+// Reading a declared length in one go would let six bytes of header buy an
+// allocation the size of the whole read limit, which is the cheapest denial of
+// service a WebSocket offers. Growing in chunks means a peer pays for the
+// memory it asks for in bytes it has to send.
+const wsReadChunk = 32 << 10
+
 // readMessage reads frames until one message is complete.
 func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error) {
 	stop := c.armRead(ctx)
@@ -533,7 +554,11 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 	message := []byte{}
 	var typ WSMessageType
 	started := false
-	for {
+	for frames := 0; ; frames++ {
+		if frames == wsMaxFramesPerMessage {
+			return 0, nil, c.abort(WSStatusPolicyViolation,
+				"too many frames arrived before a message was complete")
+		}
 		header, err := wsframe.ReadHeader(c.br)
 		if err != nil {
 			return 0, nil, c.readFailed(ctx, err)
@@ -557,19 +582,18 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 			}
 			started = true
 			typ = WSMessageType(header.Opcode)
+			// The clock starts with the message rather than with the call, so
+			// that a connection may wait for as long as it likes and a message
+			// may not take as long as it likes to arrive.
+			c.startMessageClock(ctx)
 		}
 
 		if int64(len(message))+header.Length > c.readLimit {
 			return 0, nil, c.abort(WSStatusMessageTooBig,
 				"the message exceeds the "+strconv.FormatInt(c.readLimit, 10)+" byte limit for this connection")
 		}
-		start := len(message)
-		message = slices.Grow(message, int(header.Length))[:start+int(header.Length)]
-		if _, err := io.ReadFull(c.br, message[start:]); err != nil {
-			return 0, nil, c.readFailed(ctx, err)
-		}
-		if header.Masked {
-			wsframe.Mask(header.Mask, 0, message[start:])
+		if message, err = c.readPayload(ctx, header, message); err != nil {
+			return 0, nil, err
 		}
 		if header.Fin {
 			break
@@ -579,6 +603,46 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 		return 0, nil, c.abort(WSStatusInvalidFramePayload, "the text message is not valid UTF-8")
 	}
 	return typ, message, nil
+}
+
+// readPayload appends one frame's payload to the message being assembled,
+// unmasking it as it goes.
+//
+// The payload is taken a chunk at a time rather than in one allocation the size
+// of the declared length, so a header that promises more than the peer intends
+// to send costs no more than the chunk it has reached.
+func (c *WSConn) readPayload(ctx context.Context, header wsframe.Header, message []byte) ([]byte, error) {
+	position := 0
+	for remaining := header.Length; remaining > 0; {
+		chunk := int(min(remaining, wsReadChunk))
+		start := len(message)
+		message = slices.Grow(message, chunk)[:start+chunk]
+		if _, err := io.ReadFull(c.br, message[start:]); err != nil {
+			return nil, c.readFailed(ctx, err)
+		}
+		if header.Masked {
+			position = wsframe.Mask(header.Mask, position, message[start:])
+		}
+		remaining -= int64(chunk)
+	}
+	return message, nil
+}
+
+// startMessageClock tightens the read deadline once a message has begun, which
+// is what stops a peer dribbling one out a byte at a time while a goroutine
+// waits on it.
+//
+// A caller's own deadline is left alone when it is already the tighter of the
+// two, because the caller asked for it.
+func (c *WSConn) startMessageClock(ctx context.Context) {
+	if c.nc == nil || c.readTimeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(c.readTimeout)
+	if fromCtx, ok := ctx.Deadline(); ok && !fromCtx.After(deadline) {
+		return
+	}
+	_ = c.nc.SetReadDeadline(deadline)
 }
 
 // maskingRule states which end is at fault for an incorrectly masked frame.
@@ -638,6 +702,12 @@ func (c *WSConn) readFailed(ctx context.Context, err error) error {
 	}
 	if ctxErr := wsContextFailure(ctx, err); ctxErr != nil {
 		return c.fail(fmt.Errorf("badele: reading a websocket message: %w", ctxErr))
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		// The caller's deadline was ruled out above, so the only one left is
+		// the time a message is given once it has begun. A peer that has not
+		// finished sending one by now is not going to.
+		return c.abort(WSStatusPolicyViolation, "the message did not arrive within the time allowed")
 	}
 	// The connection ended without a close frame, which is what a dropped
 	// network or a peer that simply stopped looks like.

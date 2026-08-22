@@ -529,6 +529,7 @@ type inherited struct {
 	maxUploadSize      int64
 	maxFileSize        int64
 	ws                 WSOptions
+	wsMaxConnections   int
 	allowUnknownFields bool
 	deprecated         bool
 	hidden             bool
@@ -547,6 +548,7 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		maxUploadSize:      in.maxUploadSize,
 		maxFileSize:        in.maxFileSize,
 		ws:                 in.ws,
+		wsMaxConnections:   in.wsMaxConnections,
 		allowUnknownFields: in.allowUnknownFields,
 		deprecated:         in.deprecated || cfg.deprecated,
 		hidden:             in.hidden || cfg.hidden,

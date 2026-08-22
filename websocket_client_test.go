@@ -6,8 +6,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -374,21 +376,65 @@ func TestWSDialReportsATransportFailure(t *testing.T) {
 	}
 }
 
-func TestWSDialClientReuse(t *testing.T) {
+func TestWSDialClient(t *testing.T) {
 	t.Parallel()
-	plain := &http.Client{}
-	if got := wsDialClient(plain); got != plain {
-		t.Error("a client with no timeout was copied, which would discard its cookie jar's identity")
+	if got := wsDialClient(nil); got == nil || got.CheckRedirect == nil {
+		t.Fatal("no client was built for a caller that supplied none")
 	}
-	if got := wsDialClient(nil); got == nil {
-		t.Error("no client was built for a caller that supplied none")
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("building a cookie jar: %v", err)
 	}
-	bounded := &http.Client{Timeout: time.Second}
-	if got := wsDialClient(bounded); got == bounded || got.Timeout != 0 {
-		t.Error("the caller's timeout was not removed for the life of the connection")
+	caller := &http.Client{Timeout: time.Second, Jar: jar}
+	dialer := wsDialClient(caller)
+	if dialer == caller {
+		t.Fatal("the caller's own client was handed back, so changing it would change theirs")
 	}
-	if bounded.Timeout != time.Second {
+	if dialer.Timeout != 0 {
+		t.Error("the caller's timeout was not removed, and would have bounded the conversation")
+	}
+	if dialer.Jar != jar {
+		t.Error("the cookie jar was lost, so a session established earlier would not reach the handshake")
+	}
+	if caller.Timeout != time.Second || caller.CheckRedirect != nil {
 		t.Error("the caller's own client was modified")
+	}
+	// Following a redirect would send the handshake headers, an Authorization
+	// header among them, to whatever host the answer named.
+	if dialer.CheckRedirect == nil {
+		t.Fatal("the dialer follows redirects")
+	}
+	if err := dialer.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Errorf("CheckRedirect = %v, want the redirect refused", err)
+	}
+}
+
+func TestWSDialDoesNotFollowARedirect(t *testing.T) {
+	t.Parallel()
+	// A server that answers a handshake with a redirect gets no second
+	// request, and the caller is told what it actually said.
+	var reached atomic.Bool
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached.Store(true)
+	}))
+	t.Cleanup(elsewhere.Close)
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+
+	conn, response, err := WSDial(t.Context(), redirecting.URL, WSDialOptions{
+		Header: http.Header{"Authorization": []string{"Bearer secret"}},
+	})
+	if err == nil || conn != nil {
+		t.Fatalf("WSDial = %v, %v, want the redirect refused", conn, err)
+	}
+	if response.StatusCode != http.StatusTemporaryRedirect {
+		t.Errorf("status = %d, want the redirect itself", response.StatusCode)
+	}
+	if reached.Load() {
+		t.Error("the handshake was sent on to the host the redirect named, headers and all")
 	}
 }
 

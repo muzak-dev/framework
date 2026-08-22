@@ -38,9 +38,11 @@ type WSDialOptions struct {
 	// something else is refused.
 	Subprotocols []string
 
-	// ReadLimit, WriteTimeout and CloseGracePeriod configure the connection
-	// exactly as the matching fields of [WSOptions] do for a served one.
+	// ReadLimit, ReadTimeout, WriteTimeout and CloseGracePeriod configure the
+	// connection exactly as the matching fields of [WSOptions] do for a served
+	// one.
 	ReadLimit        int64
+	ReadTimeout      time.Duration
 	WriteTimeout     time.Duration
 	CloseGracePeriod time.Duration
 }
@@ -145,24 +147,32 @@ func wsClientConn(response *http.Response, key string, opts WSDialOptions) (*WSC
 
 	settings := WSOptions{
 		ReadLimit:        opts.ReadLimit,
+		ReadTimeout:      opts.ReadTimeout,
 		WriteTimeout:     opts.WriteTimeout,
 		CloseGracePeriod: opts.CloseGracePeriod,
 	}.withDefaults()
 	return newWSConn(transport, bufio.NewReader(transport), true, subprotocol, settings), nil
 }
 
-// wsDialClient returns the client to run the handshake with, without the
-// timeout that would otherwise bound the whole conversation.
+// wsDialClient returns the client to run the handshake with.
+//
+// Two things are changed about whatever the caller supplied, on a copy so that
+// the caller's own client is left as it was. The timeout goes, because it
+// would otherwise bound the whole life of the connection rather than the
+// handshake and cut the conversation short. Redirects are refused, because
+// following one would send the headers of the handshake, an Authorization
+// header among them, to whatever host the answer named.
 func wsDialClient(client *http.Client) *http.Client {
-	if client == nil {
-		return &http.Client{}
+	dialer := &http.Client{}
+	if client != nil {
+		copied := *client
+		dialer = &copied
 	}
-	if client.Timeout == 0 {
-		return client
+	dialer.Timeout = 0
+	dialer.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
-	without := *client
-	without.Timeout = 0
-	return &without
+	return dialer
 }
 
 // wsRequestURL turns a WebSocket URL into the HTTP one the handshake is sent

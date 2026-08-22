@@ -159,6 +159,60 @@
 // end, such as how long the request took, has to wrap the writer and fill the
 // value in as the response starts.
 //
+// # WebSockets
+//
+// [Router.WS] registers a WebSocket route. The handshake is an ordinary GET,
+// so everything that applies to a route applies to it: middleware runs, guards
+// run, dependencies resolve, and the input struct is bound and validated
+// before a single byte is upgraded. What is different is the third argument,
+// which is the connection the handler owns until it returns:
+//
+//	type WSItemIn struct {
+//		ItemID string `path:"item_id"`
+//		Q      *int   `query:"q"`
+//	}
+//
+//	r.WS("/items/{item_id}/ws", func(ctx *badele.Context, in WSItemIn, conn *badele.WSConn) error {
+//		session := badele.From[SessionOrToken](ctx)
+//		for {
+//			message, err := conn.ReadText(ctx.Context())
+//			if err != nil {
+//				return nil
+//			}
+//			if err := conn.WriteText(ctx.Context(), "you said "+message); err != nil {
+//				return err
+//			}
+//			_ = session
+//		}
+//	}, badele.Needs(GetSessionOrToken))
+//
+// A request that fails to bind, or a guard that refuses, is answered with the
+// usual JSON error and never becomes a connection at all, which is what makes
+// a rejection something a client can read rather than a socket that closes a
+// moment after it opened.
+//
+// Reading and writing are message oriented: a message split across frames is
+// delivered once and whole, a ping is answered without the handler knowing,
+// and a close is answered and then reported as a *[WSCloseError], which is why
+// the loop above ends on any error. Writes are serialized, so any number of
+// goroutines may write to one connection. The protocol is implemented here
+// rather than delegated: RFC 6455 framing, masking, UTF-8 validation and the
+// close handshake, with every rule the specification lays down enforced and
+// every violation answered with the status it calls for.
+//
+// The connection is bounded in every direction that a peer controls. A message
+// larger than [WSOptions.ReadLimit] is refused before any of it is buffered, a
+// write that a peer stops reading gives up after [WSOptions.WriteTimeout], and
+// a handshake from another origin is refused outright, because a WebSocket
+// handshake is not subject to the same-origin policy and is not preflighted.
+// No extension is negotiated, so no peer can ask the server to keep
+// decompression state on its behalf. Configure the rest with [WithWebSocket],
+// and see [WSOptions] for what each limit is there to stop.
+//
+// [WSDial] is the other end of the same engine, which is what lets a route be
+// tested over a real connection rather than against a second implementation.
+// The test client wraps it as [badele/testclient.Client.WS].
+//
 // # Serving a frontend
 //
 // [Router.Frontend] serves the static output of a frontend build, which is what
@@ -244,11 +298,13 @@
 //
 // Badele starts from settings that are safe rather than permissive. Every
 // listener timeout is non-zero, request bodies are capped at one mebibyte and
-// uploads at 32, unknown JSON members are rejected, duplicate members and
-// invalid UTF-8 are refused by encoding/json/v2, CORS denies every
-// cross-origin request until it is configured, and a panic becomes a generic
-// 500 with the stack recorded only in the log. Each of these can be relaxed
-// deliberately; none of them is relaxed by omission.
+// uploads at 32, WebSocket messages at one mebibyte, unknown JSON members are
+// rejected, duplicate members and invalid UTF-8 are refused by
+// encoding/json/v2, CORS denies every cross-origin request until it is
+// configured, a WebSocket handshake from another origin is refused until it is
+// allowed, and a panic becomes a generic 500 with the stack recorded only in
+// the log. Each of these can be relaxed deliberately; none of them is relaxed
+// by omission.
 //
 // # Testing
 //

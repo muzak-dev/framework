@@ -80,6 +80,11 @@ func main() {
 		badele.WithResponseDoc(http.StatusTeapot, "I'm a teapot"),
 	)
 
+	// The built frontend is served last: every route above is matched first,
+	// so mounting at the root cannot shadow the API. The directory here is
+	// what a frontend build tool would have written.
+	app.Frontend("/", badele.FrontendOptions{Dir: "dist"})
+
 	if err := app.RunSignals(); err != nil {
 		log.Fatal(err)
 	}

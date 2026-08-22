@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Badele Example</title>
+<!--
+  The token is on these URLs because this application guards every route with
+  one, and a frontend runs behind the guards of the router it was mounted on.
+  A real deployment would authenticate with a cookie, which a browser sends by
+  itself, and these would be plain paths.
+-->
+<link rel="stylesheet" href="/assets/app.css?token=jessica">
+</head>
+<body>
+<main>
+  <h1>Badele</h1>
+  <p id="status">Loading the feed...</p>
+  <ul id="feed"></ul>
+</main>
+<script src="/assets/app.js?token=jessica"></script>
+</body>
+</html>

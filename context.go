@@ -24,6 +24,11 @@ type Context struct {
 	route  *Route
 	logger *slog.Logger
 
+	// app is the application the request is being served by, which is what
+	// lets a route reach machinery that outlives one request, such as the
+	// register of open WebSocket connections.
+	app *App
+
 	// status is the code that will be written when the handler returns
 	// successfully. It starts at the route's declared default.
 	status int
@@ -191,6 +196,7 @@ func (c *Context) reset() {
 	c.r = nil
 	c.route = nil
 	c.logger = nil
+	c.app = nil
 	c.status = 0
 	c.requestID = ""
 	c.params.Reset()

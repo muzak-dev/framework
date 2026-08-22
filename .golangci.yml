@@ -63,6 +63,11 @@ linters:
           - errcheck
           - gosec
           - bodyclose
+          # A WebSocket handler ends its loop on any read error and returns
+          # nil, because the connection ending is how the conversation ends
+          # rather than a failure to report. That is the documented shape of a
+          # handler, so the tests are written in it.
+          - nilerr
           # A method literal reads more clearly than http.MethodGet when the
           # test is describing a request, which is how the standard library's
           # own tests are written.

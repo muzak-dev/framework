@@ -408,6 +408,16 @@ func (w *compressWriter) Flush() {
 	}
 }
 
+// markHijacked records that a handler took the connection over, which settles
+// the pending decision without writing anything: there is no response left to
+// compress, and no header left to send.
+func (w *compressWriter) markHijacked() {
+	w.status = http.StatusSwitchingProtocols
+	w.decided = true
+	w.headerSent = true
+	w.held = nil
+}
+
 // Unwrap exposes the underlying writer to [http.ResponseController] so that
 // deadline control and hijacking keep working through this wrapper.
 func (w *compressWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

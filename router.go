@@ -77,6 +77,7 @@ type routerConfig struct {
 	maxBodySize        int64
 	maxUploadSize      int64
 	maxFileSize        int64
+	ws                 *WSOptions
 	allowUnknownFields *bool
 	deprecated         bool
 	hidden             bool
@@ -95,6 +96,7 @@ type routeConfig struct {
 	maxBodySize        int64
 	maxUploadSize      int64
 	maxFileSize        int64
+	ws                 *WSOptions
 	allowUnknownFields *bool
 	skipValidation     bool
 	deprecated         bool
@@ -297,6 +299,10 @@ type Route struct {
 	outType reflect.Type
 	plan    *bindPlan
 	invoke  func(*Context) error
+
+	// websocket is non-nil for a route registered with [Router.WS], and holds
+	// the configuration its connections are built with.
+	websocket *wsConfig
 
 	// cfg is the configuration declared directly on the route, retained until
 	// the application is built and the inherited configuration is known.
@@ -522,6 +528,7 @@ type inherited struct {
 	maxBodySize        int64
 	maxUploadSize      int64
 	maxFileSize        int64
+	ws                 WSOptions
 	allowUnknownFields bool
 	deprecated         bool
 	hidden             bool
@@ -539,6 +546,7 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		maxBodySize:        in.maxBodySize,
 		maxUploadSize:      in.maxUploadSize,
 		maxFileSize:        in.maxFileSize,
+		ws:                 in.ws,
 		allowUnknownFields: in.allowUnknownFields,
 		deprecated:         in.deprecated || cfg.deprecated,
 		hidden:             in.hidden || cfg.hidden,
@@ -551,6 +559,9 @@ func (in inherited) merge(cfg routerConfig) inherited {
 	}
 	if cfg.maxFileSize != 0 {
 		out.maxFileSize = cfg.maxFileSize
+	}
+	if cfg.ws != nil {
+		out.ws = out.ws.overlay(*cfg.ws)
 	}
 	if cfg.allowUnknownFields != nil {
 		out.allowUnknownFields = *cfg.allowUnknownFields
@@ -629,6 +640,9 @@ func (rt *Route) resolve(in inherited) error {
 	if rt.Status == 0 {
 		rt.Status = http.StatusOK
 	}
+	if rt.websocket != nil {
+		rt.Status = http.StatusSwitchingProtocols
+	}
 	if rt.Status != clampStatus(rt.Status) {
 		return fmt.Errorf("badele: %s %s: declared status %d is not a valid HTTP status code", rt.Method, rt.Path, cfg.status)
 	}
@@ -661,6 +675,9 @@ func (rt *Route) resolve(in inherited) error {
 		return err
 	}
 	rt.plan = plan
+	if rt.websocket != nil {
+		return rt.resolveWebSocket(in)
+	}
 	return nil
 }
 

@@ -129,6 +129,12 @@ type AppOptions struct {
 	// cross-origin request, and no CORS middleware is installed unless an
 	// origin or an origin function is configured.
 	CORS CORSOptions
+
+	// WebSocket configures the WebSocket connections of every route registered
+	// with [Router.WS], and is narrowed for a router or a route with
+	// [WithWebSocket]. The zero value bounds message and write sizes and
+	// refuses a cross-origin handshake.
+	WebSocket WSOptions
 }
 
 // App is a Badele application: a root router plus the server, middleware,
@@ -156,6 +162,10 @@ type App struct {
 	spec      *Document
 
 	lifecycle *lifecycleManager
+
+	// websockets tracks the open WebSocket connections, which net/http cannot
+	// do for us because a hijacked connection is no longer one of its own.
+	websockets wsRegistry
 
 	buildOnce sync.Once
 	buildErr  error
@@ -341,6 +351,7 @@ func (a *App) build() {
 		maxBodySize:   a.opts.MaxBodySize,
 		maxUploadSize: a.opts.MaxUploadSize,
 		maxFileSize:   a.opts.MaxFileSize,
+		ws:            a.opts.WebSocket,
 	}, emit, state)
 	a.lifecycle.components = state.lifecycles
 	a.frontends = state.frontends
@@ -413,7 +424,9 @@ func allowHeader(methods map[string]*Route) string {
 	for method := range methods {
 		names = append(names, method)
 	}
-	if _, hasGet := methods[http.MethodGet]; hasGet {
+	// A GET route answers HEAD automatically, except a WebSocket route: there
+	// is no way to upgrade a HEAD, so promising one would be a lie.
+	if get, hasGet := methods[http.MethodGet]; hasGet && get.websocket == nil {
 		if _, hasHead := methods[http.MethodHead]; !hasHead {
 			names = append(names, http.MethodHead)
 		}
@@ -502,7 +515,7 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 func (a *App) dispatchFallback(c *Context, entry *pathEntry) {
 	switch c.r.Method {
 	case http.MethodHead:
-		if route, ok := entry.methods[http.MethodGet]; ok {
+		if route, ok := entry.methods[http.MethodGet]; ok && route.websocket == nil {
 			// net/http discards the body of a HEAD response, so running the
 			// GET handler yields correct headers with no body.
 			a.run(c, route)
@@ -599,6 +612,7 @@ func (a *App) acquire(w *responseWriter, r *http.Request) *Context {
 	c := a.ctxPool.Get().(*Context)
 	c.w = w
 	c.r = r
+	c.app = a
 	c.logger = a.logger
 	c.status = http.StatusOK
 	c.requestID, _ = RequestIDFromContext(r.Context())

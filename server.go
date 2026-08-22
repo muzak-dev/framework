@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -258,6 +259,13 @@ func (a *App) Shutdown(ctx context.Context) error {
 	runner.stopOnce.Do(func() {
 		log := Scoped(a.logger, ScopeServer)
 		log.Info("Shutting down, waiting for in-flight requests...")
+
+		// A hijacked connection is no longer one net/http tracks, so a
+		// WebSocket would otherwise be left open through the whole shutdown
+		// with its peer none the wiser.
+		if closed := a.websockets.shutdown(a.opts.ShutdownTimeout); closed > 0 {
+			log.Info(fmt.Sprintf("Closed %d websocket %s", closed, plural(closed, "connection")))
+		}
 
 		timeout := a.opts.ShutdownTimeout
 		if timeout > 0 {

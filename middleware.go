@@ -408,6 +408,44 @@ func (w *responseWriter) Write(b []byte) (int, error) {
 // wrapper.
 func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// markHijacked records that the connection was taken over by a handler, so
+// that nothing later in the chain writes an HTTP response onto a socket that
+// has stopped speaking HTTP. The status is the one the handshake wrote.
+func (w *responseWriter) markHijacked() {
+	w.status = http.StatusSwitchingProtocols
+	w.written = true
+}
+
+// hijackAware is implemented by every response writer this package wraps a
+// request in, so that a handler which took the connection over can tell the
+// whole chain at once.
+type hijackAware interface {
+	markHijacked()
+}
+
+// maxWriterChain bounds how far markHijacked walks, so that a wrapper whose
+// Unwrap eventually returns itself cannot spin forever.
+const maxWriterChain = 32
+
+// markHijacked walks the chain of response writers wrapping one request and
+// tells each of them that the connection is gone.
+//
+// Walking is necessary because middleware wraps the writer: the wrapper a
+// handler sees is not the one the access log measures, and a wrapper left
+// believing it still owes a response will try to finish writing one.
+func markHijacked(w http.ResponseWriter) {
+	for range maxWriterChain {
+		if aware, ok := w.(hijackAware); ok {
+			aware.markHijacked()
+		}
+		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = unwrapper.Unwrap()
+	}
+}
+
 // statusOrDefault returns the status written, or 200 for a handler that
 // returned without writing anything, matching what net/http puts on the wire.
 func (w *responseWriter) statusOrDefault() int {

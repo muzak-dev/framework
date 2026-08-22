@@ -399,9 +399,18 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		}
 	}
 
-	op.Responses[strconv.Itoa(rt.Status)] = &Response{
-		Description: orDefault(http.StatusText(rt.Status), "Success"),
-		Content:     builder.responseContent(rt.outType),
+	if rt.websocket != nil {
+		// A WebSocket route has no response body to describe. What it has is a
+		// handshake, and what OpenAPI can say about one is that it answers 101
+		// and the conversation continues off the document.
+		op.Responses[strconv.Itoa(http.StatusSwitchingProtocols)] = &Response{
+			Description: "Switching Protocols. The connection is upgraded and the conversation continues over WebSocket.",
+		}
+	} else {
+		op.Responses[strconv.Itoa(rt.Status)] = &Response{
+			Description: orDefault(http.StatusText(rt.Status), "Success"),
+			Content:     builder.responseContent(rt.outType),
+		}
 	}
 	if len(rt.plan.params) > 0 || rt.plan.body != nil || rt.plan.multipart {
 		op.Responses[strconv.Itoa(http.StatusUnprocessableEntity)] = builder.errorResponse("The request could not be validated.")

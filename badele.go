@@ -142,6 +142,12 @@ type AppOptions struct {
 	// keepalive, and caps how many streams the application serves at once.
 	SSE SSEOptions
 
+	// RateLimit bounds how fast a client may make requests, and is narrowed
+	// for a router or a route with [WithRateLimit], [RateLimit] and
+	// [SkipRateLimit]. The zero value limits nothing: a policy has to name at
+	// least one [Quota] before any request is counted.
+	RateLimit RateLimitOptions
+
 	// ClientIP decides which address a request is attributed to, which
 	// matters wherever a decision is made per client rather than per request.
 	// The zero value believes no forwarding header, so behind a proxy it
@@ -382,12 +388,17 @@ func (a *App) build() {
 		wsMaxConnections: a.opts.WebSocket.MaxConnections,
 		sse:              a.opts.SSE,
 		sseMaxStreams:    a.opts.SSE.MaxStreams,
+		rateLimit:        a.opts.RateLimit,
 	}, emit, state)
 	a.websockets.limit = wsConnectionLimit(a.opts.WebSocket.MaxConnections)
 	a.streams.limit = sseStreamLimit(a.opts.SSE.MaxStreams)
 	if a.clientIPErr != nil {
 		state.errs = append(state.errs, a.clientIPErr)
 	}
+	// Rate limiting is completed once every route is known, because a quota
+	// name means the same thing everywhere and a storage nobody named is
+	// created once and shared.
+	a.resolveRateLimiting(state)
 	a.lifecycle.components = state.lifecycles
 	a.frontends = state.frontends
 	slices.SortStableFunc(a.frontends, func(x, y *frontend) int {
@@ -582,9 +593,25 @@ func (a *App) run(c *Context, route *Route) {
 	}
 	defer a.recoverRoute(c)
 
+	// The count comes before the dependencies by default, so that a client
+	// past its limit is refused before anything expensive is done on its
+	// behalf, and so that a request rejected by a guard is still counted.
+	limits := route.rateLimit
+	if limits != nil && !limits.afterDependencies {
+		if err := limits.check(c); err != nil {
+			a.fail(c, err)
+			return
+		}
+	}
 	if err := route.resolveDependencies(c); err != nil {
 		a.fail(c, err)
 		return
+	}
+	if limits != nil && limits.afterDependencies {
+		if err := limits.check(c); err != nil {
+			a.fail(c, err)
+			return
+		}
 	}
 	if err := route.invoke(c); err != nil {
 		a.fail(c, err)

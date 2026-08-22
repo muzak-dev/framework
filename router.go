@@ -79,9 +79,11 @@ type routerConfig struct {
 	maxFileSize        int64
 	ws                 *WSOptions
 	sse                *SSEOptions
+	rateLimit          *RateLimitOptions
 	allowUnknownFields *bool
 	deprecated         bool
 	hidden             bool
+	skipRateLimit      bool
 }
 
 // routeConfig accumulates the settings declared on a single route.
@@ -99,10 +101,12 @@ type routeConfig struct {
 	maxFileSize        int64
 	ws                 *WSOptions
 	sse                *SSEOptions
+	rateLimit          *RateLimitOptions
 	allowUnknownFields *bool
 	skipValidation     bool
 	deprecated         bool
 	hidden             bool
+	skipRateLimit      bool
 }
 
 // WithPrefix mounts a router under a path prefix.
@@ -296,6 +300,15 @@ type Route struct {
 	maxFileSize        int64
 	allowUnknownFields bool
 	skipValidation     bool
+
+	// rateLimit is the route's resolved request policy, and is nil for a route
+	// that is not rate limited. rateLimitOpts is the resolved configuration it
+	// was built from, kept even when no quota was declared because a
+	// WebSocket route's message limits are counted with the same storage and
+	// tracker.
+	rateLimit     *rateLimitConfig
+	rateLimitOpts RateLimitOptions
+	skipRateLimit bool
 
 	inType  reflect.Type
 	outType reflect.Type
@@ -538,9 +551,11 @@ type inherited struct {
 	wsMaxConnections   int
 	sse                SSEOptions
 	sseMaxStreams      int
+	rateLimit          RateLimitOptions
 	allowUnknownFields bool
 	deprecated         bool
 	hidden             bool
+	skipRateLimit      bool
 }
 
 // merge layers a router's own configuration on top of what it inherited,
@@ -559,9 +574,11 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		wsMaxConnections:   in.wsMaxConnections,
 		sse:                in.sse,
 		sseMaxStreams:      in.sseMaxStreams,
+		rateLimit:          in.rateLimit,
 		allowUnknownFields: in.allowUnknownFields,
 		deprecated:         in.deprecated || cfg.deprecated,
 		hidden:             in.hidden || cfg.hidden,
+		skipRateLimit:      in.skipRateLimit || cfg.skipRateLimit,
 	}
 	if cfg.maxBodySize > 0 {
 		out.maxBodySize = cfg.maxBodySize
@@ -577,6 +594,9 @@ func (in inherited) merge(cfg routerConfig) inherited {
 	}
 	if cfg.sse != nil {
 		out.sse = out.sse.overlay(*cfg.sse)
+	}
+	if cfg.rateLimit != nil {
+		out.rateLimit = out.rateLimit.overlay(*cfg.rateLimit)
 	}
 	if cfg.allowUnknownFields != nil {
 		out.allowUnknownFields = *cfg.allowUnknownFields
@@ -679,6 +699,12 @@ func (rt *Route) resolve(in inherited) error {
 		rt.allowUnknownFields = *cfg.allowUnknownFields
 	}
 	rt.skipValidation = cfg.skipValidation
+
+	// Rate limiting is resolved before the protocol branches below, because a
+	// WebSocket route's message limits are built from the same policy.
+	if err := rt.resolveRateLimit(in); err != nil {
+		return err
+	}
 
 	rt.OperationID = cfg.operationID
 	if rt.OperationID == "" {

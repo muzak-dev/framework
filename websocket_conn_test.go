@@ -742,7 +742,7 @@ func TestWebSocketShutdownGivesUpOnAStuckHandler(t *testing.T) {
 	t.Parallel()
 	var registry liveRegistry[*WSConn]
 	conn, _ := newPipeConns(t, WSOptions{CloseGracePeriod: -1, WriteTimeout: 10 * time.Millisecond})
-	if registry.add(conn) != admitted {
+	if registry.add(conn, "") != admitted {
 		t.Fatal("the connection was not accepted")
 	}
 	// Nothing ever removes it, which is what a handler that ignores its closed
@@ -753,6 +753,52 @@ func TestWebSocketShutdownGivesUpOnAStuckHandler(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > wsTestTimeout {
 		t.Errorf("shutdown waited %v, want it to give up after its timeout", elapsed)
+	}
+}
+
+func TestLiveRegistryPerKeyLimit(t *testing.T) {
+	t.Parallel()
+	var registry liveRegistry[*WSConn]
+	registry.perKeyLimit = 2
+
+	a, b, c := &WSConn{}, &WSConn{}, &WSConn{}
+	if registry.add(a, "alice") != admitted {
+		t.Fatal("alice's first entry was refused")
+	}
+	if registry.add(b, "alice") != admitted {
+		t.Fatal("alice's second entry was refused")
+	}
+	if registry.add(c, "alice") != registryKeyFull {
+		t.Fatal("a third entry for alice was admitted past her per-key limit")
+	}
+
+	// bob's own budget is untouched by alice holding hers.
+	bob := &WSConn{}
+	if registry.add(bob, "bob") != admitted {
+		t.Fatal("bob's entry was refused by alice's budget")
+	}
+
+	// Removing one of alice's frees a slot for her specifically.
+	registry.remove(a)
+	if registry.add(c, "alice") != admitted {
+		t.Fatal("alice was not readmitted after one of her entries closed")
+	}
+
+	// The process-wide limit, when also configured, is still checked first
+	// and independently of who is asking.
+	registry.limit = registry.count()
+	if got := registry.admits("carol"); got != registryFull {
+		t.Errorf("admits(carol) = %v, want registryFull once the process-wide limit is reached", got)
+	}
+
+	// An empty key is never counted against the per-key dimension at all,
+	// which is what a caller with nothing to key on (or with the dimension
+	// turned off) relies on.
+	registry.limit = 0
+	for range registry.perKeyLimit + 1 {
+		if registry.add(&WSConn{}, "") != admitted {
+			t.Fatal("an unkeyed entry was refused by a per-key limit that does not apply to it")
+		}
 	}
 }
 

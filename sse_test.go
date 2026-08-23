@@ -573,6 +573,61 @@ func TestSSEStreamLimitResolution(t *testing.T) {
 	}
 }
 
+func TestSSEStreamLimitPerIP(t *testing.T) {
+	t.Parallel()
+	// MaxStreams alone bounds the process, not one client within it: without
+	// MaxStreamsPerIP, a single address could hold every one of MaxStreams'
+	// slots itself and leave 503 for everyone else.
+	opts := quietOptions()
+	opts.SSE = SSEOptions{MaxStreams: 10, MaxStreamsPerIP: 1, KeepAlive: -1}
+	opts.ClientIP = ClientIPOptions{TrustedProxies: []string{"127.0.0.1/32"}}
+	release := make(chan struct{})
+	_, server := newSSETestAppWith(t, opts, func(app *App) {
+		app.SSE("/stream", func(_ *Context, _ Empty, stream *SSEStream[itemOut]) error {
+			if err := stream.Send(itemOut{Name: "held"}); err != nil {
+				return err
+			}
+			<-release
+			return nil
+		})
+	})
+	defer close(release)
+
+	withAddress := func(ip string) func(*SSEDialOptions) {
+		return func(o *SSEDialOptions) { o.Header = http.Header{"X-Forwarded-For": []string{ip}} }
+	}
+
+	first := openStream(t, server.URL, "/stream", withAddress("203.0.113.9"))
+	nextEvent(t, first)
+
+	// A second stream from the same address is refused even though the
+	// process-wide MaxStreams has plenty of room left.
+	_, refused := tryStream(t, server.URL, "/stream", withAddress("203.0.113.9"))
+	if refused.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("a second stream from the same address got status %d, want %d", refused.StatusCode, http.StatusServiceUnavailable)
+	}
+	if retry := refused.Header.Get("Retry-After"); retry == "" {
+		t.Error("a refused stream carried no Retry-After header")
+	}
+
+	// A different address is unaffected: the limit is per client, not global.
+	second := openStream(t, server.URL, "/stream", withAddress("198.51.100.4"))
+	nextEvent(t, second)
+}
+
+func TestSSEStreamsPerIPLimitResolution(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ configured, want int }{
+		{0, DefaultSSEMaxStreamsPerIP},
+		{-1, 0},
+		{7, 7},
+	} {
+		if got := sseStreamsPerIPLimit(tc.configured); got != tc.want {
+			t.Errorf("sseStreamsPerIPLimit(%d) = %d, want %d", tc.configured, got, tc.want)
+		}
+	}
+}
+
 func TestSSERegistrationErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -924,7 +924,7 @@ func TestWebSocketRefusesAHandshakeWhileShuttingDown(t *testing.T) {
 	if closed := registry.shutdown(0, wsCloseGoingAway); closed != 0 {
 		t.Errorf("shutdown of an empty register closed %d connections, want 0", closed)
 	}
-	if registry.add(&WSConn{}) != registryDraining {
+	if registry.add(&WSConn{}, "") != registryDraining {
 		t.Error("a connection was accepted after the register began draining")
 	}
 	// Forgetting a connection that was never tracked must not unbalance the

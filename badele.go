@@ -381,17 +381,21 @@ func (a *App) build() {
 
 	a.routers = countRouters(a.Router)
 	a.finalize(inherited{
-		maxBodySize:      a.opts.MaxBodySize,
-		maxUploadSize:    a.opts.MaxUploadSize,
-		maxFileSize:      a.opts.MaxFileSize,
-		ws:               a.opts.WebSocket,
-		wsMaxConnections: a.opts.WebSocket.MaxConnections,
-		sse:              a.opts.SSE,
-		sseMaxStreams:    a.opts.SSE.MaxStreams,
-		rateLimit:        a.opts.RateLimit,
+		maxBodySize:           a.opts.MaxBodySize,
+		maxUploadSize:         a.opts.MaxUploadSize,
+		maxFileSize:           a.opts.MaxFileSize,
+		ws:                    a.opts.WebSocket,
+		wsMaxConnections:      a.opts.WebSocket.MaxConnections,
+		wsMaxConnectionsPerIP: a.opts.WebSocket.MaxConnectionsPerIP,
+		sse:                   a.opts.SSE,
+		sseMaxStreams:         a.opts.SSE.MaxStreams,
+		sseMaxStreamsPerIP:    a.opts.SSE.MaxStreamsPerIP,
+		rateLimit:             a.opts.RateLimit,
 	}, emit, state)
 	a.websockets.limit = wsConnectionLimit(a.opts.WebSocket.MaxConnections)
+	a.websockets.perKeyLimit = wsConnectionsPerIPLimit(a.opts.WebSocket.MaxConnectionsPerIP)
 	a.streams.limit = sseStreamLimit(a.opts.SSE.MaxStreams)
+	a.streams.perKeyLimit = sseStreamsPerIPLimit(a.opts.SSE.MaxStreamsPerIP)
 	if a.clientIPErr != nil {
 		state.errs = append(state.errs, a.clientIPErr)
 	}

@@ -460,6 +460,84 @@ func TestWSConnectionLimitResolution(t *testing.T) {
 	}
 }
 
+func TestWebSocketConnectionLimitPerIP(t *testing.T) {
+	t.Parallel()
+	// A WebSocket handshake needs no Origin header to succeed, so a single
+	// unauthenticated, non-browser client can open connections in a tight
+	// loop; MaxConnections alone bounds the process, not what one client can
+	// take from it. This is the test for the dimension that does.
+	release := make(chan struct{})
+	opts := quietOptions()
+	opts.WebSocket = WSOptions{MaxConnections: 10, MaxConnectionsPerIP: 1}
+	opts.ClientIP = ClientIPOptions{TrustedProxies: []string{"127.0.0.1/32"}}
+	app := New(opts)
+	app.WS("/ws", func(ctx *Context, _ Empty, conn *WSConn) error {
+		<-release
+		return nil
+	})
+	mustBuild(t, app)
+	server := httptest.NewServer(app)
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+
+	if _, response := dialRaw(t, server.URL, "/ws", "X-Forwarded-For", "203.0.113.9"); response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("the first connection got status %d, want it accepted", response.StatusCode)
+	}
+
+	// A second connection from the same address is refused even though the
+	// process-wide MaxConnections has plenty of room left.
+	_, refused := dialRaw(t, server.URL, "/ws", "X-Forwarded-For", "203.0.113.9")
+	if refused.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("a second connection from the same address got status %d, want %d", refused.StatusCode, http.StatusServiceUnavailable)
+	}
+	if got := refused.Header.Get("Retry-After"); got == "" {
+		t.Error("no Retry-After was offered, so a client has nothing to go on")
+	}
+
+	// A different address is unaffected: the limit is per client, not global.
+	if _, response := dialRaw(t, server.URL, "/ws", "X-Forwarded-For", "198.51.100.4"); response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("a connection from a different address got status %d, want it accepted", response.StatusCode)
+	}
+}
+
+func TestWebSocketConnectionLimitPerIPBelongsToTheApplication(t *testing.T) {
+	t.Parallel()
+	// Like MaxConnections, the dimension this protects is a client's share of
+	// the process, which a route cannot narrow or widen for itself.
+	app := New(quietOptions())
+	app.WS("/ws", wsEcho, WithWebSocket(WSOptions{MaxConnectionsPerIP: 10}))
+	if got := buildError(t, app); !strings.Contains(got, "MaxConnectionsPerIP may only be set on the application") {
+		t.Errorf("build error = %q, want it to say where the limit belongs", got)
+	}
+
+	router := NewRouter()
+	router.WS("/ws", wsEcho)
+	viaRouter := New(quietOptions())
+	viaRouter.Include(router, WithWebSocket(WSOptions{MaxConnectionsPerIP: 10}))
+	if got := buildError(t, viaRouter); !strings.Contains(got, "MaxConnectionsPerIP may only be set on the application") {
+		t.Errorf("build error = %q, want a router to be refused too", got)
+	}
+
+	unlimited := New(quietOptions())
+	unlimited.opts.WebSocket.MaxConnectionsPerIP = -1
+	unlimited.WS("/ws", wsEcho)
+	mustBuild(t, unlimited)
+	if unlimited.websockets.perKeyLimit != 0 {
+		t.Errorf("perKeyLimit = %d, want a negative setting to remove it", unlimited.websockets.perKeyLimit)
+	}
+}
+
+func TestWSConnectionsPerIPLimitResolution(t *testing.T) {
+	t.Parallel()
+	for configured, want := range map[int]int{0: DefaultWSMaxConnectionsPerIP, -1: 0, 7: 7} {
+		if got := wsConnectionsPerIPLimit(configured); got != want {
+			t.Errorf("wsConnectionsPerIPLimit(%d) = %d, want %d", configured, got, want)
+		}
+	}
+}
+
 func TestWebSocketSurvivesAnAttackStorm(t *testing.T) {
 	// Not parallel: the goroutine leak profile and the register are checked at
 	// the end, and both are about the whole process.

@@ -539,46 +539,50 @@ func register[In, Out any](r *Router, method, path string, h Handler[In, Out], o
 // inherited is the configuration a router passes down to everything it
 // contains.
 type inherited struct {
-	prefix             string
-	tags               []string
-	guards             []Guard
-	providers          []*provider
-	responses          []responseDoc
-	maxBodySize        int64
-	maxUploadSize      int64
-	maxFileSize        int64
-	ws                 WSOptions
-	wsMaxConnections   int
-	sse                SSEOptions
-	sseMaxStreams      int
-	rateLimit          RateLimitOptions
-	allowUnknownFields bool
-	deprecated         bool
-	hidden             bool
-	skipRateLimit      bool
+	prefix                string
+	tags                  []string
+	guards                []Guard
+	providers             []*provider
+	responses             []responseDoc
+	maxBodySize           int64
+	maxUploadSize         int64
+	maxFileSize           int64
+	ws                    WSOptions
+	wsMaxConnections      int
+	wsMaxConnectionsPerIP int
+	sse                   SSEOptions
+	sseMaxStreams         int
+	sseMaxStreamsPerIP    int
+	rateLimit             RateLimitOptions
+	allowUnknownFields    bool
+	deprecated            bool
+	hidden                bool
+	skipRateLimit         bool
 }
 
 // merge layers a router's own configuration on top of what it inherited,
 // returning the result without mutating either input.
 func (in inherited) merge(cfg routerConfig) inherited {
 	out := inherited{
-		prefix:             in.prefix + cfg.prefix,
-		tags:               concat(in.tags, cfg.tags),
-		guards:             concat(in.guards, cfg.guards),
-		providers:          concat(in.providers, cfg.providers),
-		responses:          concat(in.responses, cfg.responses),
-		maxBodySize:        in.maxBodySize,
-		maxUploadSize:      in.maxUploadSize,
-		maxFileSize:        in.maxFileSize,
-		ws:                 in.ws,
-		wsMaxConnections:   in.wsMaxConnections,
-		sse:                in.sse,
-		sseMaxStreams:      in.sseMaxStreams,
-		rateLimit:          in.rateLimit,
-		allowUnknownFields: in.allowUnknownFields,
-		deprecated:         in.deprecated || cfg.deprecated,
-		hidden:             in.hidden || cfg.hidden,
-		skipRateLimit:      in.skipRateLimit || cfg.skipRateLimit,
+		prefix:                in.prefix + cfg.prefix,
+		tags:                  concat(in.tags, cfg.tags),
+		guards:                concat(in.guards, cfg.guards),
+		providers:             concat(in.providers, cfg.providers),
+		responses:             concat(in.responses, cfg.responses),
+		maxBodySize:           in.maxBodySize,
+		maxUploadSize:         in.maxUploadSize,
+		maxFileSize:           in.maxFileSize,
+		ws:                    in.ws,
+		wsMaxConnections:      in.wsMaxConnections,
+		wsMaxConnectionsPerIP: in.wsMaxConnectionsPerIP,
+		sse:                   in.sse,
+		sseMaxStreams:         in.sseMaxStreams,
+		sseMaxStreamsPerIP:    in.sseMaxStreamsPerIP,
+		rateLimit:             in.rateLimit,
+		allowUnknownFields:    in.allowUnknownFields,
+		deprecated:            in.deprecated || cfg.deprecated,
+		hidden:                in.hidden || cfg.hidden,
+		skipRateLimit:         in.skipRateLimit || cfg.skipRateLimit,
 	}
 	if cfg.maxBodySize > 0 {
 		out.maxBodySize = cfg.maxBodySize

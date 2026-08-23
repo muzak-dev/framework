@@ -209,6 +209,30 @@ func TestSSEStreamLimitBelongsToTheApplication(t *testing.T) {
 	}
 }
 
+func TestSSEStreamsPerIPLimitBelongsToTheApplication(t *testing.T) {
+	t.Parallel()
+	// Like MaxStreams, the dimension this protects is a client's share of the
+	// process, which a route cannot narrow or widen for itself.
+	opts := quietOptions()
+	opts.SSE = SSEOptions{MaxStreamsPerIP: 4}
+	app := New(opts)
+	app.SSE("/stream", streamItems("x"), WithSSE(SSEOptions{MaxStreamsPerIP: 4000}))
+	if got := buildError(t, app); !strings.Contains(got, "MaxStreamsPerIP may only be set on the application") {
+		t.Errorf("Build() = %q, want it to refuse a route-level per-IP stream limit", got)
+	}
+
+	unlimited := New(func() AppOptions {
+		o := quietOptions()
+		o.SSE = SSEOptions{MaxStreamsPerIP: -1}
+		return o
+	}())
+	unlimited.SSE("/stream", streamItems("x"))
+	mustBuild(t, unlimited)
+	if unlimited.streams.perKeyLimit != 0 {
+		t.Errorf("perKeyLimit = %d, want a negative setting to remove it", unlimited.streams.perKeyLimit)
+	}
+}
+
 func TestSSESurvivesAStormOfOpenedAndAbandonedStreams(t *testing.T) {
 	t.Parallel()
 	var running atomic.Int64

@@ -29,6 +29,12 @@ const (
 	// for as long as the client cares to keep it, so the file descriptor
 	// budget is what runs out first.
 	DefaultSSEMaxStreams = 1024
+	// DefaultSSEMaxStreamsPerIP is how many event streams a single client
+	// address holds open at once by default, at 64, for the same reasons as
+	// [DefaultWSMaxConnectionsPerIP]: generous for a legitimate browser
+	// session, but small enough that one address can never take more than a
+	// slice of the process-wide budget.
+	DefaultSSEMaxStreamsPerIP = 64
 )
 
 // sseStreamLimit resolves how many streams an application will serve at once,
@@ -37,6 +43,20 @@ func sseStreamLimit(configured int) int {
 	switch {
 	case configured == 0:
 		return DefaultSSEMaxStreams
+	case configured < 0:
+		return 0
+	default:
+		return configured
+	}
+}
+
+// sseStreamsPerIPLimit resolves how many streams a single client address may
+// hold at once, where zero asks for the default and a negative value removes
+// the limit.
+func sseStreamsPerIPLimit(configured int) int {
+	switch {
+	case configured == 0:
+		return DefaultSSEMaxStreamsPerIP
 	case configured < 0:
 		return 0
 	default:
@@ -88,6 +108,28 @@ type SSEOptions struct {
 	// removes the limit, which is only appropriate where something else is
 	// counting.
 	MaxStreams int
+
+	// MaxStreamsPerIP is how many event streams a single client address may
+	// hold open at once, defaulting to [DefaultSSEMaxStreamsPerIP]. A request
+	// that would exceed it is refused with 503 and a Retry-After header, the
+	// same as MaxStreams, but for one client rather than for the process.
+	//
+	// MaxStreams alone bounds the process; it does not bound one client
+	// within it, so a single client opening streams in a tight loop can hold
+	// every one of MaxStreams' slots itself, leaving 503 for everyone else
+	// until it disconnects. This is what stops that: no matter how many
+	// streams the process has room for, one address can never hold more than
+	// this many of them.
+	//
+	// The address used is the one [Context.ClientIP] resolves; see
+	// [ClientIPOptions] to configure it behind a proxy. Like MaxStreams, this
+	// may only be set on the application, because the dimension it bounds is
+	// a client's share of the process, not of one route: a router or a route
+	// that sets it is refused when the application is built. A negative
+	// value removes the limit, which is only appropriate where something
+	// else is counting per client, such as a reverse proxy already capping
+	// connections per source address.
+	MaxStreamsPerIP int
 }
 
 // overlay layers a narrower scope's options on top of a wider one's, leaving
@@ -104,6 +146,9 @@ func (o SSEOptions) overlay(over SSEOptions) SSEOptions {
 	}
 	if over.MaxStreams != 0 {
 		o.MaxStreams = over.MaxStreams
+	}
+	if over.MaxStreamsPerIP != 0 {
+		o.MaxStreamsPerIP = over.MaxStreamsPerIP
 	}
 	return o
 }
@@ -275,6 +320,9 @@ func (rt *Route) resolveSSE(in inherited) error {
 	if opts.MaxStreams != in.sseMaxStreams {
 		return fmt.Errorf("badele: SSE %s %s: MaxStreams may only be set on the application, because the streams it bounds belong to the process rather than to one route", rt.Method, rt.Path)
 	}
+	if opts.MaxStreamsPerIP != in.sseMaxStreamsPerIP {
+		return fmt.Errorf("badele: SSE %s %s: MaxStreamsPerIP may only be set on the application, because the streams it bounds belong to the process rather than to one route", rt.Method, rt.Path)
+	}
 	rt.sse.opts = opts.withDefaults()
 	return nil
 }
@@ -289,6 +337,13 @@ var errSSEShuttingDown = NewHTTPError(http.StatusServiceUnavailable,
 var errSSETooManyStreams = NewHTTPError(http.StatusServiceUnavailable,
 	"the server is serving as many event streams as it is configured to; try again shortly")
 
+// errSSETooManyStreamsFromClient reports a request refused because the
+// requesting client already holds as many streams as
+// [SSEOptions.MaxStreamsPerIP] allows, distinct from the server as a whole
+// being full.
+var errSSETooManyStreamsFromClient = NewHTTPError(http.StatusServiceUnavailable,
+	"your client is already holding as many event streams as this server allows per client; close one before opening another")
+
 // acceptSSE opens the stream for a request, returning an *[HTTPError] for one
 // the application has no room to serve.
 func (a *App) acceptSSE(c *Context, cfg *sseConfig) (*sseStream, error) {
@@ -298,17 +353,24 @@ func (a *App) acceptSSE(c *Context, cfg *sseConfig) (*sseStream, error) {
 		return nil, NewHTTPError(http.StatusInternalServerError,
 			"the response had already started, so the event stream could not be opened")
 	}
+	key, err := perClientKey(c, a.streams.perKeyLimit)
+	if err != nil {
+		return nil, err
+	}
 	stream := newSSEStream(c, cfg.opts)
 	// The stream is admitted before its header is written, because a refusal
 	// has to be an ordinary error response and there is no way back to one
 	// afterwards. Admitting and recording under one lock is also what keeps
 	// two requests arriving together from both passing a limit of one.
-	switch a.streams.add(stream) {
+	switch a.streams.add(stream, key) {
 	case registryDraining:
 		return nil, errSSEShuttingDown
 	case registryFull:
 		c.w.Header().Set("Retry-After", "5")
 		return nil, errSSETooManyStreams
+	case registryKeyFull:
+		c.w.Header().Set("Retry-After", "5")
+		return nil, errSSETooManyStreamsFromClient
 	case admitted:
 	}
 	if err := stream.open(c); err != nil {

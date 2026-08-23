@@ -1,13 +1,15 @@
 package badele
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
 
 // liveRegistry tracks the long-lived responses an application is still
 // serving, so that a graceful shutdown can end them and so that there is a
-// bound on how many of them one process holds at once.
+// bound on how many of them one process holds at once, and optionally on how
+// many of them any single client holds.
 //
 // Two kinds of response outlive the request that began them. A hijacked
 // WebSocket connection is no longer one net/http knows about, so nothing else
@@ -23,8 +25,21 @@ type liveRegistry[T comparable] struct {
 	mu sync.Mutex
 	// limit is how many entries may be held at once, and zero means as many as
 	// the process can carry.
-	limit    int
-	entries  map[T]struct{}
+	limit int
+	// perKeyLimit is how many entries a single key may hold at once, and zero
+	// turns the dimension off entirely: no key is ever recorded or checked,
+	// so a registry that never configures one pays nothing beyond the plain
+	// process-wide limit above.
+	perKeyLimit int
+	entries     map[T]struct{}
+	// keyOf and perKey exist only while perKeyLimit is positive. keyOf
+	// recovers the key an entry was admitted under, which is what lets
+	// remove find the right counter to decrement without its caller having
+	// to remember and repeat a key that was only ever relevant at admission
+	// time; perKey holds each key's current count.
+	keyOf  map[T]string
+	perKey map[string]int
+
 	draining bool
 	// drained is closed by the last entry to go, which is what a shutdown
 	// waits on. It is a channel rather than a wait group because a shutdown
@@ -48,6 +63,9 @@ const (
 	// registryFull reports an application already holding as many entries as
 	// it is configured to.
 	registryFull
+	// registryKeyFull reports a single key already holding as many entries as
+	// perKeyLimit allows, distinct from the process as a whole being full.
+	registryKeyFull
 )
 
 // admits reports whether another entry can be taken, without taking one.
@@ -55,37 +73,55 @@ const (
 // It exists for the callers that have to refuse before they commit: a
 // WebSocket handshake can only be answered with an ordinary error response
 // before the connection is hijacked, and by then there is no response left.
-func (g *liveRegistry[T]) admits() admission {
+// key is the entry's key for the per-key dimension, or the empty string when
+// the caller has none to offer; see [liveRegistry.add].
+func (g *liveRegistry[T]) admits(key string) admission {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.admitsLocked()
+	return g.admitsLocked(key)
 }
 
 // admitsLocked is admits with the lock already held.
-func (g *liveRegistry[T]) admitsLocked() admission {
+func (g *liveRegistry[T]) admitsLocked(key string) admission {
 	switch {
 	case g.draining:
 		return registryDraining
 	case g.limit > 0 && len(g.entries) >= g.limit:
 		return registryFull
+	case g.perKeyLimit > 0 && key != "" && g.perKey[key] >= g.perKeyLimit:
+		return registryKeyFull
 	default:
 		return admitted
 	}
 }
 
 // add records a new entry, reporting why it was refused when the application
-// has stopped admitting them. Checking and recording under one lock is what
-// keeps two handshakes arriving together from both passing a limit of one.
-func (g *liveRegistry[T]) add(v T) admission {
+// has stopped admitting them or the key already holds as many as it may.
+// Checking and recording under one lock is what keeps two handshakes arriving
+// together from both passing a limit of one.
+//
+// key identifies the entry for the per-key dimension of the limit. Pass the
+// empty string when the caller has no key to offer, or when perKeyLimit is
+// not configured at all, in which case it is never even looked at: the empty
+// string is never counted against g.limit's per-process budget.
+func (g *liveRegistry[T]) add(v T, key string) admission {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if refused := g.admitsLocked(); refused != admitted {
+	if refused := g.admitsLocked(key); refused != admitted {
 		return refused
 	}
 	if g.entries == nil {
 		g.entries = make(map[T]struct{})
 	}
 	g.entries[v] = struct{}{}
+	if g.perKeyLimit > 0 && key != "" {
+		if g.keyOf == nil {
+			g.keyOf = make(map[T]string)
+			g.perKey = make(map[string]int)
+		}
+		g.keyOf[v] = key
+		g.perKey[key]++
+	}
 	return admitted
 }
 
@@ -95,6 +131,14 @@ func (g *liveRegistry[T]) remove(v T) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.entries, v)
+	if key, ok := g.keyOf[v]; ok {
+		delete(g.keyOf, v)
+		if g.perKey[key] <= 1 {
+			delete(g.perKey, key)
+		} else {
+			g.perKey[key]--
+		}
+	}
 	if len(g.entries) == 0 && g.drained != nil {
 		close(g.drained)
 		g.drained = nil
@@ -144,4 +188,33 @@ func (g *liveRegistry[T]) shutdown(timeout time.Duration, end func(T)) int {
 	case <-timer.C:
 	}
 	return len(open)
+}
+
+// errConnectionLimitNoAddress reports a request that cannot be attributed to
+// an address once a per-client connection limit needs one to check against.
+//
+// It mirrors [errRateLimitNoAddress]: a listener that is not addressed by IP,
+// such as one reached only through a proxy that strips forwarding headers,
+// needs the per-client dimension turned off with a negative
+// MaxConnectionsPerIP or MaxStreamsPerIP rather than have every connection
+// refused because none of them can be told apart.
+var errConnectionLimitNoAddress = errors.New("badele: a per-client connection limit is configured but the client address could not be determined; " +
+	"set MaxConnectionsPerIP or MaxStreamsPerIP to a negative value to disable it for a listener that is not addressed by IP")
+
+// perClientKey resolves the key a [liveRegistry]'s per-client dimension
+// admits an entry under.
+//
+// It returns the empty string, which liveRegistry treats as "no key" and
+// skips the per-client check for entirely, whenever limit is not positive, so
+// an application that never configures a per-client limit resolves no
+// address and pays nothing for a dimension it does not use.
+func perClientKey(c *Context, limit int) (string, error) {
+	if limit <= 0 {
+		return "", nil
+	}
+	ip := c.ClientIP()
+	if ip == "" {
+		return "", errConnectionLimitNoAddress
+	}
+	return ip, nil
 }

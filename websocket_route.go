@@ -44,6 +44,13 @@ const (
 	// file descriptor budget a process is usually given, which is the resource
 	// that runs out first.
 	DefaultWSMaxConnections = 1024
+	// DefaultWSMaxConnectionsPerIP is how many WebSocket connections a single
+	// client address holds open at once by default, at 64. It is far above
+	// what a legitimate browser session needs, even one holding dozens of
+	// tabs each open to their own connection, and far below
+	// DefaultWSMaxConnections, so a single misbehaving or attacking address
+	// can take a meaningful slice of the process budget but never all of it.
+	DefaultWSMaxConnectionsPerIP = 64
 )
 
 // wsConnectionLimit resolves how many connections an application will hold at
@@ -52,6 +59,20 @@ func wsConnectionLimit(configured int) int {
 	switch {
 	case configured == 0:
 		return DefaultWSMaxConnections
+	case configured < 0:
+		return 0
+	default:
+		return configured
+	}
+}
+
+// wsConnectionsPerIPLimit resolves how many connections a single client
+// address may hold at once, where zero asks for the default and a negative
+// value removes the limit.
+func wsConnectionsPerIPLimit(configured int) int {
+	switch {
+	case configured == 0:
+		return DefaultWSMaxConnectionsPerIP
 	case configured < 0:
 		return 0
 	default:
@@ -110,6 +131,33 @@ type WSOptions struct {
 	// removes the limit, which is only appropriate where something else is
 	// counting.
 	MaxConnections int
+
+	// MaxConnectionsPerIP is how many WebSocket connections a single client
+	// address may hold open at once, defaulting to
+	// [DefaultWSMaxConnectionsPerIP]. A handshake that would exceed it is
+	// refused with 503 and a Retry-After header, the same as MaxConnections,
+	// but for one client rather than for the process.
+	//
+	// MaxConnections alone bounds the process; it does not bound one client
+	// within it. A WebSocket handshake needs no Origin header at all to
+	// succeed - only a browser sends one, and the origin check exists to stop
+	// browser-based hijacking, not to authenticate a client - so a single
+	// unauthenticated, non-browser client can open connections in a tight
+	// loop and hold every one of MaxConnections' slots itself, leaving 503
+	// for everyone else until it disconnects. This is what stops that: no
+	// matter how many connections the process has room for, one address can
+	// never hold more than this many of them.
+	//
+	// The address used is the one [Context.ClientIP] resolves, the same
+	// spoof-resistant resolution the rate limiter's default [IPTracker] uses;
+	// see [ClientIPOptions] to configure it behind a proxy. Like
+	// MaxConnections, this may only be set on the application, because the
+	// dimension it bounds is a client's share of the process, not of one
+	// route: a router or a route that sets it is refused when the
+	// application is built. A negative value removes the limit, which is
+	// only appropriate where something else is counting per client, such as
+	// a reverse proxy already capping connections per source address.
+	MaxConnectionsPerIP int
 
 	// CloseGracePeriod is how long a closing connection waits for the peer's
 	// close frame before the transport is torn down, defaulting to
@@ -208,6 +256,9 @@ func (o WSOptions) overlay(over WSOptions) WSOptions {
 	}
 	if over.MaxConnections != 0 {
 		o.MaxConnections = over.MaxConnections
+	}
+	if over.MaxConnectionsPerIP != 0 {
+		o.MaxConnectionsPerIP = over.MaxConnectionsPerIP
 	}
 	if over.CloseGracePeriod != 0 {
 		o.CloseGracePeriod = over.CloseGracePeriod
@@ -400,6 +451,9 @@ func (rt *Route) resolveWebSocket(in inherited) error {
 	if opts.MaxConnections != in.wsMaxConnections {
 		return fmt.Errorf("badele: WS %s: MaxConnections may only be set on the application, because the connections it bounds belong to the process rather than to one route", rt.Path)
 	}
+	if opts.MaxConnectionsPerIP != in.wsMaxConnectionsPerIP {
+		return fmt.Errorf("badele: WS %s: MaxConnectionsPerIP may only be set on the application, because the connections it bounds belong to the process rather than to one route", rt.Path)
+	}
 	rt.websocket.opts = opts.withDefaults()
 	for _, name := range rt.websocket.opts.Subprotocols {
 		// A subprotocol is echoed into the handshake response, so one that is
@@ -468,14 +522,24 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 			return nil, err
 		}
 	}
+	// The per-client key is resolved once here and reused for both the
+	// pre-upgrade check and the post-upgrade recording below, so the same
+	// client is counted against the same budget in both places.
+	connKey, err := perClientKey(c, a.websockets.perKeyLimit)
+	if err != nil {
+		return nil, err
+	}
 	// Refusing before the upgrade is what lets a client shut out by a draining
 	// or a full server read an ordinary error response.
-	switch a.websockets.admits() {
+	switch a.websockets.admits(connKey) {
 	case registryDraining:
 		return nil, errWSShuttingDown
 	case registryFull:
 		c.w.Header().Set("Retry-After", "5")
 		return nil, errWSTooManyConnections
+	case registryKeyFull:
+		c.w.Header().Set("Retry-After", "5")
+		return nil, errWSTooManyConnectionsFromClient
 	case admitted:
 	}
 	subprotocol := wsSubprotocol(c.r, cfg.opts.Subprotocols)
@@ -483,7 +547,7 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if a.websockets.add(conn) != admitted {
+	if a.websockets.add(conn, connKey) != admitted {
 		// coverage: this is the losing side of a race between a handshake and
 		// a shutdown or a full register, narrowed to the microseconds between
 		// the check above and the upgrade, so it is reasoned about rather than
@@ -521,6 +585,13 @@ var errWSShuttingDown = NewHTTPError(http.StatusServiceUnavailable,
 // is already holding as many connections as it is allowed to.
 var errWSTooManyConnections = NewHTTPError(http.StatusServiceUnavailable,
 	"the server is holding as many websocket connections as it is configured to; try again shortly")
+
+// errWSTooManyConnectionsFromClient reports a handshake refused because the
+// requesting client already holds as many connections as
+// [WSOptions.MaxConnectionsPerIP] allows, distinct from the server as a whole
+// being full.
+var errWSTooManyConnectionsFromClient = NewHTTPError(http.StatusServiceUnavailable,
+	"your client is already holding as many websocket connections as this server allows per client; close one before opening another")
 
 // checkHandshake verifies that the request is a WebSocket handshake this route
 // will serve, and returns the value for the Sec-WebSocket-Accept header.

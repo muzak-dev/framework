@@ -75,9 +75,11 @@ func RenameItem(ctx *muzak.Context, in schemas.ItemRenameIn) (schemas.ItemOut, e
 func asHTTPError(err error) error {
 	switch {
 	case errors.Is(err, core.ErrItemNotFound):
-		return muzak.NewHTTPError(http.StatusNotFound, "Item not found")
+		// The named constructors carry the status and its classifier, and
+		// Wrap keeps the cause in the log without sending it to the client.
+		return muzak.NotFound("Item not found").Wrap(err)
 	case errors.Is(err, core.ErrItemExists):
-		return muzak.NewHTTPError(http.StatusConflict, "Item already exists")
+		return muzak.Conflict("Item already exists").Wrap(err)
 	default:
 		return err
 	}

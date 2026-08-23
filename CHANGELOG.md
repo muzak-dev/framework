@@ -24,6 +24,17 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
   constraints the application enforces, generated examples, a filter over every
   operation, deep links to an operation or a group, and a light, dark or
   system theme.
+- A constructor for each HTTP outcome worth a name: `muzak.NotFound(message)`,
+  `muzak.Forbidden(message)`, `muzak.Conflict(message)` and seventeen more,
+  covering 400 through 504. Each returns an `*HTTPError` carrying that status
+  and its classifier, so `Wrap`, `WithCode` and `WithDetails` chain onto every
+  one of them, and an empty message uses the standard sentence for the status.
+  `NewHTTPError(status, message)` still covers anything without a name of its
+  own.
+- Machine-readable codes for the statuses that had none: `payment_required`,
+  `not_acceptable`, `request_timeout`, `gone`, `precondition_failed`,
+  `not_implemented`, `bad_gateway`, `service_unavailable` and
+  `gateway_timeout`.
 - The address the documentation ended up at is reported when the server starts
   listening, as a URL that can be opened from the terminal:
   `Documentation at http://localhost:8080/docs`. A wildcard bind is reported as
@@ -40,6 +51,10 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ### Changed
 
+- `CodeForStatus` returns a specific classifier for the nine statuses listed
+  above instead of the generic `client_error` or `internal_error`. A client
+  switching on the code sees the more precise value; one switching on the
+  status is unaffected.
 - The documentation page and the OpenAPI document are compressed once when the
   application is built and served with an entity tag per representation, so a
   client that accepts gzip transfers a fraction of the bytes and a reload

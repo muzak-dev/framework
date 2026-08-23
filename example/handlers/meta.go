@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"net/http"
-
 	"muzak.dev/framework"
 	"muzak.dev/framework/example/core"
 	"muzak.dev/framework/example/schemas"
@@ -25,8 +23,7 @@ func Predict(ctx *muzak.Context, in schemas.PredictParams) (schemas.PredictOut, 
 
 	result, ready := models.Predict("answer_to_everything", in.X)
 	if !ready {
-		return schemas.PredictOut{}, muzak.NewHTTPError(
-			http.StatusServiceUnavailable, "the model is not loaded")
+		return schemas.PredictOut{}, muzak.ServiceUnavailable("the model is not loaded")
 	}
 	return schemas.PredictOut{Result: result}, nil
 }

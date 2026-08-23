@@ -2,6 +2,7 @@ package muzak_test
 
 import (
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -231,6 +232,41 @@ func ExampleNewHTTPError() {
 	// Output:
 	// 404
 	// not_found Item not found
+}
+
+// ExampleNotFound shows the named constructors, one per outcome an
+// application reaches for, and what chaining onto one adds to the response.
+func ExampleNotFound() {
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
+	})
+	app.Get("/users/{name}", func(ctx *muzak.Context, in struct {
+		Name string `path:"name"`
+	}) (UserOut, error) {
+		// The cause is logged and never sent; the message is what the client
+		// reads. Passing "" instead would use the standard sentence for a 404.
+		return UserOut{}, muzak.NotFound("no user goes by that name").
+			Wrap(errors.New("sql: no rows in result set")).
+			WithDetails(muzak.ErrorDetail{Field: "name", Location: "path", Issue: "does not exist"})
+	})
+
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/users/nobody", nil))
+
+	var envelope muzak.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		fmt.Println("decode failed:", err)
+		return
+	}
+	fmt.Println(rec.Code)
+	fmt.Printf("%s %s\n", envelope.Error.Code, envelope.Error.Message)
+	fmt.Println(envelope.Error.Details[0].Field, envelope.Error.Details[0].Issue)
+	fmt.Println(strings.Contains(rec.Body.String(), "sql:"))
+	// Output:
+	// 404
+	// not_found no user goes by that name
+	// name does not exist
+	// false
 }
 
 // ExampleLoadConfig reads settings from an explicit set of values, which is

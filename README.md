@@ -76,6 +76,7 @@ type, and the compiler is what tells you rather than a bug report.
 | **Real-time** | RFC 6455 WebSockets and typed server-sent events, implemented here rather than delegated |
 | **Versioning** | Per route or router, read from the path, a header, the `Accept` header or a function of your own |
 | **Documentation** | OpenAPI 3.1 at `/openapi.json` and a self-contained reference with a request console at `/docs`, both derived from the code |
+| **Errors** | One envelope for every failure, a constructor per status, and causes that stay server-side |
 | **Defaults** | Conservative everywhere. Relaxing one is a decision you make out loud |
 
 ## A whole application
@@ -182,6 +183,44 @@ The same declarations feed the generated document: `MinLen(12)` emits
 `minLength`, `OneOf` emits an `enum`, `Between` emits `minimum` and `maximum`.
 The OpenAPI document cannot drift from the validation, because both are read
 from one declaration.
+
+## Errors
+
+Every failure renders as one envelope: a machine-readable code, a message safe
+to disclose, the status, per-field details and the request identifier that ties
+the response to the log. There is a constructor per outcome, so returning the
+right response is not a matter of remembering the right number:
+
+```go
+return schemas.UserOut{}, muzak.NotFound("no user goes by that name")
+return schemas.UserOut{}, muzak.Forbidden("")               // standard sentence
+return schemas.UserOut{}, muzak.Conflict("that name is taken").Wrap(err)
+```
+
+`BadRequest` `Unauthorized` `PaymentRequired` `Forbidden` `NotFound`
+`MethodNotAllowed` `NotAcceptable` `RequestTimeout` `Conflict` `Gone`
+`PreconditionFailed` `PayloadTooLarge` `UnsupportedMediaType`
+`UnprocessableEntity` `TooManyRequests` `InternalServerError` `NotImplemented`
+`BadGateway` `ServiceUnavailable` `GatewayTimeout` -- and `NewHTTPError(status,
+message)` for anything else.
+
+Each returns an `*HTTPError`, so `.Wrap(err)`, `.WithCode("card_declined")` and
+`.WithDetails(...)` chain onto any of them. What `Wrap` holds is logged and
+never transmitted, including behind a 5xx you returned deliberately; an error
+that does not describe itself at all becomes an opaque 500 with the cause kept
+server-side.
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "message": "no user goes by that name",
+    "status": 404,
+    "details": [{ "field": "name", "location": "path", "issue": "does not exist" }]
+  },
+  "request_id": "0611f4b2-2f0a-4b57-9c1a-6e6a2e2f9b31"
+}
+```
 
 ## Safe defaults
 

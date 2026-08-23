@@ -491,6 +491,17 @@
 // the page's own script by hash and permits no network access beyond this
 // origin.
 //
+// [AppOptions.DocsPath] and [AppOptions.OpenAPIPath] decide where the two are
+// served, and [AppOptions.DisableDocs] turns both off for a deployment that
+// must not describe itself. Where they ended up is reported as the socket
+// opens:
+//
+//	INFO [Docs] Documentation at http://localhost:8080/docs  openapi=http://localhost:8080/openapi.json
+//
+// A path that is not absolute, that is the same as the other one, or that one
+// of the application's own routes already answers is a build error rather than
+// an address nobody can reach.
+//
 // # Errors
 //
 // Every failure renders as one envelope, carrying a machine-readable code, a

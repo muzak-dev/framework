@@ -140,6 +140,27 @@ compressed once, cached by the client and revalidated with an entity tag, and
 it is served under a policy that names its own script by hash and permits no
 network access beyond this origin.
 
+Where it is served, and whether it is served at all, is configuration:
+
+```go
+muzak.AppOptions{
+    DocsPath:    "/reference",              // default "/docs"
+    OpenAPIPath: "/reference/openapi.json", // default "/openapi.json"
+    DisableDocs: false,                     // true serves neither
+}
+```
+
+Both are announced the moment the socket opens, as URLs you can click:
+
+```
+00:27:38.548 INFO  [Server]  Listening on [::]:8099  scheme=http
+00:27:38.548 INFO  [Docs]    Documentation at http://localhost:8099/docs  openapi=http://localhost:8099/openapi.json
+```
+
+A path that is not absolute, that collides with the other one, or that one of
+your own routes already answers fails the build with a message saying which,
+rather than becoming a page nobody can reach.
+
 ## Validation
 
 Rules are declared against the field, not against its name:

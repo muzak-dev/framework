@@ -48,7 +48,22 @@ func main() {
 		Version:     "1.0.0",
 		Description: "The Bigger Applications example, rebuilt on Muzak.",
 		Contact:     &muzak.Contact{Email: settings.AdminEmail},
-		Addr:        settings.Addr,
+		// The groups the reference is presented in. A router or a single route
+		// joins one by naming it with WithTags; describing it here is what
+		// gives the group a sentence and decides the order the documentation
+		// leads with.
+		Tags: []muzak.Tag{
+			{Name: "users", Description: "Reading and creating the people the service knows about."},
+			{Name: "items", Description: "The catalogue, including the stream and the socket that follow it."},
+			{Name: "uploads", Description: "Multipart forms, read as bytes or as files."},
+			{Name: "auth", Description: "Exchanging a username and password for a session."},
+			{Name: "feed", Description: "What a reader sees, assembled per request."},
+			{Name: "chat", Description: "A long-running answer, streamed a token at a time."},
+			{Name: "admin", Description: "Privileged operations. Every one needs the staff token."},
+			{Name: "audit", Description: "Anything that leaves a trace, tagged on the route itself."},
+			{Name: "meta", Description: "Health and the settings the process was started with."},
+		},
+		Addr: settings.Addr,
 		// Which address a request is attributed to. Nothing is believed from a
 		// header until the proxy that wrote it is named here.
 		ClientIP: muzak.ClientIPOptions{TrustedProxies: settings.TrustedProxies},

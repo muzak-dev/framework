@@ -99,16 +99,28 @@ type AppOptions struct {
 	ErrorRenderer ErrorRenderer
 
 	// DocsPath is where the documentation UI is served, defaulting to
-	// "/docs". Set [AppOptions.DisableDocs] to serve neither it nor the
-	// OpenAPI document.
+	// "/docs". It is an absolute path on this application's own origin, so
+	// it begins with a slash and is matched exactly:
+	//
+	//	muzak.AppOptions{DocsPath: "/reference", OpenAPIPath: "/reference/openapi.json"}
+	//
+	// Both paths are reported when the server starts listening, as URLs that
+	// can be opened from the terminal. A path that is not absolute, that
+	// collides with the other one, or that an application route already
+	// answers is a build error rather than a page nobody can reach. Set
+	// [AppOptions.DisableDocs] to serve neither.
 	DocsPath string
 
 	// OpenAPIPath is where the OpenAPI document is served, defaulting to
-	// "/openapi.json".
+	// "/openapi.json". It follows the same rules as [AppOptions.DocsPath],
+	// and the page reads the document from wherever this puts it.
 	OpenAPIPath string
 
 	// DisableDocs stops the OpenAPI document and the documentation UI from
 	// being served, for deployments that must not describe themselves.
+	// Neither path is registered and no document is generated, so
+	// [App.Document] returns nil and both paths answer as any other unknown
+	// path does.
 	DisableDocs bool
 
 	// DisableAccessLog stops the per-request access log from being installed.
@@ -445,6 +457,9 @@ func (a *App) build() {
 			}
 		}
 	}
+	// The documentation paths are checked once every route is known, because
+	// one of the things that can be wrong with them is colliding with a route.
+	a.validateDocsPaths(state)
 	if a.clientIPErr != nil {
 		state.errs = append(state.errs, a.clientIPErr)
 	}
@@ -475,9 +490,9 @@ func (a *App) build() {
 
 	if !a.opts.DisableDocs {
 		a.spec = a.buildDocument()
-		Scoped(a.logger, ScopeDocs).Info("Serving API documentation",
-			slog.String("openapi", a.opts.OpenAPIPath),
-			slog.String("docs", a.opts.DocsPath))
+		Scoped(a.logger, ScopeDocs).Debug("Documentation prepared",
+			slog.String("docs", a.opts.DocsPath),
+			slog.String("openapi", a.opts.OpenAPIPath))
 	}
 	a.handler = a.buildHandler()
 }

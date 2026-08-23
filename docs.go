@@ -7,7 +7,9 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -62,6 +64,74 @@ func (a *App) prepareDocs() *docsAssets {
 	}
 	assets.page.policy = contentSecurityPolicy(page)
 	return assets
+}
+
+// validateDocsPaths checks that the documentation can be reached where it was
+// configured to be.
+//
+// A path that is not absolute would never match a request, two equal paths
+// would leave the page and the document it reads fighting over one address,
+// and a path an application route already answers would be shadowed by a page
+// nobody asked for at that address. All three are reported while the
+// application is built, rather than discovered as a 404 in a browser.
+func (a *App) validateDocsPaths(state *buildState) {
+	if a.opts.DisableDocs {
+		return
+	}
+	for _, configured := range [...]struct{ field, path string }{
+		{"AppOptions.DocsPath", a.opts.DocsPath},
+		{"AppOptions.OpenAPIPath", a.opts.OpenAPIPath},
+	} {
+		if !strings.HasPrefix(configured.path, "/") {
+			state.errs = append(state.errs, fmt.Errorf(
+				"muzak: %s is %q, which is not an absolute path and so would answer no request; write it as %q",
+				configured.field, configured.path, "/"+configured.path))
+			continue
+		}
+		if _, taken := a.entries[configured.path]; taken {
+			state.errs = append(state.errs, fmt.Errorf(
+				"muzak: %s is %q, which a route of this application already answers; "+
+					"move one of the two, or set AppOptions.DisableDocs to serve no documentation at all",
+				configured.field, configured.path))
+		}
+	}
+	if a.opts.DocsPath == a.opts.OpenAPIPath {
+		state.errs = append(state.errs, fmt.Errorf(
+			"muzak: AppOptions.DocsPath and AppOptions.OpenAPIPath are both %q, "+
+				"but the page and the document it reads need an address each",
+			a.opts.DocsPath))
+	}
+}
+
+// logDocumentation reports where the documentation can be read the moment the
+// socket is open, as URLs that can be opened from the terminal the server was
+// started in.
+func (a *App) logDocumentation(scheme, addr string) {
+	log := Scoped(a.logger, ScopeDocs)
+	if a.opts.DisableDocs {
+		log.Debug("Documentation is not served, because AppOptions.DisableDocs is set")
+		return
+	}
+	log.Info("Documentation at "+browsableURL(scheme, addr, a.opts.DocsPath),
+		slog.String("openapi", browsableURL(scheme, addr, a.opts.OpenAPIPath)))
+}
+
+// browsableURL renders a bound address and a path as a URL that can be
+// followed. A socket bound to every interface is reported as localhost,
+// because "[::]" is where the process listens rather than somewhere a browser
+// can go.
+func browsableURL(scheme, addr, path string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// coverage: the address comes from a listening socket, which always
+		// carries a port. Reporting it as it is beats reporting nothing.
+		return scheme + "://" + addr + path
+	}
+	switch host {
+	case "", "::", "0.0.0.0":
+		host = "localhost"
+	}
+	return scheme + "://" + net.JoinHostPort(host, port) + path
 }
 
 // withDocs intercepts the documentation paths and delegates everything else to

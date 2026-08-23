@@ -24,6 +24,15 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
   constraints the application enforces, generated examples, a filter over every
   operation, deep links to an operation or a group, and a light, dark or
   system theme.
+- The address the documentation ended up at is reported when the server starts
+  listening, as a URL that can be opened from the terminal:
+  `Documentation at http://localhost:8080/docs`. A wildcard bind is reported as
+  localhost, since that is where a browser can reach it.
+- `AppOptions.DocsPath` and `AppOptions.OpenAPIPath` are now validated while
+  the application is built. A path that is not absolute, one that is the same
+  as the other, or one that an application route already answers is a build
+  error naming the option to change, rather than a page nobody can reach or a
+  route silently shadowed by the documentation.
 - `OpenAPIOptions.Tags` describes the groups operations are sorted into and
   decides the order the documentation presents them in. Routes join a group
   with `WithTags` as before; a described tag no route carries is left out, and

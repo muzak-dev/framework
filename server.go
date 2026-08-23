@@ -207,6 +207,7 @@ func (a *App) serve(ctx context.Context, listener net.Listener) error {
 	}
 	Scoped(a.logger, ScopeServer).Info("Listening on "+listener.Addr().String(),
 		slog.String("scheme", scheme))
+	a.logDocumentation(scheme, listener.Addr().String())
 
 	errCh := make(chan error, 1)
 	go func() {

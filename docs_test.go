@@ -3,6 +3,7 @@ package muzak
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json/v2"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenAPIEndpoint(t *testing.T) {
@@ -477,4 +479,172 @@ func TestDocsAreOmittedWhenTheDocumentCannotBeRendered(t *testing.T) {
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("status = %d, want the request to pass through to the next handler", rec.Code)
 	}
+}
+
+// TestDocumentationIsAnnouncedAtStartUp covers the line a reader looks for in
+// the terminal: where the documentation is, as a URL that can be opened.
+func TestDocumentationIsAnnouncedAtStartUp(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger(t)
+	opts := quietOptions()
+	opts.Logger = logger
+	opts.Addr = "127.0.0.1:0"
+	opts.DocsPath = "/reference"
+	opts.OpenAPIPath = "/reference/openapi.json"
+
+	app := New(opts)
+	app.Get("/x", okHandler)
+	runAndStop(t, app)
+
+	written := logs.String()
+	if !strings.Contains(written, "Documentation at http://127.0.0.1:") ||
+		!strings.Contains(written, "/reference") {
+		t.Errorf("the configured documentation path was not announced:\n%s", written)
+	}
+	if !strings.Contains(written, "/reference/openapi.json") {
+		t.Errorf("the OpenAPI document was not announced:\n%s", written)
+	}
+}
+
+// TestDisabledDocumentationIsNotAnnounced checks that an application which
+// describes nothing says nothing about it either.
+func TestDisabledDocumentationIsNotAnnounced(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger(t)
+	opts := quietOptions()
+	opts.Logger = logger
+	opts.Addr = "127.0.0.1:0"
+	opts.DisableDocs = true
+
+	app := New(opts)
+	app.Get("/x", okHandler)
+	runAndStop(t, app)
+
+	if strings.Contains(logs.String(), "Documentation at") {
+		t.Errorf("documentation was announced although it is disabled:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "AppOptions.DisableDocs") {
+		t.Errorf("nothing recorded why the documentation is missing:\n%s", logs.String())
+	}
+}
+
+// runAndStop starts an application on an ephemeral port and shuts it down as
+// soon as it is listening, which is enough to exercise what start-up reports.
+func runAndStop(t *testing.T, app *App) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- app.RunContext(ctx) }()
+
+	deadline := time.After(5 * time.Second)
+	for app.Addr() == "" {
+		select {
+		case err := <-done:
+			t.Fatalf("the application stopped before it listened: %v", err)
+		case <-deadline:
+			t.Fatal("the application never started listening")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunContext = %v", err)
+	}
+}
+
+func TestBrowsableURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		scheme, addr, path, want string
+	}{
+		{"http", "[::]:8080", "/docs", "http://localhost:8080/docs"},
+		{"http", "0.0.0.0:8080", "/docs", "http://localhost:8080/docs"},
+		{"https", "127.0.0.1:443", "/docs", "https://127.0.0.1:443/docs"},
+		{"http", "[::1]:8080", "/docs", "http://[::1]:8080/docs"},
+		{"http", "example.internal:80", "/openapi.json", "http://example.internal:80/openapi.json"},
+	}
+	for _, tc := range tests {
+		if got := browsableURL(tc.scheme, tc.addr, tc.path); got != tc.want {
+			t.Errorf("browsableURL(%q, %q, %q) = %q, want %q",
+				tc.scheme, tc.addr, tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestDocsPathsAreValidated covers each way a configured path cannot work,
+// every one of which is a build error rather than a page nobody can reach.
+func TestDocsPathsAreValidated(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		configure  func(*AppOptions)
+		route      string
+		wantErrors []string
+	}{
+		{
+			name:       "a documentation path that is not absolute",
+			configure:  func(o *AppOptions) { o.DocsPath = "docs" },
+			wantErrors: []string{"AppOptions.DocsPath is \"docs\"", "not an absolute path", `"/docs"`},
+		},
+		{
+			name:       "an OpenAPI path that is not absolute",
+			configure:  func(o *AppOptions) { o.OpenAPIPath = "openapi.json" },
+			wantErrors: []string{"AppOptions.OpenAPIPath", "not an absolute path"},
+		},
+		{
+			name:       "both documents at one path",
+			configure:  func(o *AppOptions) { o.OpenAPIPath = "/docs" },
+			wantErrors: []string{"are both \"/docs\"", "an address each"},
+		},
+		{
+			name:       "a route already answering the documentation path",
+			route:      "/docs",
+			wantErrors: []string{"AppOptions.DocsPath is \"/docs\"", "a route of this application already answers"},
+		},
+		{
+			name:       "a route already answering the OpenAPI path",
+			route:      "/openapi.json",
+			wantErrors: []string{"AppOptions.OpenAPIPath", "a route of this application already answers"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts := quietOptions()
+			if tc.configure != nil {
+				tc.configure(&opts)
+			}
+			app := New(opts)
+			app.Get("/x", okHandler)
+			if tc.route != "" {
+				app.Get(tc.route, okHandler)
+			}
+			message := buildError(t, app)
+			for _, want := range tc.wantErrors {
+				if !strings.Contains(message, want) {
+					t.Errorf("the build error does not mention %q:\n%s", want, message)
+				}
+			}
+		})
+	}
+}
+
+// TestDocsPathsMayCollideWhenDocumentationIsDisabled checks that an
+// application serving no documentation is free to use those paths itself.
+func TestDocsPathsMayCollideWhenDocumentationIsDisabled(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.DisableDocs = true
+
+	app := New(opts)
+	app.Get("/docs", okHandler)
+	app.Get("/openapi.json", okHandler)
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, "GET", "/docs"), http.StatusOK)
+	assertStatus(t, do(t, app, "GET", "/openapi.json"), http.StatusOK)
 }

@@ -165,6 +165,51 @@ func IPTracker(ctx *Context) (string, error) {
 var errRateLimitNoAddress = errors.New("badele: the rate limiter could not determine the client address; " +
 	"a listener that is not addressed by IP needs a tracker of its own")
 
+// IPPrefixTracker keys a rate limit on a prefix of the client's address rather
+// than the whole of it.
+//
+// [IPTracker] keys on the exact address, which stops fitting the address
+// families it counts as soon as one of them is cheap to change: an IPv6 /64 is
+// the block size most providers hand out, so a client holding one can present
+// a different address on every request while never leaving a range only they
+// hold, and each address is a fresh budget to IPTracker. Keying on a shorter
+// prefix instead puts every address in that range back under one budget.
+// ipv4Bits and ipv6Bits are the prefix lengths kept for each family; 32 and 64
+// keep IPv4 addresses exact while collapsing an IPv6 source down to the
+// allocation it actually came from:
+//
+//	badele.RateLimitOptions{Tracker: badele.IPPrefixTracker(32, 64)}
+//
+// It panics if either length is out of range for its family (0 to 32 for
+// IPv4, 0 to 128 for IPv6), which is a mistake worth catching where the
+// tracker is built rather than on the first request that reaches it.
+func IPPrefixTracker(ipv4Bits, ipv6Bits int) RateLimitTracker {
+	if ipv4Bits < 0 || ipv4Bits > 32 {
+		panic(fmt.Sprintf("badele: IPPrefixTracker: ipv4Bits must be between 0 and 32, got %d", ipv4Bits))
+	}
+	if ipv6Bits < 0 || ipv6Bits > 128 {
+		panic(fmt.Sprintf("badele: IPPrefixTracker: ipv6Bits must be between 0 and 128, got %d", ipv6Bits))
+	}
+	return func(ctx *Context) (string, error) {
+		addr := ctx.ClientAddr()
+		if !addr.IsValid() {
+			return "", errRateLimitNoAddress
+		}
+		bits := ipv4Bits
+		if addr.Is6() {
+			bits = ipv6Bits
+		}
+		prefix, err := addr.Prefix(bits)
+		if err != nil {
+			// coverage: bits is validated above and addr is always exactly one
+			// of the two families Prefix accepts a length for, so Prefix itself
+			// cannot fail here.
+			return "", err
+		}
+		return "ip:" + prefix.String(), nil
+	}
+}
+
 // RateLimitOptions configures rate limiting.
 //
 // Rate limiting is off until a policy declares a quota. It can then be set

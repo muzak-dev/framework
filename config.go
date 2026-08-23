@@ -237,7 +237,17 @@ func (l *configLoader) assign(field reflect.StructField, name string, target ref
 		return
 	}
 	if err := set(target, splitConfigValue(field.Type, raw)); err != nil {
-		*problems = append(*problems, fmt.Errorf("badele: %s %w%s", name, err, describeBadValue(field, raw)))
+		if field.Tag.Get(tagSecret) == "true" {
+			// A type implementing encoding.TextUnmarshaler writes its own
+			// error, which this package does not control and which may well
+			// echo the text it was given back into the message (a custom
+			// credential type reporting "invalid key %q" is a natural thing to
+			// write). Secret means secret from the setter's own errors too, not
+			// only from the value this loader would otherwise append itself.
+			*problems = append(*problems, fmt.Errorf("badele: %s could not be parsed (value hidden because the field is marked secret)", name))
+			return
+		}
+		*problems = append(*problems, fmt.Errorf("badele: %s %w%s", name, err, describeBadValue(raw)))
 	}
 }
 
@@ -280,13 +290,10 @@ func splitConfigValue(t reflect.Type, raw string) []string {
 	return parts
 }
 
-// describeBadValue appends the offending value to an error message, unless the
-// field is marked secret, in which case the value is left out so that a
-// mistyped credential does not end up in a log or a crash report.
-func describeBadValue(field reflect.StructField, raw string) string {
-	if field.Tag.Get(tagSecret) == "true" {
-		return " (value hidden because the field is marked secret)"
-	}
+// describeBadValue appends the offending value to an error message. The
+// caller has already turned a secret field's failure into a fixed message
+// before reaching here, so this always has a value safe to show.
+func describeBadValue(raw string) string {
 	return fmt.Sprintf(" (got %q)", raw)
 }
 

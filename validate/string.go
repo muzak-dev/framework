@@ -179,10 +179,14 @@ func (r *StringRules) Email() *StringRules {
 	return r.add(step[string]{kind: kindEmail})
 }
 
-// URL requires an absolute URL with a scheme and a host.
+// URL requires an absolute http or https URL with a host.
 //
 // A relative reference is rejected, because a field asking for a URL almost
-// always means somewhere a client can actually go.
+// always means somewhere a client can actually go. So is every other scheme:
+// without a restriction, "javascript:", "data:" and "file:" all parse as
+// perfectly valid absolute URLs, and a value this check approves is exactly
+// the kind of thing that ends up in a redirect, a fetch or an href with the
+// validator's blessing.
 func (r *StringRules) URL() *StringRules {
 	return r.add(step[string]{kind: kindURL})
 }
@@ -266,6 +270,13 @@ func (r *StringRules) Check(value string) error {
 	return errors.New(problems[0].Issue)
 }
 
+// isHTTPScheme reports whether a parsed URL's scheme is http or https, the
+// only schemes [StringRules.URL] accepts. The comparison is case-insensitive
+// because the scheme is, even though url.Parse already lower-cases it.
+func isHTTPScheme(scheme string) bool {
+	return strings.EqualFold(scheme, "http") || strings.EqualFold(scheme, "https")
+}
+
 // plural returns word with an "s" unless n is one.
 func plural(n int, word string) string {
 	if n == 1 {
@@ -320,8 +331,8 @@ func applyStringStep(s *step[string], value *string) error {
 		}
 	case kindURL:
 		parsed, err := url.Parse(*value)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return errors.New("must be a valid absolute URL")
+		if err != nil || parsed.Host == "" || !isHTTPScheme(parsed.Scheme) {
+			return errors.New("must be a valid absolute http or https URL")
 		}
 	case kindUUID:
 		if _, err := uuid.Parse(*value); err != nil {

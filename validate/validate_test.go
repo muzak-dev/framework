@@ -79,9 +79,11 @@ func TestStringFormats(t *testing.T) {
 	})
 	runStringCases(t, func() *StringRules { return String().Required().URL() }, []check{
 		{"absolute", "https://example.test/path", ""},
-		{"no host", "https://", "must be a valid absolute URL"},
-		{"relative", "/just/a/path", "must be a valid absolute URL"},
-		{"not a url at all", "not a url", "must be a valid absolute URL"},
+		{"no host", "https://", "must be a valid absolute http or https URL"},
+		{"relative", "/just/a/path", "must be a valid absolute http or https URL"},
+		{"not a url at all", "not a url", "must be a valid absolute http or https URL"},
+		{"javascript scheme", "javascript://alert(1)", "must be a valid absolute http or https URL"},
+		{"data scheme", "data://text/html,hi", "must be a valid absolute http or https URL"},
 	})
 	runStringCases(t, func() *StringRules { return String().Required().UUID() }, []check{
 		{"canonical", "0611f4b2-2f0a-4b57-9c1a-6e6a2e2f9b31", ""},

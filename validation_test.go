@@ -88,7 +88,7 @@ func TestValidationRejectsAndReports(t *testing.T) {
 		"age":              "must be between 18 and 120",
 		"role":             `must be one of "admin", "editor" or "viewer"`,
 		"tags[1]":          "must be at most 8 characters",
-		"website":          "must be a valid absolute URL",
+		"website":          "must be a valid absolute http or https URL",
 	}
 	for field, issue := range want {
 		if got[field] != issue {

@@ -70,8 +70,26 @@ func (r *NumberRules) Evaluate() []Problem {
 		// a rule set can only ever be bound to one that converts.
 		return nil
 	}
+	// NaN and the infinities parse cleanly out of a path, query, header or form
+	// value (strconv.ParseFloat accepts "NaN" and "Inf"), and every comparison
+	// against one of them is false. Left unchecked that satisfies Min, Max,
+	// Between, Positive, Negative and MultipleOf simultaneously, and even
+	// Required, whose zero check "value == 0" is also false for NaN. None of
+	// them is a value a numeric field ever legitimately holds, so they are
+	// rejected before a single rule runs.
+	if math.IsNaN(number) || math.IsInf(number, 0) {
+		return []Problem{{Issue: "must be a finite number"}}
+	}
+	original := number
 	problems := runNumber(&number, r.steps, r.required)
-	writeBack(value, number)
+	// Converting an int64 or uint64 through float64 loses precision above 2^53,
+	// so writing the converted value back on every call would silently corrupt
+	// a large integer even when no rule touched it. Writing back only when a
+	// transform (Clamp is the only one) actually changed the number confines
+	// that unavoidable rounding to the one rule that asks for it.
+	if number != original {
+		writeBack(value, number)
+	}
 	return problems
 }
 

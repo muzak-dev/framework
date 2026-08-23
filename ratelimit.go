@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -66,7 +66,7 @@ const maxRateLimitKey = 256
 // and impossible for a script, while a hundred a minute is the reverse, so a
 // policy that means "quick but not tireless" needs both:
 //
-//	Quotas: []badele.Quota{
+//	Quotas: []muzak.Quota{
 //		{Name: "short", Window: time.Second, Limit: 3},
 //		{Name: "medium", Window: 10 * time.Second, Limit: 20},
 //		{Name: "long", Window: time.Minute, Limit: 100},
@@ -131,10 +131,10 @@ type RateLimitStorage interface {
 // exactly as one returned from a handler would, so a tracker that requires a
 // credential can insist on one:
 //
-//	func APIKeyTracker(ctx *badele.Context) (string, error) {
+//	func APIKeyTracker(ctx *muzak.Context) (string, error) {
 //		key := ctx.Header("X-API-Key")
 //		if key == "" {
-//			return "", badele.NewHTTPError(http.StatusUnauthorized, "an API key is required")
+//			return "", muzak.NewHTTPError(http.StatusUnauthorized, "an API key is required")
 //		}
 //		return "apikey:" + key, nil
 //	}
@@ -162,7 +162,7 @@ func IPTracker(ctx *Context) (string, error) {
 // errRateLimitNoAddress reports a request that cannot be attributed to an
 // address, which is a deployment [IPTracker] does not fit rather than
 // something the client did.
-var errRateLimitNoAddress = errors.New("badele: the rate limiter could not determine the client address; " +
+var errRateLimitNoAddress = errors.New("muzak: the rate limiter could not determine the client address; " +
 	"a listener that is not addressed by IP needs a tracker of its own")
 
 // IPPrefixTracker keys a rate limit on a prefix of the client's address rather
@@ -178,17 +178,17 @@ var errRateLimitNoAddress = errors.New("badele: the rate limiter could not deter
 // keep IPv4 addresses exact while collapsing an IPv6 source down to the
 // allocation it actually came from:
 //
-//	badele.RateLimitOptions{Tracker: badele.IPPrefixTracker(32, 64)}
+//	muzak.RateLimitOptions{Tracker: muzak.IPPrefixTracker(32, 64)}
 //
 // It panics if either length is out of range for its family (0 to 32 for
 // IPv4, 0 to 128 for IPv6), which is a mistake worth catching where the
 // tracker is built rather than on the first request that reaches it.
 func IPPrefixTracker(ipv4Bits, ipv6Bits int) RateLimitTracker {
 	if ipv4Bits < 0 || ipv4Bits > 32 {
-		panic(fmt.Sprintf("badele: IPPrefixTracker: ipv4Bits must be between 0 and 32, got %d", ipv4Bits))
+		panic(fmt.Sprintf("muzak: IPPrefixTracker: ipv4Bits must be between 0 and 32, got %d", ipv4Bits))
 	}
 	if ipv6Bits < 0 || ipv6Bits > 128 {
-		panic(fmt.Sprintf("badele: IPPrefixTracker: ipv6Bits must be between 0 and 128, got %d", ipv6Bits))
+		panic(fmt.Sprintf("muzak: IPPrefixTracker: ipv6Bits must be between 0 and 128, got %d", ipv6Bits))
 	}
 	return func(ctx *Context) (string, error) {
 		addr := ctx.ClientAddr()
@@ -257,8 +257,8 @@ type RateLimitOptions struct {
 	// dependencies have run, rather than before, so that a tracker can key on
 	// an identity a dependency produced:
 	//
-	//	func UserOrIPTracker(ctx *badele.Context) (string, error) {
-	//		if user, ok := badele.TryFrom[CurrentUser](ctx); ok {
+	//	func UserOrIPTracker(ctx *muzak.Context) (string, error) {
+	//		if user, ok := muzak.TryFrom[CurrentUser](ctx); ok {
 	//			return "user:" + user.ID, nil
 	//		}
 	//		return "ip:" + ctx.ClientIP(), nil
@@ -299,11 +299,11 @@ func (o RateLimitOptions) overlay(over RateLimitOptions) RateLimitOptions {
 // WithRateLimit configures rate limiting for an application, a router or a
 // single route.
 //
-//	app := badele.New(badele.AppOptions{Title: "Shop"},
-//		badele.WithRateLimit(badele.RateLimitOptions{
+//	app := muzak.New(muzak.AppOptions{Title: "Shop"},
+//		muzak.WithRateLimit(muzak.RateLimitOptions{
 //			Storage: NewRedisRateLimitStorage(settings.RedisAddr),
 //			Tracker: UserOrIPTracker,
-//			Quotas: []badele.Quota{
+//			Quotas: []muzak.Quota{
 //				{Name: "short", Window: time.Second, Limit: 3},
 //				{Name: "medium", Window: 10 * time.Second, Limit: 20},
 //				{Name: "long", Window: time.Minute, Limit: 100},
@@ -330,7 +330,7 @@ func WithRateLimit(opts RateLimitOptions) SharedOption {
 // all:
 //
 //	r.Post("/login", login,
-//		badele.RateLimit(badele.Quota{Name: "login", Window: time.Minute, Limit: 5}))
+//		muzak.RateLimit(muzak.Quota{Name: "login", Window: time.Minute, Limit: 5}))
 //
 // The quotas given replace those inherited rather than adding to them, so a
 // route that wants both restates the ones it is keeping.
@@ -349,7 +349,7 @@ func RateLimit(quotas ...Quota) SharedOption {
 // It is what a health check wants, since a monitor polling every second is the
 // one client that should never be told to slow down:
 //
-//	r.Get("/health", health, badele.SkipRateLimit())
+//	r.Get("/health", health, muzak.SkipRateLimit())
 //
 // An exemption cannot be undone by a narrower scope: once a router is exempt,
 // every route beneath it is.
@@ -394,7 +394,7 @@ func (rt *Route) resolveRateLimit(in inherited) error {
 	}
 	cfg, err := newRateLimitConfig(opts, opts.Quotas)
 	if err != nil {
-		return fmt.Errorf("badele: %s %s: %w", rt.Method, rt.Path, err)
+		return fmt.Errorf("muzak: %s %s: %w", rt.Method, rt.Path, err)
 	}
 	rt.rateLimit = cfg
 	rt.responses = append(rt.responses, responseDoc{
@@ -491,7 +491,7 @@ func (cfg *rateLimitConfig) key(c *Context) (string, error) {
 
 // errRateLimitEmptyKey reports a tracker that returned nothing, which would
 // put every client that reached it into a single shared budget.
-var errRateLimitEmptyKey = errors.New("badele: the rate limit tracker returned an empty key; " +
+var errRateLimitEmptyKey = errors.New("muzak: the rate limit tracker returned an empty key; " +
 	"return an error instead of an empty key for a request the tracker cannot attribute")
 
 // boundRateLimitKey replaces an over-long key with a digest of itself.
@@ -552,7 +552,7 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 // records why without recording the key, which carries client-supplied data.
 func (cfg *rateLimitConfig) storageFailed(c *Context, quota Quota, err error) error {
 	if cfg.failOpen {
-		c.logger.WarnContext(c.Context(), "badele: the rate limit storage failed; serving the request unmetered",
+		c.logger.WarnContext(c.Context(), "muzak: the rate limit storage failed; serving the request unmetered",
 			slog.String("quota", quota.Name),
 			slog.String(RequestIDKey, c.RequestID()),
 			slog.String("error", err.Error()))
@@ -626,13 +626,13 @@ func (l *wsMessageLimiter) allow(ctx context.Context) (WSStatus, string) {
 // read from the client.
 func (l *wsMessageLimiter) storageFailed(ctx context.Context, quota Quota, err error) (WSStatus, string) {
 	if l.cfg.failOpen {
-		l.logger.WarnContext(ctx, "badele: the rate limit storage failed; the websocket message was not counted",
+		l.logger.WarnContext(ctx, "muzak: the rate limit storage failed; the websocket message was not counted",
 			slog.String("quota", quota.Name),
 			slog.String(RequestIDKey, l.requestID),
 			slog.String("error", err.Error()))
 		return 0, ""
 	}
-	l.logger.ErrorContext(ctx, "badele: the rate limit storage failed; closing the websocket connection",
+	l.logger.ErrorContext(ctx, "muzak: the rate limit storage failed; closing the websocket connection",
 		slog.String("quota", quota.Name),
 		slog.String(RequestIDKey, l.requestID),
 		slog.String("error", err.Error()))
@@ -658,7 +658,7 @@ func (a *App) resolveRateLimiting(state *buildState) {
 				previous, seen := declared[quota.Name]
 				if seen && (previous.Window != quota.Window || previous.Limit != quota.Limit) {
 					state.errs = append(state.errs, fmt.Errorf(
-						"badele: %s %s: quota %q is declared as %d requests per %s here and as %d per %s elsewhere; "+
+						"muzak: %s %s: quota %q is declared as %d requests per %s here and as %d per %s elsewhere; "+
 							"counters are stored under the quota name, so one name cannot mean two policies",
 						rt.Method, rt.Path, quota.Name, quota.Limit, quota.Window, previous.Limit, previous.Window))
 					continue

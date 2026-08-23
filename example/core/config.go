@@ -8,14 +8,14 @@
 package core
 
 import (
-	"badele"
+	"muzak.dev/framework"
 )
 
 // Settings is the service configuration, read once at start-up from the
 // environment and from a .env file when one is present.
 //
-// It is published to every handler with badele.WithSingleton, so a handler
-// reads it with badele.From[core.Settings](ctx) rather than through a package
+// It is published to every handler with muzak.WithSingleton, so a handler
+// reads it with muzak.From[core.Settings](ctx) rather than through a package
 // level variable.
 type Settings struct {
 	// AppName titles the API in the generated documentation.
@@ -46,5 +46,5 @@ type Settings struct {
 // problem is reported together, so a first run in a new environment lists all
 // the missing variables at once.
 func LoadSettings() Settings {
-	return badele.MustLoadConfig[Settings](badele.EnvFile(".env"))
+	return muzak.MustLoadConfig[Settings](muzak.EnvFile(".env"))
 }

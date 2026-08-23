@@ -1,0 +1,31 @@
+# Build output
+/bin/
+*.exe
+*.test
+*.out
+
+# Coverage reports are generated, not tracked. Regenerate with:
+#   go test ./... -coverprofile=coverage.out -covermode=atomic
+#   go tool cover -html=coverage.out -o coverage.html
+coverage.out
+coverage.html
+
+# Profiling artifacts
+*.prof
+*.pprof
+
+# Fuzzing corpora generated locally (seed corpora under testdata/ are tracked)
+**/testdata/fuzz/
+
+# The example's own configuration. `.env.example` is tracked; `.env` is not.
+example/.env
+
+# The example application's dist/ is not generated: it stands in for the output
+# a frontend build would have written, so that the example runs from a clone.
+!example/dist/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

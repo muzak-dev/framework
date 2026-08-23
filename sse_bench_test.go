@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"io"

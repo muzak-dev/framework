@@ -6,15 +6,15 @@ import (
 	"net/http"
 	"strconv"
 
-	"badele"
-	"badele-example/core"
-	"badele-example/schemas"
+	"muzak.dev/framework"
+	"muzak.dev/framework/example/core"
+	"muzak.dev/framework/example/schemas"
 )
 
 // ListItems returns every known item.
-func ListItems(ctx *badele.Context, _ badele.Empty) (schemas.ItemListOut, error) {
-	store := badele.From[*core.ItemStore](ctx)
-	settings := badele.From[core.Settings](ctx)
+func ListItems(ctx *muzak.Context, _ muzak.Empty) (schemas.ItemListOut, error) {
+	store := muzak.From[*core.ItemStore](ctx)
+	settings := muzak.From[core.Settings](ctx)
 
 	stored := store.List()
 	items := make([]schemas.ItemOut, 0, len(stored))
@@ -26,10 +26,10 @@ func ListItems(ctx *badele.Context, _ badele.Empty) (schemas.ItemListOut, error)
 
 // ReadItem returns one item, attributing it to the caller resolved by the value
 // dependency the route declares.
-func ReadItem(ctx *badele.Context, in schemas.ItemParams) (schemas.ItemOut, error) {
+func ReadItem(ctx *muzak.Context, in schemas.ItemParams) (schemas.ItemOut, error) {
 	// Both type arguments are checked at compile time and no cast appears here.
-	store := badele.From[*core.ItemStore](ctx)
-	user := badele.From[core.CurrentUser](ctx)
+	store := muzak.From[*core.ItemStore](ctx)
+	user := muzak.From[core.CurrentUser](ctx)
 
 	item, err := store.Get(in.ID)
 	if err != nil {
@@ -43,8 +43,8 @@ func ReadItem(ctx *badele.Context, in schemas.ItemParams) (schemas.ItemOut, erro
 // The route declares 201 as its status; this handler overrides it at run time
 // when the caller asks for the work to be queued, which is the two mechanisms
 // staying out of each other's way.
-func CreateItem(ctx *badele.Context, in schemas.ItemCreateIn) (schemas.ItemOut, error) {
-	store := badele.From[*core.ItemStore](ctx)
+func CreateItem(ctx *muzak.Context, in schemas.ItemCreateIn) (schemas.ItemOut, error) {
+	store := muzak.From[*core.ItemStore](ctx)
 
 	if err := store.Create(core.Item{ID: in.ID, Name: in.Name}); err != nil {
 		return schemas.ItemOut{}, asHTTPError(err)
@@ -56,8 +56,8 @@ func CreateItem(ctx *badele.Context, in schemas.ItemCreateIn) (schemas.ItemOut, 
 }
 
 // RenameItem changes an item's display name.
-func RenameItem(ctx *badele.Context, in schemas.ItemRenameIn) (schemas.ItemOut, error) {
-	store := badele.From[*core.ItemStore](ctx)
+func RenameItem(ctx *muzak.Context, in schemas.ItemRenameIn) (schemas.ItemOut, error) {
+	store := muzak.From[*core.ItemStore](ctx)
 
 	item, err := store.Rename(in.ID, in.Name)
 	if err != nil {
@@ -75,9 +75,9 @@ func RenameItem(ctx *badele.Context, in schemas.ItemRenameIn) (schemas.ItemOut, 
 func asHTTPError(err error) error {
 	switch {
 	case errors.Is(err, core.ErrItemNotFound):
-		return badele.NewHTTPError(http.StatusNotFound, "Item not found")
+		return muzak.NewHTTPError(http.StatusNotFound, "Item not found")
 	case errors.Is(err, core.ErrItemExists):
-		return badele.NewHTTPError(http.StatusConflict, "Item already exists")
+		return muzak.NewHTTPError(http.StatusConflict, "Item already exists")
 	default:
 		return err
 	}
@@ -87,10 +87,10 @@ func asHTTPError(err error) error {
 //
 // The handshake has already succeeded by the time this runs: the input is
 // bound, the guards have passed and the dependency is resolved, so what is
-// left is the conversation itself. Returning ends it, and Badele closes the
+// left is the conversation itself. Returning ends it, and Muzak closes the
 // connection; returning nil closes it normally.
-func ItemSocket(ctx *badele.Context, in schemas.WSItemIn, conn *badele.WSConn) error {
-	session := badele.From[core.SessionOrToken](ctx)
+func ItemSocket(ctx *muzak.Context, in schemas.WSItemIn, conn *muzak.WSConn) error {
+	session := muzak.From[core.SessionOrToken](ctx)
 
 	for {
 		message, err := conn.ReadText(ctx.Context())
@@ -123,8 +123,8 @@ func ItemSocket(ctx *badele.Context, in schemas.WSItemIn, conn *badele.WSConn) e
 // document describes.
 //
 //	curl -N 'http://localhost:8080/items/stream?token=jessica'
-func StreamItems(ctx *badele.Context, _ badele.Empty, stream *badele.SSEStream[schemas.ItemOut]) error {
-	store := badele.From[*core.ItemStore](ctx)
+func StreamItems(ctx *muzak.Context, _ muzak.Empty, stream *muzak.SSEStream[schemas.ItemOut]) error {
+	store := muzak.From[*core.ItemStore](ctx)
 
 	// A browser sends back the identifier of the last event it saw when its
 	// EventSource reconnects, which is what lets this pick the thread up
@@ -168,9 +168,9 @@ func StreamItems(ctx *badele.Context, _ badele.Empty, stream *badele.SSEStream[s
 
 // sendChange writes one change as an event a browser can listen for by name
 // and resume from by identifier.
-func sendChange(stream *badele.SSEStream[schemas.ItemOut], change core.Change) error {
+func sendChange(stream *muzak.SSEStream[schemas.ItemOut], change core.Change) error {
 	item := schemas.ItemOut{ID: change.Item.ID, Name: change.Item.Name}
-	return stream.SendEvent(badele.SSEEvent[schemas.ItemOut]{
+	return stream.SendEvent(muzak.SSEEvent[schemas.ItemOut]{
 		Name: "item_update",
 		ID:   strconv.Itoa(change.Seq),
 		Data: &item,

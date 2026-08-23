@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"encoding/json/jsontext"
@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"badele/validate"
+	"muzak.dev/framework/validate"
 )
 
-// OpenAPIVersion is the specification version Badele emits.
+// OpenAPIVersion is the specification version Muzak emits.
 const OpenAPIVersion = "3.1.0"
 
 // componentPrefix is the JSON pointer prefix under which named schemas live.
@@ -23,9 +23,9 @@ const componentPrefix = "#/components/schemas/"
 //
 // It is embedded in [AppOptions], so its fields can be set inline:
 //
-//	badele.AppOptions{Title: "Bigger Applications Example", Version: "1.0.0"}
+//	muzak.AppOptions{Title: "Bigger Applications Example", Version: "1.0.0"}
 type OpenAPIOptions struct {
-	// Title names the API. It defaults to "Badele API".
+	// Title names the API. It defaults to "Muzak API".
 	Title string
 	// Version is the API's own version, not the OpenAPI version. It defaults
 	// to "0.1.0".
@@ -290,7 +290,7 @@ func (a *App) buildDocument() *Document {
 	doc := &Document{
 		OpenAPI: OpenAPIVersion,
 		Info: Info{
-			Title:          orDefault(a.opts.Title, "Badele API"),
+			Title:          orDefault(a.opts.Title, "Muzak API"),
 			Version:        orDefault(a.opts.Version, "0.1.0"),
 			Description:    a.opts.Description,
 			TermsOfService: a.opts.TermsOfService,

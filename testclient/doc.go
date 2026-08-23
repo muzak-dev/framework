@@ -1,4 +1,4 @@
-// Package testclient exercises a Badele application over a real HTTP
+// Package testclient exercises a Muzak application over a real HTTP
 // connection from inside a Go test.
 //
 // It plays the role FastAPI's TestClient plays in Python: the application is

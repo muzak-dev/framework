@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bytes"
@@ -168,12 +168,12 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 		return plan, nil
 	}
 	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("badele: %s %s: input type %s must be a struct or badele.Empty", method, path, t)
+		return nil, fmt.Errorf("muzak: %s %s: input type %s must be a struct or muzak.Empty", method, path, t)
 	}
 
 	var bodyFields [][]int
 	if err := collectFields(t, nil, plan, &bodyFields); err != nil {
-		return nil, fmt.Errorf("badele: %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("muzak: %s %s: %w", method, path, err)
 	}
 
 	declared := templateParams(path)
@@ -184,7 +184,7 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 		}
 		if p.source == srcPath {
 			if !declared[p.name] {
-				return nil, fmt.Errorf("badele: %s %s: field binds path parameter %q, which the route template does not declare", method, path, p.name)
+				return nil, fmt.Errorf("muzak: %s %s: field binds path parameter %q, which the route template does not declare", method, path, p.name)
 			}
 		}
 	}
@@ -197,7 +197,7 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 		plan.multipart = true
 		if len(bodyFields) > 0 {
 			field := t.FieldByIndex(bodyFields[0]).Name
-			return nil, fmt.Errorf("badele: %s %s: field %s carries no location tag, so it would come from a JSON body, but this input already reads a form body; tag it with %q or move it to the path, query, header or cookie",
+			return nil, fmt.Errorf("muzak: %s %s: field %s carries no location tag, so it would come from a JSON body, but this input already reads a form body; tag it with %q or move it to the path, query, header or cookie",
 				method, path, field, tagForm)
 		}
 		return plan, nil
@@ -675,7 +675,7 @@ func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *V
 	return nil
 }
 
-// checkContentType rejects a body sent under a media type Badele cannot
+// checkContentType rejects a body sent under a media type Muzak cannot
 // decode. A missing Content-Type is accepted, because many clients omit it and
 // the decoder will reject anything that is not JSON anyway.
 func checkContentType(r *http.Request) error {

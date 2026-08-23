@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"badele"
+	"muzak.dev/framework"
 )
 
 // Client issues requests against an application served in-process.
@@ -78,7 +78,7 @@ func WithoutRedirects() Option {
 // Requests travel over an in-memory network rather than a real socket, so a
 // test needs no free port and cannot be disturbed by anything else on the
 // machine.
-func New(tb testing.TB, app *badele.App, opts ...Option) *Client {
+func New(tb testing.TB, app *muzak.App, opts ...Option) *Client {
 	tb.Helper()
 	cfg := config{headers: http.Header{}, timeout: 10 * time.Second}
 	for _, opt := range opts {
@@ -349,7 +349,7 @@ func (r *Response) String() string { return string(r.Body) }
 
 // RequestID returns the identifier the server assigned to the request, taken
 // from the X-Request-Id response header.
-func (r *Response) RequestID() string { return r.Header.Get(badele.HeaderRequestID) }
+func (r *Response) RequestID() string { return r.Header.Get(muzak.HeaderRequestID) }
 
 // JSON decodes the response body into target, failing the test if it is not
 // valid JSON or does not fit.
@@ -385,11 +385,11 @@ func Decoded[T any](r *Response) T {
 	return r.Decode[T]()
 }
 
-// Error decodes the response body as Badele's standard error envelope, failing
+// Error decodes the response body as Muzak's standard error envelope, failing
 // the test if it does not fit.
-func (r *Response) Error() badele.ErrorResponse {
+func (r *Response) Error() muzak.ErrorResponse {
 	r.tb.Helper()
-	return r.Decode[badele.ErrorResponse]()
+	return r.Decode[muzak.ErrorResponse]()
 }
 
 // AssertStatus fails the test unless the response carried the wanted status.
@@ -467,7 +467,7 @@ func (r *Response) AssertErrorCode(want string) *Response {
 // checkErrorCode returns the failure message for an unexpected error code, or
 // the empty string when the code is as wanted.
 func (r *Response) checkErrorCode(want string) string {
-	var envelope badele.ErrorResponse
+	var envelope muzak.ErrorResponse
 	if err := json.Unmarshal(r.Body, &envelope); err != nil {
 		return fmt.Sprintf("%s %s: the response body is not an error envelope: %v\nbody: %s", r.method, r.path, err, r.Body)
 	}

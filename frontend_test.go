@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"io/fs"
@@ -417,7 +417,7 @@ func TestFrontendRegistrationErrors(t *testing.T) {
 			name: "the build output is not there",
 			want: "frontend at \"/\"",
 			bind: func(app *App) {
-				app.Frontend("/", FrontendOptions{Dir: filepath.Join(os.TempDir(), "badele-no-such-build")})
+				app.Frontend("/", FrontendOptions{Dir: filepath.Join(os.TempDir(), "muzak-no-such-build")})
 			},
 		},
 		{
@@ -432,7 +432,7 @@ func TestFrontendRegistrationErrors(t *testing.T) {
 			want: `frontend at "/app"`,
 			bind: func(app *App) {
 				ui := NewRouter()
-				ui.Frontend("/", FrontendOptions{Dir: filepath.Join(os.TempDir(), "badele-no-such-build")})
+				ui.Frontend("/", FrontendOptions{Dir: filepath.Join(os.TempDir(), "muzak-no-such-build")})
 				app.Include(ui, WithPrefix("/app"))
 			},
 		},
@@ -749,7 +749,7 @@ func TestStaticRegistrationErrors(t *testing.T) {
 			name: "the directory is not there",
 			want: `static files at "/static"`,
 			bind: func(app *App) {
-				app.Static("/static", StaticOptions{Dir: filepath.Join(os.TempDir(), "badele-no-such-static")})
+				app.Static("/static", StaticOptions{Dir: filepath.Join(os.TempDir(), "muzak-no-such-static")})
 			},
 		},
 	}

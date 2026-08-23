@@ -3,7 +3,7 @@ package core
 import (
 	"time"
 
-	"badele"
+	"muzak.dev/framework"
 )
 
 // RateLimitPolicy is the application-wide budget every route inherits.
@@ -18,10 +18,10 @@ import (
 // which is the right answer for a single process and the wrong one the moment
 // there are two. A service that runs more than once names a shared storage
 // here instead.
-func RateLimitPolicy() badele.RateLimitOptions {
-	return badele.RateLimitOptions{
+func RateLimitPolicy() muzak.RateLimitOptions {
+	return muzak.RateLimitOptions{
 		Tracker: UserOrIPTracker,
-		Quotas: []badele.Quota{
+		Quotas: []muzak.Quota{
 			{Name: "short", Window: time.Second, Limit: 3},
 			{Name: "medium", Window: 10 * time.Second, Limit: 20},
 			{Name: "long", Window: time.Minute, Limit: 100},
@@ -39,12 +39,12 @@ func RateLimitPolicy() badele.RateLimitOptions {
 //
 // Reading a resolved identity only works where the count happens after the
 // route's dependencies have run, which the items router asks for with
-// badele.RateLimitOptions.AfterDependencies. Everywhere else the count comes
+// muzak.RateLimitOptions.AfterDependencies. Everywhere else the count comes
 // first and this falls back to the address, which is the trade the application
 // makes on purpose: a request a guard rejects is worth counting.
-func UserOrIPTracker(ctx *badele.Context) (string, error) {
-	if user, ok := badele.TryFrom[CurrentUser](ctx); ok {
+func UserOrIPTracker(ctx *muzak.Context) (string, error) {
+	if user, ok := muzak.TryFrom[CurrentUser](ctx); ok {
 		return "user:" + user.Username, nil
 	}
-	return badele.IPTracker(ctx)
+	return muzak.IPTracker(ctx)
 }

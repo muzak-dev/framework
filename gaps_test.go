@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"badele/internal/radix"
+	"muzak.dev/framework/internal/radix"
 )
 
 // TestFailLeavesAStartedResponseAlone covers the guard in fail that stops an

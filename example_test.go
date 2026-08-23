@@ -1,4 +1,4 @@
-package badele_test
+package muzak_test
 
 import (
 	"encoding/json/v2"
@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 
-	"badele"
+	"muzak.dev/framework"
 )
 
 // UserOut is the response model used by the examples. Because a handler
@@ -24,14 +24,14 @@ type Params struct {
 // ExampleNew builds an application, registers a route on it directly, and
 // serves one request.
 func ExampleNew() {
-	app := badele.New(badele.AppOptions{
+	app := muzak.New(muzak.AppOptions{
 		Title:         "Bigger Applications Example",
 		Version:       "1.0.0",
 		Addr:          ":8080",
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
 	})
 
-	app.Get("/users/me", func(ctx *badele.Context, _ badele.Empty) (UserOut, error) {
+	app.Get("/users/me", func(ctx *muzak.Context, _ muzak.Empty) (UserOut, error) {
 		return UserOut{Username: "fakecurrentuser"}, nil
 	})
 
@@ -49,14 +49,14 @@ func ExampleNew() {
 // type arguments are inferred from the handler literal, so they never appear at
 // the call site.
 func ExampleRouter_Get() {
-	r := badele.NewRouter(badele.WithTags("users"))
+	r := muzak.NewRouter(muzak.WithTags("users"))
 
-	r.Get("/users/{username}", func(ctx *badele.Context, in Params) (UserOut, error) {
+	r.Get("/users/{username}", func(ctx *muzak.Context, in Params) (UserOut, error) {
 		return UserOut{Username: in.Username}, nil
 	})
 
-	app := badele.New(badele.AppOptions{
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
 	})
 	app.Include(r)
 
@@ -70,21 +70,21 @@ func ExampleRouter_Get() {
 // ExampleApp_Include composes independently written routers, applying a prefix
 // and a guard where the router is mounted rather than where it is defined.
 func ExampleApp_Include() {
-	admin := badele.NewRouter()
-	admin.Post("/", func(ctx *badele.Context, in struct {
+	admin := muzak.NewRouter()
+	admin.Post("/", func(ctx *muzak.Context, in struct {
 		Name string `json:"name"`
 	}) (map[string]string, error) {
 		return map[string]string{"name": in.Name}, nil
-	}, badele.Status(http.StatusCreated))
+	}, muzak.Status(http.StatusCreated))
 
-	app := badele.New(badele.AppOptions{
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
 	})
 	app.Include(admin,
-		badele.WithPrefix("/admin"),
-		badele.WithTags("admin"),
-		badele.WithDependencies(badele.RequireHeaderToken("X-Token", "coneofsilence")),
-		badele.WithResponseDoc(http.StatusTeapot, "I'm a teapot"),
+		muzak.WithPrefix("/admin"),
+		muzak.WithTags("admin"),
+		muzak.WithDependencies(muzak.RequireHeaderToken("X-Token", "coneofsilence")),
+		muzak.WithResponseDoc(http.StatusTeapot, "I'm a teapot"),
 	)
 
 	send := func(token string) {
@@ -117,15 +117,15 @@ func ExampleStatus() {
 		Name string `json:"name"`
 	}
 
-	app := badele.New(badele.AppOptions{
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
 	})
-	app.Post("/items/", func(ctx *badele.Context, in CreateBody) (ItemOut, error) {
+	app.Post("/items/", func(ctx *muzak.Context, in CreateBody) (ItemOut, error) {
 		if in.Async {
 			ctx.SetStatus(http.StatusAccepted)
 		}
 		return ItemOut{ID: "42", Name: in.Name}, nil
-	}, badele.Status(http.StatusCreated))
+	}, muzak.Status(http.StatusCreated))
 
 	send := func(body string) {
 		req := httptest.NewRequest(http.MethodPost, "/items/", strings.NewReader(body))
@@ -151,22 +151,22 @@ func ExampleFrom() {
 		Owner string `json:"owner"`
 	}
 
-	getCurrentUser := func(ctx *badele.Context) (CurrentUser, error) {
+	getCurrentUser := func(ctx *muzak.Context) (CurrentUser, error) {
 		if ctx.Header("Authorization") == "" {
-			return CurrentUser{}, badele.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+			return CurrentUser{}, muzak.NewHTTPError(http.StatusUnauthorized, "unauthorized")
 		}
 		return CurrentUser{Username: "fakecurrentuser"}, nil
 	}
 
-	app := badele.New(badele.AppOptions{
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
 	})
-	app.Get("/items/{id}", func(ctx *badele.Context, in struct {
+	app.Get("/items/{id}", func(ctx *muzak.Context, in struct {
 		ID string `path:"id"`
 	}) (ItemOut, error) {
-		user := badele.From[CurrentUser](ctx)
+		user := muzak.From[CurrentUser](ctx)
 		return ItemOut{ID: in.ID, Owner: user.Username}, nil
-	}, badele.Needs(getCurrentUser))
+	}, muzak.Needs(getCurrentUser))
 
 	req := httptest.NewRequest(http.MethodGet, "/items/plumbus", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -180,18 +180,18 @@ func ExampleFrom() {
 // ExampleWithDependencies attaches a guard to the whole application, which
 // every route beneath it inherits.
 func ExampleWithDependencies() {
-	getQueryToken := func(ctx *badele.Context) error {
+	getQueryToken := func(ctx *muzak.Context) error {
 		if ctx.Query("token") == "" {
-			return badele.NewHTTPError(http.StatusBadRequest, "token is required")
+			return muzak.NewHTTPError(http.StatusBadRequest, "token is required")
 		}
 		return nil
 	}
 
-	app := badele.New(badele.AppOptions{
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
-	}, badele.WithDependencies(getQueryToken))
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
+	}, muzak.WithDependencies(getQueryToken))
 
-	app.Get("/users/me", func(ctx *badele.Context, _ badele.Empty) (UserOut, error) {
+	app.Get("/users/me", func(ctx *muzak.Context, _ muzak.Empty) (UserOut, error) {
 		return UserOut{Username: "fakecurrentuser"}, nil
 	})
 
@@ -207,13 +207,13 @@ func ExampleWithDependencies() {
 
 // ExampleNewHTTPError shows the error envelope a rejected request produces.
 func ExampleNewHTTPError() {
-	app := badele.New(badele.AppOptions{
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
 	})
-	app.Get("/items/{id}", func(ctx *badele.Context, in struct {
+	app.Get("/items/{id}", func(ctx *muzak.Context, in struct {
 		ID string `path:"id"`
 	}) (UserOut, error) {
-		return UserOut{}, badele.NewHTTPError(http.StatusNotFound, "Item not found")
+		return UserOut{}, muzak.NewHTTPError(http.StatusNotFound, "Item not found")
 	})
 
 	rec := httptest.NewRecorder()
@@ -221,7 +221,7 @@ func ExampleNewHTTPError() {
 
 	// The request identifier varies per request, so only the error itself is
 	// printed here.
-	var envelope badele.ErrorResponse
+	var envelope muzak.ErrorResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		fmt.Println("decode failed:", err)
 		return
@@ -242,9 +242,9 @@ func ExampleLoadConfig() {
 		ItemsPerUser int    `env:"ITEMS_PER_USER" default:"50"`
 	}
 
-	settings, err := badele.LoadConfig[Settings](
-		badele.WithoutEnvironment(),
-		badele.ConfigValues(map[string]string{"ADMIN_EMAIL": "admin@example.com"}),
+	settings, err := muzak.LoadConfig[Settings](
+		muzak.WithoutEnvironment(),
+		muzak.ConfigValues(map[string]string{"ADMIN_EMAIL": "admin@example.com"}),
 	)
 	if err != nil {
 		fmt.Println("could not load:", err)
@@ -261,12 +261,12 @@ func ExampleWithSingleton() {
 		AppName string `json:"app_name"`
 	}
 
-	app := badele.New(badele.AppOptions{
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
-	}, badele.WithSingleton(Settings{AppName: "Awesome API"}))
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
+	}, muzak.WithSingleton(Settings{AppName: "Awesome API"}))
 
-	app.Get("/info", func(ctx *badele.Context, _ badele.Empty) (InfoOut, error) {
-		s := badele.From[Settings](ctx)
+	app.Get("/info", func(ctx *muzak.Context, _ muzak.Empty) (InfoOut, error) {
+		s := muzak.From[Settings](ctx)
 		return InfoOut{AppName: s.AppName}, nil
 	})
 

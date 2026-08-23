@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bufio"
@@ -19,7 +19,7 @@ const (
 // ConfigSource supplies configuration values by name.
 //
 // Sources are consulted in the order they are given to [LoadConfig], and the
-// first one holding a name wins. Implement it to read from somewhere Badele
+// first one holding a name wins. Implement it to read from somewhere Muzak
 // does not know about, such as a secret manager or a configuration service.
 type ConfigSource interface {
 	// Name identifies the source in error messages, as "the environment" or
@@ -141,7 +141,7 @@ func (f failingSource) Lookup(string) (string, bool) { return "", false }
 //		ItemsPerUser int    `env:"ITEMS_PER_USER" default:"50"`
 //	}
 //
-//	settings, err := badele.LoadConfig[Settings](badele.EnvFile(".env"))
+//	settings, err := muzak.LoadConfig[Settings](muzak.EnvFile(".env"))
 //
 // Every problem found is reported together, so a first run in a new
 // environment lists all the missing variables at once instead of one per
@@ -161,13 +161,13 @@ func LoadConfig[T any](opts ...ConfigOption) (T, error) {
 
 	t := reflect.TypeFor[T]()
 	if t.Kind() != reflect.Struct {
-		return out, fmt.Errorf("badele: LoadConfig needs a struct type, but %s is not one", t)
+		return out, fmt.Errorf("muzak: LoadConfig needs a struct type, but %s is not one", t)
 	}
 
 	var problems []error
 	for _, source := range loader.sources {
 		if failing, broken := source.(failingSource); broken {
-			problems = append(problems, fmt.Errorf("badele: configuration source %s could not be read: %w", failing.name, failing.err))
+			problems = append(problems, fmt.Errorf("muzak: configuration source %s could not be read: %w", failing.name, failing.err))
 		}
 	}
 	value := reflect.ValueOf(&out).Elem()
@@ -188,7 +188,7 @@ func LoadConfig[T any](opts ...ConfigOption) (T, error) {
 func MustLoadConfig[T any](opts ...ConfigOption) T {
 	settings, err := LoadConfig[T](opts...)
 	if err != nil {
-		panic("badele: configuration could not be loaded:\n" + err.Error())
+		panic("muzak: configuration could not be loaded:\n" + err.Error())
 	}
 	return settings
 }
@@ -226,14 +226,14 @@ func (l *configLoader) assign(field reflect.StructField, name string, target ref
 			raw = def
 		} else {
 			if field.Tag.Get(tagRequired) == "true" {
-				*problems = append(*problems, fmt.Errorf("badele: %s is required but was not set in %s", name, l.sourceNames()))
+				*problems = append(*problems, fmt.Errorf("muzak: %s is required but was not set in %s", name, l.sourceNames()))
 			}
 			return
 		}
 	}
 	set, err := setterFor(field.Type)
 	if err != nil {
-		*problems = append(*problems, fmt.Errorf("badele: %s cannot be loaded into field %s: %w", name, field.Name, err))
+		*problems = append(*problems, fmt.Errorf("muzak: %s cannot be loaded into field %s: %w", name, field.Name, err))
 		return
 	}
 	if err := set(target, splitConfigValue(field.Type, raw)); err != nil {
@@ -244,10 +244,10 @@ func (l *configLoader) assign(field reflect.StructField, name string, target ref
 			// credential type reporting "invalid key %q" is a natural thing to
 			// write). Secret means secret from the setter's own errors too, not
 			// only from the value this loader would otherwise append itself.
-			*problems = append(*problems, fmt.Errorf("badele: %s could not be parsed (value hidden because the field is marked secret)", name))
+			*problems = append(*problems, fmt.Errorf("muzak: %s could not be parsed (value hidden because the field is marked secret)", name))
 			return
 		}
-		*problems = append(*problems, fmt.Errorf("badele: %s %w%s", name, err, describeBadValue(raw)))
+		*problems = append(*problems, fmt.Errorf("muzak: %s %w%s", name, err, describeBadValue(raw)))
 	}
 }
 

@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"crypto/rand"
@@ -45,10 +45,10 @@ type docsAssets struct {
 func (a *App) prepareDocs() *docsAssets {
 	spec, err := a.spec.Marshal()
 	if err != nil {
-		// coverage: Document is built from Badele's own types, every one of
+		// coverage: Document is built from Muzak's own types, every one of
 		// which is JSON-encodable, so marshaling cannot fail. The branch keeps
 		// a future schema field from taking down start-up.
-		Scoped(a.logger, ScopeDocs).Error("badele: the OpenAPI document could not be rendered",
+		Scoped(a.logger, ScopeDocs).Error("muzak: the OpenAPI document could not be rendered",
 			slog.String("error", err.Error()))
 		return nil
 	}

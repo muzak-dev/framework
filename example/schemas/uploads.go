@@ -1,7 +1,7 @@
 package schemas
 
 import (
-	"badele"
+	"muzak.dev/framework"
 )
 
 // FileBytesIn binds one upload straight into memory, which suits a file small
@@ -19,7 +19,7 @@ type FileOut struct {
 // UploadFileIn binds one upload alongside a form value, which is what an HTML
 // form with a file input and a text input sends.
 type UploadFileIn struct {
-	File badele.File `file:"file" doc:"A file read as an upload"`
+	File muzak.File `file:"file" doc:"A file read as an upload"`
 	Note string      `form:"note" doc:"An optional note filed with the upload" required:"false"`
 }
 
@@ -34,7 +34,7 @@ type UploadFileOut struct {
 
 // MultiUploadIn binds every file sent under one name.
 type MultiUploadIn struct {
-	Files []badele.File `file:"files" doc:"One or more files"`
+	Files []muzak.File `file:"files" doc:"One or more files"`
 }
 
 // MultiUploadOut lists what arrived.

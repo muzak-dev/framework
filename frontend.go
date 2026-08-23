@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bytes"
@@ -21,7 +21,7 @@ import (
 // Exactly one source is required. Dir names a directory on disk, which is what
 // a build step such as "npm run build" produces:
 //
-//	app.Frontend("/", badele.FrontendOptions{Dir: "dist"})
+//	app.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
 //
 // FS serves the frontend from an [io/fs.FS] instead, which is how a frontend
 // gets built into the binary. Setting both reads Dir as a subdirectory of FS,
@@ -30,7 +30,7 @@ import (
 //	//go:embed all:dist
 //	var assets embed.FS
 //
-//	app.Frontend("/", badele.FrontendOptions{FS: assets, Dir: "dist"})
+//	app.Frontend("/", muzak.FrontendOptions{FS: assets, Dir: "dist"})
 //
 // The zero value of the remaining fields resolves the fallback from what the
 // build actually produced, which is what most frontends want; see
@@ -106,7 +106,7 @@ type frontend struct {
 // Svelte, Angular, Solid, Astro and the rest produce. Nothing is rendered on
 // the server, and nothing is built here: this serves files that already exist.
 //
-//	app.Frontend("/", badele.FrontendOptions{Dir: "dist"})
+//	app.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
 //
 // Routes win. A request is matched against every registered route first, and
 // reaches the frontend only when none of them answered, so mounting a frontend
@@ -123,23 +123,23 @@ type frontend struct {
 // Mounting under a prefix works the way everything else does, through the
 // router the frontend is registered on:
 //
-//	ui := badele.NewRouter()
-//	ui.Frontend("/", badele.FrontendOptions{Dir: "dist"})
-//	app.Include(ui, badele.WithPrefix("/app"))
+//	ui := muzak.NewRouter()
+//	ui.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
+//	app.Include(ui, muzak.WithPrefix("/app"))
 //
 // Problems with the mount, including a directory that does not exist, are
 // reported when the application is built rather than on the first request.
 func (r *Router) Frontend(mountPath string, opts FrontendOptions) {
 	if !strings.HasPrefix(mountPath, "/") {
-		r.errs = append(r.errs, fmt.Errorf("badele: frontend at %q: path must begin with %q", mountPath, "/"))
+		r.errs = append(r.errs, fmt.Errorf("muzak: frontend at %q: path must begin with %q", mountPath, "/"))
 		return
 	}
 	if opts.Dir == "" && opts.FS == nil {
-		r.errs = append(r.errs, fmt.Errorf("badele: frontend at %q: set Dir, FS, or both", mountPath))
+		r.errs = append(r.errs, fmt.Errorf("muzak: frontend at %q: set Dir, FS, or both", mountPath))
 		return
 	}
 	if opts.NoFallback && (opts.Fallback != "" || opts.NotFound != "") {
-		r.errs = append(r.errs, fmt.Errorf("badele: frontend at %q: NoFallback cannot be combined with Fallback or NotFound", mountPath))
+		r.errs = append(r.errs, fmt.Errorf("muzak: frontend at %q: NoFallback cannot be combined with Fallback or NotFound", mountPath))
 		return
 	}
 	r.frontends = append(r.frontends, &frontend{path: mountPath, opts: opts, index: true, kind: "frontend"})
@@ -159,7 +159,7 @@ func (f *frontend) resolve(in inherited) error {
 	}
 	files, err := f.resolveFS()
 	if err != nil {
-		return fmt.Errorf("badele: %s at %q: %w", f.kind, f.mountPath(), err)
+		return fmt.Errorf("muzak: %s at %q: %w", f.kind, f.mountPath(), err)
 	}
 	for _, named := range []struct{ what, name string }{
 		{"Fallback", f.opts.Fallback},
@@ -169,7 +169,7 @@ func (f *frontend) resolve(in inherited) error {
 			continue
 		}
 		if _, err := fs.Stat(files, named.name); err != nil {
-			return fmt.Errorf("badele: %s at %q: %s file %q: %w", f.kind, f.mountPath(), named.what, named.name, err)
+			return fmt.Errorf("muzak: %s at %q: %s file %q: %w", f.kind, f.mountPath(), named.what, named.name, err)
 		}
 	}
 	f.fallback, f.notFound = f.resolveFallback(files)
@@ -256,7 +256,7 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 
 	files, err := f.fsys()
 	if err != nil {
-		a.logger.ErrorContext(c.Context(), "badele: the directory behind a mount could not be opened",
+		a.logger.ErrorContext(c.Context(), "muzak: the directory behind a mount could not be opened",
 			slog.String("kind", f.kind),
 			slog.String("mount", f.mountPath()),
 			slog.String(RequestIDKey, c.RequestID()),
@@ -282,7 +282,7 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 
 // errFrontendUnavailable stands in for a frontend whose files cannot be read,
 // so the client is told nothing about the server's filesystem.
-var errFrontendUnavailable = errors.New("badele: the frontend is unavailable")
+var errFrontendUnavailable = errors.New("muzak: the frontend is unavailable")
 
 // resolveFile finds the file a relative request path names, following the
 // convention that a directory is served by the index.html inside it.
@@ -371,7 +371,7 @@ func acceptsHTML(r *http.Request) bool {
 func (f *frontend) write(c *Context, files fs.FS, name string, status int) {
 	file, err := files.Open(name)
 	if err != nil {
-		c.logger.ErrorContext(c.Context(), "badele: a frontend file vanished between being found and being read",
+		c.logger.ErrorContext(c.Context(), "muzak: a frontend file vanished between being found and being read",
 			slog.String("file", name), slog.String("error", err.Error()))
 		http.Error(c.w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
@@ -473,7 +473,7 @@ type StaticOptions struct {
 
 // Static serves a directory of files at path.
 //
-//	app.Static("/static", badele.StaticOptions{Dir: "static"})
+//	app.Static("/static", muzak.StaticOptions{Dir: "static"})
 //
 // It is the same machinery [Router.Frontend] is built on, without the part
 // that makes a frontend work: nothing stands in for a path with no file behind
@@ -487,11 +487,11 @@ type StaticOptions struct {
 // file that exists is answered 405 rather than served.
 func (r *Router) Static(mountPath string, opts StaticOptions) {
 	if !strings.HasPrefix(mountPath, "/") {
-		r.errs = append(r.errs, fmt.Errorf("badele: static files at %q: path must begin with %q", mountPath, "/"))
+		r.errs = append(r.errs, fmt.Errorf("muzak: static files at %q: path must begin with %q", mountPath, "/"))
 		return
 	}
 	if opts.Dir == "" && opts.FS == nil {
-		r.errs = append(r.errs, fmt.Errorf("badele: static files at %q: set Dir, FS, or both", mountPath))
+		r.errs = append(r.errs, fmt.Errorf("muzak: static files at %q: set Dir, FS, or both", mountPath))
 		return
 	}
 	r.frontends = append(r.frontends, &frontend{

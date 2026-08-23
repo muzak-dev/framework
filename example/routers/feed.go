@@ -3,17 +3,17 @@ package routers
 import (
 	"net/http"
 
-	"badele"
-	"badele-example/handlers"
+	"muzak.dev/framework"
+	"muzak.dev/framework/example/handlers"
 )
 
 // Feed returns the router for the reader's feed.
-func Feed() *badele.Router {
-	r := badele.NewRouter(badele.WithTags("feed"))
+func Feed() *muzak.Router {
+	r := muzak.NewRouter(muzak.WithTags("feed"))
 
 	r.Get("/feed", handlers.Feed,
-		badele.Summary("Return the reader's feed"),
-		badele.WithResponseDoc(http.StatusNotModified, "The feed has not changed since If-Modified-Since"))
+		muzak.Summary("Return the reader's feed"),
+		muzak.WithResponseDoc(http.StatusNotModified, "The feed has not changed since If-Modified-Since"))
 
 	return r
 }

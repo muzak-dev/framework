@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"encoding/json/v2"
@@ -285,7 +285,7 @@ func TestNewNonce(t *testing.T) {
 // leaves the documentation routes unregistered rather than serving a broken
 // page.
 //
-// The document is built from Badele's own types and cannot normally fail to
+// The document is built from Muzak's own types and cannot normally fail to
 // render, so the test poisons the generated schema with a value JSON has no
 // representation for.
 func TestDocsAreOmittedWhenTheDocumentCannotBeRendered(t *testing.T) {

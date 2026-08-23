@@ -1,11 +1,11 @@
-package badele
+package muzak
 
 import (
 	"net/http"
 	"reflect"
 	"testing"
 
-	"badele/validate"
+	"muzak.dev/framework/validate"
 )
 
 // mixedFailures fails to bind one field and fails to validate another, which is

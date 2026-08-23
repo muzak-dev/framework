@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"reflect"
 
-	"badele/internal/radix"
+	"muzak.dev/framework/internal/radix"
 )
 
 // Context carries the request-scoped state for a single HTTP request,
@@ -60,7 +60,7 @@ func (c *Context) Request() *http.Request { return c.r }
 
 // ResponseWriter returns the http.ResponseWriter for the response.
 //
-// Writing to it directly bypasses Badele's response encoding, which means the
+// Writing to it directly bypasses Muzak's response encoding, which means the
 // handler's return value will not be serialized and [Context.SetStatus] stops
 // having an effect. Use it for streaming, server-sent events or file
 // downloads, and return the zero Out value with a nil error afterwards. The
@@ -155,7 +155,7 @@ func (c *Context) AddHeader(name, value string) {
 }
 
 // SetCookie adds a Set-Cookie header for the given cookie. The caller is
-// responsible for setting Secure, HttpOnly and SameSite appropriately; Badele
+// responsible for setting Secure, HttpOnly and SameSite appropriately; Muzak
 // does not modify the cookie.
 func (c *Context) SetCookie(cookie *http.Cookie) {
 	http.SetCookie(c.w, cookie)
@@ -173,7 +173,7 @@ func (c *Context) SetCookie(cookie *http.Cookie) {
 // outside the 100 to 599 range are clamped to 500.
 func (c *Context) SetStatus(code int) {
 	if c.w.written {
-		c.logger.WarnContext(c.Context(), "badele: SetStatus called after the response body started; ignoring",
+		c.logger.WarnContext(c.Context(), "muzak: SetStatus called after the response body started; ignoring",
 			slog.Int("requested_status", code),
 			slog.Int("written_status", c.w.status),
 			slog.String("route", c.route.Path))

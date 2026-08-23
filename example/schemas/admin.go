@@ -1,7 +1,7 @@
 package schemas
 
 import (
-	"badele"
+	"muzak.dev/framework"
 )
 
 // AdminActionIn is the JSON body for the administrative action.
@@ -19,6 +19,6 @@ type AdminActionOut struct {
 }
 
 // Validate constrains the administrative action.
-func (in *AdminActionIn) Validate(v *badele.Validation) {
+func (in *AdminActionIn) Validate(v *muzak.Validation) {
 	v.String(&in.Name).Trim().Required().MinLen(1).MaxLen(80)
 }

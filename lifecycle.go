@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -16,11 +16,11 @@ import (
 // A database pool, a cache client, a message consumer and a loaded model all
 // fit the same shape: something expensive to create, shared by every request,
 // and needing an orderly release. Publish the resource with [WithSingleton]
-// and, if the value implements Lifecycle, Badele takes care of the rest:
+// and, if the value implements Lifecycle, Muzak takes care of the rest:
 //
-//	app := badele.New(badele.AppOptions{Title: "Shop"},
-//		badele.WithSingleton(redisClient), // *Redis implements Lifecycle
-//		badele.WithSingleton(db),          // *DB implements Lifecycle
+//	app := muzak.New(muzak.AppOptions{Title: "Shop"},
+//		muzak.WithSingleton(redisClient), // *Redis implements Lifecycle
+//		muzak.WithSingleton(db),          // *DB implements Lifecycle
 //	)
 //
 // Use [NewLifecycle] when a resource does not warrant its own type.
@@ -69,7 +69,7 @@ func (c closureLifecycle) Stop(ctx context.Context) error {
 // lightweight counterpart to implementing the interface:
 //
 //	models := map[string]func(float64) float64{}
-//	badele.NewLifecycle("ml-model",
+//	muzak.NewLifecycle("ml-model",
 //		func(ctx context.Context) error {
 //			models["answer"] = func(x float64) float64 { return x * 42 }
 //			return nil
@@ -108,7 +108,7 @@ func (f singletonOptionFunc) applySingleton(c *singletonConfig) { f(c) }
 //
 //	models := map[string]func(float64) float64{}
 //
-//	app.Options(badele.WithSingleton(models, badele.LifecycleFunc("ml-model",
+//	app.Options(muzak.WithSingleton(models, muzak.LifecycleFunc("ml-model",
 //		func(ctx context.Context) error {
 //			models["answer_to_everything"] = func(x float64) float64 { return x * 42 }
 //			return nil

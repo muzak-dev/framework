@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"badele"
-	"badele/testclient"
+	"muzak.dev/framework"
+	"muzak.dev/framework/testclient"
 )
 
 // sseItemOut is the model the streams in these tests carry.
@@ -31,17 +31,17 @@ type ssePromptIn struct {
 
 // newSSEApp builds an application with the event stream routes these tests
 // drive.
-func newSSEApp() *badele.App {
-	app := badele.New(badele.AppOptions{
+func newSSEApp() *muzak.App {
+	app := muzak.New(muzak.AppOptions{
 		Title:         "Event Stream Test API",
 		Version:       "1.0.0",
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
 	})
 
-	app.SSE("/rooms/{room}/stream", func(_ *badele.Context, in sseStreamIn, stream *badele.SSEStream[sseItemOut]) error {
+	app.SSE("/rooms/{room}/stream", func(_ *muzak.Context, in sseStreamIn, stream *muzak.SSEStream[sseItemOut]) error {
 		for i := range 3 {
 			item := sseItemOut{Name: in.Room + "/" + in.Token + "/" + strconv.Itoa(i)}
-			if err := stream.SendEvent(badele.SSEEvent[sseItemOut]{
+			if err := stream.SendEvent(muzak.SSEEvent[sseItemOut]{
 				Name: "item_update",
 				ID:   strconv.Itoa(i),
 				Data: &item,
@@ -50,21 +50,21 @@ func newSSEApp() *badele.App {
 			}
 		}
 		return nil
-	}, badele.WithSSE(badele.SSEOptions{KeepAlive: 5 * time.Millisecond}))
+	}, muzak.WithSSE(muzak.SSEOptions{KeepAlive: 5 * time.Millisecond}))
 
-	app.SSEHandle(http.MethodPost, "/chat/stream", func(_ *badele.Context, in ssePromptIn, stream *badele.SSEStream[badele.Empty]) error {
+	app.SSEHandle(http.MethodPost, "/chat/stream", func(_ *muzak.Context, in ssePromptIn, stream *muzak.SSEStream[muzak.Empty]) error {
 		for word := range strings.SplitSeq(in.Text, " ") {
-			if err := stream.SendEvent(badele.SSEEvent[badele.Empty]{Name: "token", Text: word}); err != nil {
+			if err := stream.SendEvent(muzak.SSEEvent[muzak.Empty]{Name: "token", Text: word}); err != nil {
 				return err
 			}
 		}
-		return stream.SendEvent(badele.SSEEvent[badele.Empty]{Name: "done", Text: "[DONE]"})
+		return stream.SendEvent(muzak.SSEEvent[muzak.Empty]{Name: "done", Text: "[DONE]"})
 	})
 
-	app.SSE("/idle/stream", func(_ *badele.Context, _ badele.Empty, stream *badele.SSEStream[sseItemOut]) error {
+	app.SSE("/idle/stream", func(_ *muzak.Context, _ muzak.Empty, stream *muzak.SSEStream[sseItemOut]) error {
 		<-stream.Context().Done()
 		return stream.Err()
-	}, badele.WithSSE(badele.SSEOptions{KeepAlive: 5 * time.Millisecond}))
+	}, muzak.WithSSE(muzak.SSEOptions{KeepAlive: 5 * time.Millisecond}))
 
 	return app
 }
@@ -121,7 +121,7 @@ func TestClientSSERefused(t *testing.T) {
 		t.Fatal("a refused request was accepted as a stream")
 	}
 	response.AssertStatus(http.StatusUnprocessableEntity)
-	response.AssertErrorCode(badele.CodeValidationError)
+	response.AssertErrorCode(muzak.CodeValidationError)
 }
 
 func TestClientSSEEndOfStream(t *testing.T) {
@@ -132,7 +132,7 @@ func TestClientSSEEndOfStream(t *testing.T) {
 	for range 3 {
 		stream.Next()
 	}
-	if _, err := stream.TryNext(); !errors.Is(err, badele.ErrSSEStreamEnded) {
+	if _, err := stream.TryNext(); !errors.Is(err, muzak.ErrSSEStreamEnded) {
 		t.Errorf("TryNext() = %v, want the stream to have ended", err)
 	}
 }

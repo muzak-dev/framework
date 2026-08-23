@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bytes"
@@ -458,7 +458,7 @@ func TestUploadRegistrationErrors(t *testing.T) {
 	}{
 		{
 			name: "unsupported field type",
-			want: "a file field must be badele.File",
+			want: "a file field must be muzak.File",
 			bind: func(app *App) {
 				app.Post("/x", func(ctx *Context, in badFileTypeIn) (Empty, error) { return Empty{}, nil })
 			},

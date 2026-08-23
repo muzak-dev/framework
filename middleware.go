@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 
 // Middleware wraps an http.Handler to run logic around every request.
 //
-// Middleware operates below Badele's typed layer, on the raw net/http types,
+// Middleware operates below Muzak's typed layer, on the raw net/http types,
 // which is what lets any middleware written for the standard library be used
 // unchanged. Install it with [App.Use]; the first one installed is the
 // outermost.
@@ -37,7 +37,7 @@ type requestIDContextKey struct{}
 
 // RequestIDFromContext returns the identifier assigned to the request carried
 // by ctx, and reports whether one was assigned. Use it in code that has a
-// context.Context but no Badele [Context], such as a repository or a client
+// context.Context but no Muzak [Context], such as a repository or a client
 // wrapper that wants to propagate the identifier downstream.
 func RequestIDFromContext(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(requestIDContextKey{}).(string)
@@ -126,7 +126,7 @@ func Recovery(logger *slog.Logger) Middleware {
 					panic(recovered)
 				}
 				id, _ := RequestIDFromContext(r.Context())
-				logger.ErrorContext(r.Context(), "badele: recovered from a panic",
+				logger.ErrorContext(r.Context(), "muzak: recovered from a panic",
 					slog.Any("panic", recovered),
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),
@@ -140,7 +140,7 @@ func Recovery(logger *slog.Logger) Middleware {
 }
 
 // writeMinimalError writes the standard error envelope without needing a
-// Badele Context, for failures that happen outside the routed request path.
+// Muzak Context, for failures that happen outside the routed request path.
 func writeMinimalError(w http.ResponseWriter, requestID string) {
 	if rw, ok := w.(*responseWriter); ok && rw.written {
 		// The response is already on the wire; the best available outcome is

@@ -1,7 +1,7 @@
 package schemas
 
 import (
-	"badele"
+	"muzak.dev/framework"
 )
 
 // UserOut is the response model for a single user.
@@ -19,7 +19,7 @@ type UserLookupParams struct {
 }
 
 // Validate constrains the username to what the store can hold.
-func (in *UserLookupParams) Validate(v *badele.Validation) {
+func (in *UserLookupParams) Validate(v *muzak.Validation) {
 	v.String(&in.Username).Trim().Lower().Required().MinLen(2).MaxLen(32).
 		Matches(`^[a-z0-9_]+$`).
 		Message("may only contain lower case letters, digits and underscores")
@@ -34,7 +34,7 @@ type UserListQuery struct {
 }
 
 // Validate keeps a client from asking for an unbounded page.
-func (in *UserListQuery) Validate(v *badele.Validation) {
+func (in *UserListQuery) Validate(v *muzak.Validation) {
 	v.Number(&in.Limit).Between(1, 100)
 	v.String(&in.Cursor).MaxLen(128)
 }
@@ -71,7 +71,7 @@ type CreateUserIn struct {
 }
 
 // Validate declares what a valid signup looks like.
-func (in *CreateUserIn) Validate(v *badele.Validation) {
+func (in *CreateUserIn) Validate(v *muzak.Validation) {
 	v.String(&in.Username).Trim().Lower().Required().MinLen(2).MaxLen(32).
 		Matches(`^[a-z0-9_]+$`).
 		Message("may only contain lower case letters, digits and underscores").

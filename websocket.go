@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bufio"
@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"badele/internal/wsframe"
+	"muzak.dev/framework/internal/wsframe"
 )
 
 // WSMessageType says what a WebSocket message carries.
@@ -57,11 +57,11 @@ type WSStatus uint16
 //
 // Three of them describe a local observation rather than something a peer
 // said: [WSStatusNoStatusReceived], [WSStatusAbnormalClosure] and
-// [WSStatusTLSHandshake] are reported by Badele but are never written to the
+// [WSStatusTLSHandshake] are reported by Muzak but are never written to the
 // wire, and passing one to [WSConn.Close] closes without a status code.
 const (
 	// WSStatusNormalClosure reports a connection closed because whatever it
-	// was opened for is finished. It is what Badele sends when a handler
+	// was opened for is finished. It is what Muzak sends when a handler
 	// returns without an error.
 	WSStatusNormalClosure WSStatus = 1000
 	// WSStatusGoingAway reports an endpoint that is disappearing, such as a
@@ -89,7 +89,7 @@ const (
 	// declined an extension it required.
 	WSStatusMandatoryExtension WSStatus = 1010
 	// WSStatusInternalError reports a condition that stopped the endpoint from
-	// fulfilling the request. It is what Badele sends when a handler returns an
+	// fulfilling the request. It is what Muzak sends when a handler returns an
 	// error or panics.
 	WSStatusInternalError WSStatus = 1011
 	// WSStatusServiceRestart reports a server restarting.
@@ -176,7 +176,7 @@ type WSCloseError struct {
 
 // Error implements the error interface.
 func (e *WSCloseError) Error() string {
-	message := "badele: the websocket connection was closed with status " + e.Status.String()
+	message := "muzak: the websocket connection was closed with status " + e.Status.String()
 	if e.Reason != "" {
 		message += ": " + e.Reason
 	}
@@ -195,7 +195,7 @@ func (e *WSCloseError) Unwrap() error { return e.cause }
 //
 // It is how a handler tells a polite goodbye from a protocol violation:
 //
-//	if status, ok := badele.WSCloseStatus(err); ok && status == badele.WSStatusNormalClosure {
+//	if status, ok := muzak.WSCloseStatus(err); ok && status == muzak.WSStatusNormalClosure {
 //		return nil
 //	}
 func WSCloseStatus(err error) (WSStatus, bool) {
@@ -409,7 +409,7 @@ func (c *WSConn) Write(ctx context.Context, typ WSMessageType, payload []byte) e
 	case WSBinary:
 		return wsSend(c, ctx, wsframe.Binary, payload)
 	default:
-		return fmt.Errorf("badele: %s cannot be sent; use badele.WSText or badele.WSBinary", typ)
+		return fmt.Errorf("muzak: %s cannot be sent; use muzak.WSText or muzak.WSBinary", typ)
 	}
 }
 
@@ -432,7 +432,7 @@ func (c *WSConn) WriteBinary(ctx context.Context, payload []byte) error {
 func (c *WSConn) WriteJSON(ctx context.Context, value any) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Errorf("badele: encoding a websocket message: %w", err)
+		return fmt.Errorf("muzak: encoding a websocket message: %w", err)
 	}
 	return wsSend(c, ctx, wsframe.Text, encoded)
 }
@@ -440,7 +440,7 @@ func (c *WSConn) WriteJSON(ctx context.Context, value any) error {
 // errWSNotText reports a text message that is not valid UTF-8. The protocol
 // requires the encoding, so sending one would only oblige the peer to close
 // the connection with a protocol error.
-var errWSNotText = errors.New("badele: a text websocket message must be valid UTF-8")
+var errWSNotText = errors.New("muzak: a text websocket message must be valid UTF-8")
 
 // errWSClosing reports something sent after this end had already said goodbye.
 // It is compared by identity, so it must stay a single value.
@@ -458,7 +458,7 @@ func (c *WSConn) Ping(ctx context.Context) error {
 
 // Close closes the connection with a status and a reason.
 //
-// Badele closes the connection when the handler returns, so calling Close is
+// Muzak closes the connection when the handler returns, so calling Close is
 // only necessary to choose a status other than [WSStatusNormalClosure] or to
 // end the connection from another goroutine. It is safe to call more than once
 // and from more than one goroutine; only the first call sends anything, and a
@@ -489,7 +489,7 @@ func (c *WSConn) acquire(ctx context.Context, sem chan struct{}) error {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
-			return fmt.Errorf("badele: waiting for the websocket connection: %w", ctx.Err())
+			return fmt.Errorf("muzak: waiting for the websocket connection: %w", ctx.Err())
 		case <-c.done:
 			return c.failure()
 		}
@@ -717,7 +717,7 @@ func (c *WSConn) readFailed(ctx context.Context, err error) error {
 		return c.abort(WSStatus(protocol.Status), protocol.Reason)
 	}
 	if ctxErr := wsContextFailure(ctx, err); ctxErr != nil {
-		return c.fail(fmt.Errorf("badele: reading a websocket message: %w", ctxErr))
+		return c.fail(fmt.Errorf("muzak: reading a websocket message: %w", ctxErr))
 	}
 	if errors.Is(err, os.ErrDeadlineExceeded) {
 		// The caller's deadline was ruled out above, so the only one left is
@@ -829,7 +829,7 @@ func (c *WSConn) acquireClose() error {
 	case <-c.done:
 		return c.failure()
 	case <-timer.C:
-		return fmt.Errorf("badele: the websocket close frame could not be sent within %s", timeout)
+		return fmt.Errorf("muzak: the websocket close frame could not be sent within %s", timeout)
 	}
 }
 
@@ -850,7 +850,7 @@ func wsWrite[T wsPayload](c *WSConn, ctx context.Context, deadline time.Time, op
 		if _, err := crand.Read(header.Mask[:]); err != nil {
 			// coverage: crypto/rand does not fail on any supported platform;
 			// the branch keeps a failure from producing a predictable key.
-			return c.fail(fmt.Errorf("badele: generating a websocket masking key: %w", err))
+			return c.fail(fmt.Errorf("muzak: generating a websocket masking key: %w", err))
 		}
 	}
 	buf := wsframe.AppendHeader(c.scratch[:0], header)
@@ -895,7 +895,7 @@ func wsWrite[T wsPayload](c *WSConn, ctx context.Context, deadline time.Time, op
 func (c *WSConn) flush(ctx context.Context, b []byte) error {
 	if _, err := c.rwc.Write(b); err != nil {
 		if ctxErr := wsContextFailure(ctx, err); ctxErr != nil {
-			return c.fail(fmt.Errorf("badele: writing a websocket message: %w", ctxErr))
+			return c.fail(fmt.Errorf("muzak: writing a websocket message: %w", ctxErr))
 		}
 		return c.fail(&WSCloseError{Status: WSStatusAbnormalClosure, Reason: "the connection was lost", cause: err})
 	}

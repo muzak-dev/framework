@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"errors"
@@ -18,7 +18,7 @@ import (
 // header and the content left where the parser put it:
 //
 //	type UploadFileIn struct {
-//		File badele.File `file:"file" doc:"A file read as an upload"`
+//		File muzak.File `file:"file" doc:"A file read as an upload"`
 //	}
 //
 // The content is reachable through [File.Open] for streaming and through
@@ -57,7 +57,7 @@ func newFile(header *multipart.FileHeader) File {
 // ErrNoFile reports an operation on a File that was never bound from a
 // request, which is what an optional file field holds when the client sent
 // nothing under its name.
-var ErrNoFile = errors.New("badele: no file was uploaded for this field")
+var ErrNoFile = errors.New("muzak: no file was uploaded for this field")
 
 // Present reports whether a file was actually uploaded. It is only ever false
 // for a field marked `required:"false"`, since a required file that is missing
@@ -189,7 +189,7 @@ func newFileBinder(f reflect.StructField, index []int, name string) (fileBinder,
 	case bytesManyType:
 		kind = fileBytesMany
 	default:
-		return fileBinder{}, fmt.Errorf("field %s (file %q) has type %s; a file field must be badele.File, []badele.File, []byte or [][]byte",
+		return fileBinder{}, fmt.Errorf("field %s (file %q) has type %s; a file field must be muzak.File, []muzak.File, []byte or [][]byte",
 			f.Name, name, f.Type)
 	}
 

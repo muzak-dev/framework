@@ -1,7 +1,7 @@
 package schemas
 
 import (
-	"badele"
+	"muzak.dev/framework"
 )
 
 // LoginIn is the sign-in form.
@@ -24,7 +24,7 @@ type LoginIn struct {
 // The rules are deliberately shape-only. A password that is too short is worth
 // rejecting outright, but nothing here may hint at whether the account exists;
 // that answer belongs to the handler, which gives the same one either way.
-func (in *LoginIn) Validate(v *badele.Validation) {
+func (in *LoginIn) Validate(v *muzak.Validation) {
 	v.String(&in.Username).Trim().Lower().MinLen(2).MaxLen(32)
 	v.String(&in.Password).MinLen(8).MaxLen(128)
 }

@@ -15,7 +15,7 @@ import (
 
 // StringRules collects the transforms and checks applied to a string field.
 //
-// Obtain one from badele.Validation.String for a field, or from [String] to
+// Obtain one from muzak.Validation.String for a field, or from [String] to
 // build a reusable set or to describe the elements of a slice. Every method
 // returns the same rule set, so calls chain.
 type StringRules struct {
@@ -33,7 +33,7 @@ func String() *StringRules { return &StringRules{} }
 
 // For binds the rule set to a field, identified by its address.
 //
-// badele.Validation.String calls it; application code uses that entry point
+// muzak.Validation.String calls it; application code uses that entry point
 // instead, which also registers the rule set so it actually runs.
 func (r *StringRules) For(target any) *StringRules {
 	r.target = target

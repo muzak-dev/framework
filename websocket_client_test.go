@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 )
 
 // serveRawWS answers a handshake by hand and hands the connection to fn, for
-// the tests that need a server doing something Badele would never do.
+// the tests that need a server doing something Muzak would never do.
 //
 // The extra headers replace the ones the handshake would otherwise write, so a
 // test can answer with a wrong accept value or a subprotocol nobody offered.

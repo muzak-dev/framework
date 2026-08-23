@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"os"
@@ -415,11 +415,11 @@ func TestMustLoadConfig(t *testing.T) {
 }
 
 func TestEnvSourceReadsTheProcessEnvironment(t *testing.T) {
-	t.Setenv("BADELE_TEST_VALUE", "present")
-	if got, ok := (envSource{}).Lookup("BADELE_TEST_VALUE"); !ok || got != "present" {
+	t.Setenv("MUZAK_TEST_VALUE", "present")
+	if got, ok := (envSource{}).Lookup("MUZAK_TEST_VALUE"); !ok || got != "present" {
 		t.Errorf("Lookup = %q, %v", got, ok)
 	}
-	if _, ok := (envSource{}).Lookup("BADELE_TEST_ABSENT"); ok {
+	if _, ok := (envSource{}).Lookup("MUZAK_TEST_ABSENT"); ok {
 		t.Error("Lookup reported an absent variable as present")
 	}
 	if got := (envSource{}).Name(); got != "the environment" {

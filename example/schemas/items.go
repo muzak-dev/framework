@@ -1,7 +1,7 @@
 package schemas
 
 import (
-	"badele"
+	"muzak.dev/framework"
 )
 
 // ItemOut is the response model for a single item.
@@ -53,7 +53,7 @@ type ItemListOut struct {
 }
 
 // Validate constrains a new item.
-func (in *ItemCreateIn) Validate(v *badele.Validation) {
+func (in *ItemCreateIn) Validate(v *muzak.Validation) {
 	v.String(&in.ID).Trim().Lower().Required().MinLen(2).MaxLen(32).
 		Matches(`^[a-z0-9-]+$`).
 		Message("may only contain lower case letters, digits and hyphens")
@@ -63,13 +63,13 @@ func (in *ItemCreateIn) Validate(v *badele.Validation) {
 // Validate constrains a rename, covering a model that mixes a path parameter
 // with a body member. The path parameter is reported as one, which comes free
 // from the binding plan.
-func (in *ItemRenameIn) Validate(v *badele.Validation) {
+func (in *ItemRenameIn) Validate(v *muzak.Validation) {
 	v.String(&in.ID).Required()
 	v.String(&in.Name).Trim().Required().MinLen(1).MaxLen(80)
 }
 
 // Validate constrains the item identifier read from the path.
-func (in *ItemParams) Validate(v *badele.Validation) {
+func (in *ItemParams) Validate(v *muzak.Validation) {
 	v.String(&in.ID).Trim().Lower().Required().MaxLen(32)
 }
 

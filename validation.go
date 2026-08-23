@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"reflect"
@@ -6,17 +6,17 @@ import (
 	"sync"
 	"time"
 
-	"badele/validate"
+	"muzak.dev/framework/validate"
 )
 
 // Validatable is implemented by an input model that declares validation rules.
 //
-// Badele runs Validate after binding and after every guard, so a model never
+// Muzak runs Validate after binding and after every guard, so a model never
 // gets to tell an unauthenticated caller what is wrong with its request. The
 // method belongs on the pointer type, which is what lets rules name fields by
 // address:
 //
-//	func (in *CreateUser) Validate(v *badele.Validation) {
+//	func (in *CreateUser) Validate(v *muzak.Validation) {
 //		v.String(&in.Email).Trim().Lower().Required().Email()
 //		v.Number(&in.Age).Between(18, 120)
 //	}

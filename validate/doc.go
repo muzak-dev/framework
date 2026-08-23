@@ -1,8 +1,8 @@
-// Package validate holds the rules Badele applies to a bound request.
+// Package validate holds the rules Muzak applies to a bound request.
 //
 // Rules are declared against the field itself rather than against its name:
 //
-//	func (in *CreateUser) Validate(v *badele.Validation) {
+//	func (in *CreateUser) Validate(v *muzak.Validation) {
 //		v.String(&in.Email).Required().Email()
 //		v.Number(&in.Age).Between(18, 120)
 //	}
@@ -43,7 +43,7 @@
 //
 // # Documentation
 //
-// Rules describe themselves, so the OpenAPI document Badele generates carries
+// Rules describe themselves, so the OpenAPI document Muzak generates carries
 // the constraints the code actually enforces: MinLen becomes minLength, OneOf
 // becomes an enum, Between becomes minimum and maximum. The documentation
 // cannot drift from the validation because both are read from the same

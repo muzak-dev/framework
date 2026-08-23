@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"errors"
@@ -23,7 +23,7 @@ const DefaultForwardedHeader = "X-Forwarded-For"
 // of them parsed on the way to deciding who sent it.
 const maxForwardedHops = 64
 
-// ClientIPOptions decides how Badele works out which address a request came
+// ClientIPOptions decides how Muzak works out which address a request came
 // from.
 //
 // The zero value trusts nothing: the address of the peer that opened the
@@ -37,8 +37,8 @@ const maxForwardedHops = 64
 // request then appears to come from the proxy. Naming the proxy in
 // TrustedProxies is what makes the header believable:
 //
-//	app := badele.New(badele.AppOptions{
-//		ClientIP: badele.ClientIPOptions{TrustedProxies: []string{"10.0.0.0/8"}},
+//	app := muzak.New(muzak.AppOptions{
+//		ClientIP: muzak.ClientIPOptions{TrustedProxies: []string{"10.0.0.0/8"}},
 //	})
 type ClientIPOptions struct {
 	// TrustedProxies lists the addresses whose forwarding header is believed,
@@ -99,7 +99,7 @@ func parseTrustedProxy(entry string) (netip.Prefix, error) {
 	if strings.Contains(trimmed, "/") {
 		prefix, err := netip.ParsePrefix(trimmed)
 		if err != nil {
-			return netip.Prefix{}, fmt.Errorf("badele: trusted proxy %q is not a valid CIDR prefix: %w", entry, err)
+			return netip.Prefix{}, fmt.Errorf("muzak: trusted proxy %q is not a valid CIDR prefix: %w", entry, err)
 		}
 		// Masking discards any host bits the prefix was written with, so that
 		// "10.1.2.3/8" means the same as "10.0.0.0/8" rather than never
@@ -108,7 +108,7 @@ func parseTrustedProxy(entry string) (netip.Prefix, error) {
 	}
 	addr, err := netip.ParseAddr(trimmed)
 	if err != nil {
-		return netip.Prefix{}, fmt.Errorf("badele: trusted proxy %q is not a valid address or CIDR prefix: %w", entry, err)
+		return netip.Prefix{}, fmt.Errorf("muzak: trusted proxy %q is not a valid address or CIDR prefix: %w", entry, err)
 	}
 	addr = addr.Unmap()
 	return netip.PrefixFrom(addr, addr.BitLen()), nil

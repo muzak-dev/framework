@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"badele"
-	"badele/testclient"
+	"muzak.dev/framework"
+	"muzak.dev/framework/testclient"
 )
 
 // wsEchoIn is the input of the echoing route, so that the test covers a
@@ -18,13 +18,13 @@ type wsEchoIn struct {
 }
 
 // newWSApp builds an application with the WebSocket routes these tests drive.
-func newWSApp() *badele.App {
-	app := badele.New(badele.AppOptions{
+func newWSApp() *muzak.App {
+	app := muzak.New(muzak.AppOptions{
 		Title:         "WebSocket Test API",
 		Version:       "1.0.0",
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
 	})
-	app.WS("/rooms/{room}/ws", func(ctx *badele.Context, in wsEchoIn, conn *badele.WSConn) error {
+	app.WS("/rooms/{room}/ws", func(ctx *muzak.Context, in wsEchoIn, conn *muzak.WSConn) error {
 		if err := conn.WriteText(ctx.Context(), "welcome to "+in.Room+" as "+in.Token); err != nil {
 			return err
 		}
@@ -37,12 +37,12 @@ func newWSApp() *badele.App {
 				return err
 			}
 		}
-	}, badele.WithWebSocket(badele.WSOptions{Subprotocols: []string{"chat.v1"}}))
+	}, muzak.WithWebSocket(muzak.WSOptions{Subprotocols: []string{"chat.v1"}}))
 
-	app.WS("/session/ws", func(ctx *badele.Context, _ badele.Empty, conn *badele.WSConn) error {
+	app.WS("/session/ws", func(ctx *muzak.Context, _ muzak.Empty, conn *muzak.WSConn) error {
 		cookie, err := ctx.Cookie("session")
 		if err != nil {
-			return &badele.WSCloseError{Status: badele.WSStatusPolicyViolation, Reason: "no session"}
+			return &muzak.WSCloseError{Status: muzak.WSStatusPolicyViolation, Reason: "no session"}
 		}
 		return conn.WriteText(ctx.Context(), "session is "+cookie.Value)
 	})
@@ -83,15 +83,15 @@ func TestClientWSRefusedHandshake(t *testing.T) {
 		t.Fatal("a connection was opened for a handshake that should have been refused")
 	}
 	response.AssertStatus(http.StatusUnprocessableEntity)
-	response.AssertErrorCode(badele.CodeValidationError)
+	response.AssertErrorCode(muzak.CodeValidationError)
 }
 
 func TestClientWSCarriesTheCookieJar(t *testing.T) {
 	t.Parallel()
 	app := newWSApp()
-	app.Get("/login", func(ctx *badele.Context, _ badele.Empty) (badele.Empty, error) {
+	app.Get("/login", func(ctx *muzak.Context, _ muzak.Empty) (muzak.Empty, error) {
 		ctx.SetCookie(&http.Cookie{Name: "session", Value: "rick", Path: "/"})
-		return badele.Empty{}, nil
+		return muzak.Empty{}, nil
 	})
 	client := testclient.New(t, app)
 	client.Get("/login").AssertStatus(http.StatusOK)
@@ -113,11 +113,11 @@ func TestClientWSHandlerCloseReachesTheTest(t *testing.T) {
 	// No cookie was set, so the handler refuses on its own terms and the
 	// status it chose is what the read reports.
 	_, err := conn.ReadText(t.Context())
-	status, ok := badele.WSCloseStatus(err)
-	if !ok || status != badele.WSStatusPolicyViolation {
+	status, ok := muzak.WSCloseStatus(err)
+	if !ok || status != muzak.WSStatusPolicyViolation {
 		t.Fatalf("read error = %v, want the policy violation the handler chose", err)
 	}
-	var closed *badele.WSCloseError
+	var closed *muzak.WSCloseError
 	if !errors.As(err, &closed) || closed.Reason != "no session" {
 		t.Errorf("close reason = %v, want the handler's own", err)
 	}

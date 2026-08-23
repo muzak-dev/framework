@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bytes"
@@ -404,7 +404,7 @@ func TestCompressibleMediaTypes(t *testing.T) {
 		"text/event-stream":              false,
 		"":                               false,
 		"not a media type at all; ;; ;":  false,
-		"application/vnd.badele+unknown": false,
+		"application/vnd.muzak+unknown": false,
 	}
 	for contentType, want := range cases {
 		if got := policy.compressible(contentType); got != want {

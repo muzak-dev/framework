@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"uuid"
 
-	"badele"
-	"badele-example/schemas"
+	"muzak.dev/framework"
+	"muzak.dev/framework/example/schemas"
 )
 
 // accounts stands in for the user store a real service would query. The values
@@ -22,7 +22,7 @@ var accounts = map[string]string{
 // By the time this runs the form has been read, the username trimmed and
 // lower-cased and both lengths checked, so the handler is left with the one
 // decision that is actually its own.
-func Login(ctx *badele.Context, in schemas.LoginIn) (schemas.LoginOut, error) {
+func Login(ctx *muzak.Context, in schemas.LoginIn) (schemas.LoginOut, error) {
 	expected, known := accounts[in.Username]
 
 	// The comparison runs even for an unknown account, and the same answer is
@@ -31,7 +31,7 @@ func Login(ctx *badele.Context, in schemas.LoginIn) (schemas.LoginOut, error) {
 	// the same thing more quietly.
 	matches := subtle.ConstantTimeCompare([]byte(expected), []byte(in.Password)) == 1
 	if !known || !matches {
-		return schemas.LoginOut{}, badele.NewHTTPError(
+		return schemas.LoginOut{}, muzak.NewHTTPError(
 			http.StatusUnauthorized, "the username or password is incorrect")
 	}
 
@@ -61,8 +61,8 @@ func Login(ctx *badele.Context, in schemas.LoginIn) (schemas.LoginOut, error) {
 // It is a plain form with no enctype, so the browser posts it as
 // application/x-www-form-urlencoded. The route accepts that without being told
 // to, because it binds form values and no files.
-func LoginForm(ctx *badele.Context, _ badele.Empty) (badele.HTML, error) {
-	return badele.HTML(`<body>
+func LoginForm(ctx *muzak.Context, _ muzak.Empty) (muzak.HTML, error) {
+	return muzak.HTML(`<body>
 <form action="/login/?token=jessica" method="post">
 <label>Username <input name="username" autocomplete="username"></label>
 <label>Password <input name="password" type="password" autocomplete="current-password"></label>

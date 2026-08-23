@@ -1,4 +1,4 @@
-// Command example is a runnable Badele service, laid out the way a real one
+// Command example is a runnable Muzak service, laid out the way a real one
 // would be.
 //
 // This file does one thing: it composes. Configuration is read, resources are
@@ -16,7 +16,7 @@
 //
 // Run it and open http://localhost:8080/docs:
 //
-//	go run .
+//	go run ./cmd
 //
 // Every route sits below the application-wide guard, so a working request
 // carries a token:
@@ -28,39 +28,39 @@ import (
 	"log"
 	"net/http"
 
-	"badele"
-	"badele-example/core"
-	"badele-example/routers"
+	"muzak.dev/framework"
+	"muzak.dev/framework/example/core"
+	"muzak.dev/framework/example/routers"
 )
 
 func main() {
 	settings := core.LoadSettings()
 
 	// Resources are constructed here and published to every handler. The model
-	// registry implements badele.Lifecycle, so Badele discovers it; the store
+	// registry implements muzak.Lifecycle, so Muzak discovers it; the store
 	// does not, so it supplies the closure form instead. Either way both are
 	// started before the socket opens and released after it drains.
 	models := core.NewModelRegistry()
 	store := core.NewItemStore()
 
-	app := badele.New(badele.AppOptions{
+	app := muzak.New(muzak.AppOptions{
 		Title:       settings.AppName,
 		Version:     "1.0.0",
-		Description: "The Bigger Applications example, rebuilt on Badele.",
-		Contact:     &badele.Contact{Email: settings.AdminEmail},
+		Description: "The Bigger Applications example, rebuilt on Muzak.",
+		Contact:     &muzak.Contact{Email: settings.AdminEmail},
 		Addr:        settings.Addr,
 		// Which address a request is attributed to. Nothing is believed from a
 		// header until the proxy that wrote it is named here.
-		ClientIP: badele.ClientIPOptions{TrustedProxies: settings.TrustedProxies},
+		ClientIP: muzak.ClientIPOptions{TrustedProxies: settings.TrustedProxies},
 	},
-		badele.WithDependencies(core.GetQueryToken),
+		muzak.WithDependencies(core.GetQueryToken),
 		// The application-wide budget, counted before the guard above runs so
 		// that a request the guard rejects still costs the client something.
 		// Routers narrow it below where they have a reason to.
-		badele.WithRateLimit(core.RateLimitPolicy()),
-		badele.WithSingleton(settings),
-		badele.WithSingleton(models),
-		badele.WithSingleton(store, store.Lifecycle()),
+		muzak.WithRateLimit(core.RateLimitPolicy()),
+		muzak.WithSingleton(settings),
+		muzak.WithSingleton(models),
+		muzak.WithSingleton(store, store.Lifecycle()),
 	)
 
 	// Middleware installed here runs inside the built-in chain, so it already
@@ -68,7 +68,7 @@ func main() {
 	// ProcessTime is outermost of the two, so the duration it reports includes
 	// the time spent compressing.
 	app.Use(core.ProcessTime())
-	app.Use(badele.Compress(badele.CompressionOptions{}))
+	app.Use(muzak.Compress(muzak.CompressionOptions{}))
 
 	app.Include(routers.Users())
 	app.Include(routers.Items())
@@ -82,21 +82,21 @@ func main() {
 	// here, which is what keeps that router reusable and puts the security
 	// decision somewhere a reviewer will find it.
 	app.Include(routers.Admin(),
-		badele.WithPrefix("/admin"),
-		badele.WithTags("admin"),
-		badele.WithDependencies(core.GetTokenHeader(settings)),
-		badele.WithResponseDoc(http.StatusTeapot, "I'm a teapot"),
+		muzak.WithPrefix("/admin"),
+		muzak.WithTags("admin"),
+		muzak.WithDependencies(core.GetTokenHeader(settings)),
+		muzak.WithResponseDoc(http.StatusTeapot, "I'm a teapot"),
 	)
 
 	// Assets that belong to no particular route. A static mount serves what it
 	// finds and nothing else, so a miss here stays a miss rather than being
 	// answered with the application document by the frontend below.
-	app.Static("/static", badele.StaticOptions{Dir: "static"})
+	app.Static("/static", muzak.StaticOptions{Dir: "static"})
 
 	// The built frontend is served last: every route above is matched first,
 	// so mounting at the root cannot shadow the API. The directory here is
 	// what a frontend build tool would have written.
-	app.Frontend("/", badele.FrontendOptions{Dir: "dist"})
+	app.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
 
 	if err := app.RunSignals(); err != nil {
 		log.Fatal(err)

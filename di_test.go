@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"net/http"
@@ -204,7 +204,7 @@ func TestFromPanicsForUndeclaredTypes(t *testing.T) {
 		t.Errorf("the response named the missing type: %s", body)
 	}
 	// The developer learns everything about it.
-	if got := logs.String(); !strings.Contains(got, "diValue") || !strings.Contains(got, "badele.Needs") {
+	if got := logs.String(); !strings.Contains(got, "diValue") || !strings.Contains(got, "muzak.Needs") {
 		t.Errorf("the log does not explain the missing dependency:\n%s", got)
 	}
 }

@@ -7,8 +7,8 @@ import (
 
 // ModelRegistry holds the prediction models the service serves.
 //
-// It implements badele.Lifecycle, so publishing it with badele.WithSingleton is
-// enough for Badele to load it before the server accepts traffic and release it
+// It implements muzak.Lifecycle, so publishing it with muzak.WithSingleton is
+// enough for Muzak to load it before the server accepts traffic and release it
 // after the server has drained. This is the shape a real resource takes: a
 // database pool, a cache client and a model registry all need the same
 // treatment, and none of them should be constructed inside a handler.
@@ -28,7 +28,7 @@ func NewModelRegistry() *ModelRegistry {
 func (r *ModelRegistry) Name() string { return "ml-model" }
 
 // Start loads the models. A real implementation would read weights from disk or
-// object storage and should honour ctx, which Badele cancels as soon as a
+// object storage and should honour ctx, which Muzak cancels as soon as a
 // sibling component fails.
 func (r *ModelRegistry) Start(ctx context.Context) error {
 	r.mu.Lock()

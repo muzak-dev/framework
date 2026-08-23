@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"container/heap"
@@ -85,10 +85,10 @@ type memoryCounter struct {
 // NewMemoryRateLimitStorage returns a rate limit storage that counts in
 // memory.
 //
-//	app := badele.New(badele.AppOptions{Title: "Shop"},
-//		badele.WithRateLimit(badele.RateLimitOptions{
-//			Storage: badele.NewMemoryRateLimitStorage(badele.MemoryRateLimitOptions{MaxEntries: 10_000}),
-//			Quotas:  []badele.Quota{{Name: "default", Window: time.Minute, Limit: 60}},
+//	app := muzak.New(muzak.AppOptions{Title: "Shop"},
+//		muzak.WithRateLimit(muzak.RateLimitOptions{
+//			Storage: muzak.NewMemoryRateLimitStorage(muzak.MemoryRateLimitOptions{MaxEntries: 10_000}),
+//			Quotas:  []muzak.Quota{{Name: "default", Window: time.Minute, Limit: 60}},
 //		}),
 //	)
 //

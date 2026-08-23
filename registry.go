@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"errors"
@@ -198,7 +198,7 @@ func (g *liveRegistry[T]) shutdown(timeout time.Duration, end func(T)) int {
 // needs the per-client dimension turned off with a negative
 // MaxConnectionsPerIP or MaxStreamsPerIP rather than have every connection
 // refused because none of them can be told apart.
-var errConnectionLimitNoAddress = errors.New("badele: a per-client connection limit is configured but the client address could not be determined; " +
+var errConnectionLimitNoAddress = errors.New("muzak: a per-client connection limit is configured but the client address could not be determined; " +
 	"set MaxConnectionsPerIP or MaxStreamsPerIP to a negative value to disable it for a listener that is not addressed by IP")
 
 // perClientKey resolves the key a [liveRegistry]'s per-client dimension

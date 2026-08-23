@@ -3,27 +3,27 @@ package routers
 import (
 	"net/http"
 
-	"badele"
-	"badele-example/handlers"
+	"muzak.dev/framework"
+	"muzak.dev/framework/example/handlers"
 )
 
 // Users returns the users router, tagged so its operations are grouped together
 // in the generated documentation.
-func Users() *badele.Router {
-	r := badele.NewRouter(badele.WithTags("users"))
+func Users() *muzak.Router {
+	r := muzak.NewRouter(muzak.WithTags("users"))
 
 	r.Get("/users/", handlers.ListUsers,
-		badele.Summary("List users"))
+		muzak.Summary("List users"))
 
 	r.Get("/users/me", handlers.CurrentUser,
-		badele.Summary("Read the authenticated user"))
+		muzak.Summary("Read the authenticated user"))
 
 	r.Get("/users/{username}", handlers.ReadUser,
-		badele.Summary("Read a user by name"))
+		muzak.Summary("Read a user by name"))
 
 	r.Post("/users/", handlers.CreateUser,
-		badele.Summary("Register a user"),
-		badele.Status(http.StatusCreated))
+		muzak.Summary("Register a user"),
+		muzak.Status(http.StatusCreated))
 
 	return r
 }

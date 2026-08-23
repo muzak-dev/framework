@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"errors"
@@ -10,7 +10,7 @@ import (
 	"time"
 	"uuid"
 
-	"badele/internal/radix"
+	"muzak.dev/framework/internal/radix"
 )
 
 // scalars exercises every parameter type the binder claims to support.
@@ -394,7 +394,7 @@ func TestBindingBodyErrorsDoNotLeakGoTypes(t *testing.T) {
 
 	rec := do(t, app, "POST", "/x", `{"name":[1,2,3]}`)
 	assertStatus(t, rec, http.StatusUnprocessableEntity)
-	if body := rec.Body.String(); strings.Contains(body, "secretShape") || strings.Contains(body, "badele.") {
+	if body := rec.Body.String(); strings.Contains(body, "secretShape") || strings.Contains(body, "muzak.") {
 		t.Errorf("the response named a Go type: %s", body)
 	}
 }

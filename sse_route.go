@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"errors"
@@ -167,9 +167,9 @@ func (o SSEOptions) withDefaults() SSEOptions {
 // WithSSE configures the event streams of a route, or of every route beneath a
 // router.
 //
-//	live := badele.NewRouter()
+//	live := muzak.NewRouter()
 //	live.SSE("/items/stream", streamItems)
-//	app.Include(live, badele.WithSSE(badele.SSEOptions{
+//	app.Include(live, muzak.WithSSE(muzak.SSEOptions{
 //		KeepAlive: 5 * time.Second,
 //		Retry:     2 * time.Second,
 //	}))
@@ -184,7 +184,7 @@ func WithSSE(opts SSEOptions) SharedOption {
 	}
 }
 
-// SSEHandler is the shape every Badele server-sent events handler takes.
+// SSEHandler is the shape every Muzak server-sent events handler takes.
 //
 // In is bound from the request exactly as it is for any other route. Out is
 // the model each event carries: the compiler enforces that nothing else is
@@ -215,7 +215,7 @@ type sseConfig struct {
 //		Room string `path:"room"`
 //	}
 //
-//	r.SSE("/rooms/{room}/stream", func(ctx *badele.Context, in StreamIn, stream *badele.SSEStream[MessageOut]) error {
+//	r.SSE("/rooms/{room}/stream", func(ctx *muzak.Context, in StreamIn, stream *muzak.SSEStream[MessageOut]) error {
 //		for message := range room(in.Room).Messages(stream.Context()) {
 //			if err := stream.Send(message); err != nil {
 //				return err
@@ -272,11 +272,11 @@ func registerSSE[In, Out any](r *Router, method, path string, h SSEHandler[In, O
 		opt.applyRoute(&rt.cfg)
 	}
 	if h == nil {
-		r.errs = append(r.errs, fmt.Errorf("badele: SSE %s %s: handler is nil", method, path))
+		r.errs = append(r.errs, fmt.Errorf("muzak: SSE %s %s: handler is nil", method, path))
 		return rt
 	}
 	if !strings.HasPrefix(path, "/") {
-		r.errs = append(r.errs, fmt.Errorf("badele: SSE %s %s: path must begin with %q", method, path, "/"))
+		r.errs = append(r.errs, fmt.Errorf("muzak: SSE %s %s: path must begin with %q", method, path, "/"))
 		return rt
 	}
 
@@ -310,7 +310,7 @@ func registerSSE[In, Out any](r *Router, method, path string, h SSEHandler[In, O
 // mistakes such a route can be declared with.
 func (rt *Route) resolveSSE(in inherited) error {
 	if rt.cfg.status != 0 {
-		return fmt.Errorf("badele: SSE %s %s: Status cannot be declared on an event stream route, which always answers %d and then streams",
+		return fmt.Errorf("muzak: SSE %s %s: Status cannot be declared on an event stream route, which always answers %d and then streams",
 			rt.Method, rt.Path, http.StatusOK)
 	}
 	opts := in.sse
@@ -318,10 +318,10 @@ func (rt *Route) resolveSSE(in inherited) error {
 		opts = opts.overlay(*rt.cfg.sse)
 	}
 	if opts.MaxStreams != in.sseMaxStreams {
-		return fmt.Errorf("badele: SSE %s %s: MaxStreams may only be set on the application, because the streams it bounds belong to the process rather than to one route", rt.Method, rt.Path)
+		return fmt.Errorf("muzak: SSE %s %s: MaxStreams may only be set on the application, because the streams it bounds belong to the process rather than to one route", rt.Method, rt.Path)
 	}
 	if opts.MaxStreamsPerIP != in.sseMaxStreamsPerIP {
-		return fmt.Errorf("badele: SSE %s %s: MaxStreamsPerIP may only be set on the application, because the streams it bounds belong to the process rather than to one route", rt.Method, rt.Path)
+		return fmt.Errorf("muzak: SSE %s %s: MaxStreamsPerIP may only be set on the application, because the streams it bounds belong to the process rather than to one route", rt.Method, rt.Path)
 	}
 	rt.sse.opts = opts.withDefaults()
 	return nil
@@ -408,7 +408,7 @@ func (a *App) serveSSE(c *Context, stream *sseStream, call func() error) error {
 			// The client went away, or the server is shutting down. That is
 			// how a stream ends rather than something to report as a failure,
 			// but it is worth a line for anyone asking why one stopped.
-			a.logger.DebugContext(c.Context(), "badele: an event stream ended",
+			a.logger.DebugContext(c.Context(), "muzak: an event stream ended",
 				slog.String("route", c.route.Path),
 				slog.String(RequestIDKey, c.RequestID()),
 				slog.String("reason", err.Error()))
@@ -417,7 +417,7 @@ func (a *App) serveSSE(c *Context, stream *sseStream, call func() error) error {
 			// query, a path or a driver failure, none of which is theirs. The
 			// response began long ago in any case, so there is no status left
 			// to change.
-			a.logger.ErrorContext(c.Context(), "badele: an event stream handler failed",
+			a.logger.ErrorContext(c.Context(), "muzak: an event stream handler failed",
 				slog.String("route", c.route.Path),
 				slog.String(RequestIDKey, c.RequestID()),
 				slog.String("error", err.Error()))

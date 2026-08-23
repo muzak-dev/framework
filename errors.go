@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"encoding/json/jsontext"
@@ -44,7 +44,7 @@ type ErrorBody struct {
 	Details []ErrorDetail `json:"details,omitzero"`
 }
 
-// ErrorResponse is the JSON body Badele writes for every unsuccessful request.
+// ErrorResponse is the JSON body Muzak writes for every unsuccessful request.
 //
 // The shape is deliberately fixed and self-describing:
 //
@@ -70,7 +70,7 @@ type ErrorResponse struct {
 	RequestID string `json:"request_id,omitzero"`
 }
 
-// Error codes Badele uses by default. An [HTTPError] that does not set a code
+// Error codes Muzak uses by default. An [HTTPError] that does not set a code
 // of its own is given the one that matches its status.
 const (
 	// CodeBadRequest classifies a malformed request that could not be read at
@@ -105,18 +105,18 @@ const (
 	// code used for every error that does not describe itself, and the
 	// response never carries anything derived from the underlying cause.
 	CodeInternalError = "internal_error"
-	// CodeClientError classifies a 4xx that Badele has no more specific code
+	// CodeClientError classifies a 4xx that Muzak has no more specific code
 	// for.
 	CodeClientError = "client_error"
 )
 
-// Default messages for the outcomes Badele produces itself.
+// Default messages for the outcomes Muzak produces itself.
 const (
 	validationMessage = "The request could not be validated."
 	internalMessage   = "The server could not complete the request."
 )
 
-// statusCodes maps the statuses Badele produces onto their default machine
+// statusCodes maps the statuses Muzak produces onto their default machine
 // readable classifiers.
 var statusCodes = map[int]string{
 	http.StatusBadRequest:            CodeBadRequest,
@@ -133,7 +133,7 @@ var statusCodes = map[int]string{
 
 // CodeForStatus returns the default error code for an HTTP status.
 //
-// Statuses Badele recognises get a specific classifier such as "not_found";
+// Statuses Muzak recognises get a specific classifier such as "not_found";
 // any other 4xx becomes [CodeClientError] and everything else becomes
 // [CodeInternalError]. Use it when writing a custom [ErrorRenderer] that
 // should stay consistent with the built-in codes.
@@ -149,7 +149,7 @@ func CodeForStatus(status int) string {
 
 // StatusCoder is implemented by errors that carry their own HTTP status code.
 //
-// Badele consults it when turning a handler or dependency error into a
+// Muzak consults it when turning a handler or dependency error into a
 // response: an error that implements StatusCoder is considered deliberate and
 // its message is sent to the client, while any other error is treated as an
 // unexpected fault and reported as a bare 500 with the real cause logged but
@@ -250,7 +250,7 @@ func (e *HTTPError) WithDetails(details ...ErrorDetail) *HTTPError {
 }
 
 // ValidationError reports one or more fields that could not be bound from the
-// request. Badele renders it as a 422 classified "validation_error", with one
+// request. Muzak renders it as a 422 classified "validation_error", with one
 // entry in "details" per offending field, so a client learns about every
 // mistake at once instead of one per round trip.
 type ValidationError struct {
@@ -301,7 +301,7 @@ func (e *ValidationError) add(location, field, issue string) {
 // [DefaultErrorRenderer] does. Install one with [AppOptions.ErrorRenderer].
 type ErrorRenderer func(ctx *Context, err error) (status int, body any)
 
-// DefaultErrorRenderer produces Badele's standard [ErrorResponse] envelope.
+// DefaultErrorRenderer produces Muzak's standard [ErrorResponse] envelope.
 //
 // A [*ValidationError] becomes a 422 classified "validation_error" carrying
 // one detail per field. An error implementing [StatusCoder], including

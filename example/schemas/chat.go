@@ -1,7 +1,7 @@
 package schemas
 
 import (
-	"badele"
+	"muzak.dev/framework"
 )
 
 // ChatIn is the prompt a chat stream answers.
@@ -16,6 +16,6 @@ type ChatIn struct {
 
 // Validate bounds the prompt, and is applied before a byte of the stream is
 // written.
-func (in *ChatIn) Validate(v *badele.Validation) {
+func (in *ChatIn) Validate(v *muzak.Validation) {
 	v.String(&in.Text).Trim().Required().MinLen(1).MaxLen(280)
 }

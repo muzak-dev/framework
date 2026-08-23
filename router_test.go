@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"net/http"
@@ -133,7 +133,7 @@ func TestRegistrationErrors(t *testing.T) {
 			build: func(a *App) {
 				a.Get("/thing", func(ctx *Context, in string) (rtOut, error) { return rtOut{}, nil })
 			},
-			want: "must be a struct or badele.Empty",
+			want: "must be a struct or muzak.Empty",
 		},
 		{
 			name: "unsupported parameter type",
@@ -192,7 +192,7 @@ func TestBuildReportsEveryProblemAtOnce(t *testing.T) {
 	app.Get[Empty, rtOut]("/three", nil)
 
 	message := buildError(t, app)
-	if got := strings.Count(message, "badele:"); got < 3 {
+	if got := strings.Count(message, "muzak:"); got < 3 {
 		t.Errorf("the build reported %d problems, want at least 3\n%s", got, message)
 	}
 }
@@ -480,9 +480,9 @@ func TestAllowHeaderIncludesAutomaticMethods(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			methods := map[string]*Route{}
+			methods := map[string][]*Route{}
 			for _, m := range tc.methods {
-				methods[m] = &Route{Method: m}
+				methods[m] = []*Route{{Method: m}}
 			}
 			if got := allowHeader(methods); got != tc.want {
 				t.Errorf("allowHeader(%v) = %q, want %q", tc.methods, got, tc.want)

@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"net/http"
@@ -237,7 +237,7 @@ func TestPeerAddr(t *testing.T) {
 		{remote: "2001:db8::1", want: "2001:db8::1", ok: true},
 		{remote: "[::ffff:192.0.2.1]:80", want: "192.0.2.1", ok: true},
 		{remote: ""},
-		{remote: "/var/run/badele.sock"},
+		{remote: "/var/run/muzak.sock"},
 		{remote: "pipe"},
 	}
 	for _, tc := range cases {
@@ -370,7 +370,7 @@ func TestContextClientIPWithoutAnAddress(t *testing.T) {
 	app := mustBuild(t, clientIPApp(t, ClientIPOptions{}))
 
 	req := httptest.NewRequest(http.MethodGet, "/whoami", nil)
-	req.RemoteAddr = "/var/run/badele.sock"
+	req.RemoteAddr = "/var/run/muzak.sock"
 	rec := doRequest(t, app, req)
 	assertStatus(t, rec, http.StatusOK)
 	assertJSON(t, rec, `""`)

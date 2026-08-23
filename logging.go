@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 const ScopeKey = "scope"
 
 // Scopes used by the framework itself, so that application logs can be told
-// apart from Badele's own at a glance.
+// apart from Muzak's own at a glance.
 const (
 	// ScopeServer covers start-up, listening and shutdown.
 	ScopeServer = "Server"
@@ -39,7 +39,7 @@ const (
 // Give each subsystem its own scope so its lines line up in the console and
 // can be filtered in production:
 //
-//	log := badele.Scoped(app.Logger(), "UsersService")
+//	log := muzak.Scoped(app.Logger(), "UsersService")
 //	log.Info("user created", "user_id", 42)
 //
 // It returns logger unchanged when logger is nil, so it is safe to call on an

@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"encoding/json/v2"
@@ -340,7 +340,9 @@ func TestSchemaNameCollisions(t *testing.T) {
 	if second == "Contact" {
 		t.Error("the colliding name was reused")
 	}
-	if !strings.Contains(second, "badele") {
+	// The qualifier is the last element of the package path, so a type in
+	// muzak.dev/framework is disambiguated as "framework.Contact".
+	if !strings.Contains(second, "framework") {
 		t.Errorf("the qualified name %q does not carry the package", second)
 	}
 }
@@ -349,7 +351,9 @@ func TestShortPackage(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ in, want string }{
 		{"github.com/example/project/internal/models", "models"},
-		{"badele", "badele"},
+		{"muzak.dev/framework", "framework"},
+		// A path with no separator at all is already its own last element.
+		{"muzak", "muzak"},
 		{"", ""},
 	}
 	for _, tc := range tests {
@@ -594,7 +598,7 @@ func TestOpenAPIInfoDefaultsAndExtras(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Document = %v", err)
 	}
-	if doc.Info.Title != "Badele API" || doc.Info.Version != "0.1.0" {
+	if doc.Info.Title != "Muzak API" || doc.Info.Version != "0.1.0" {
 		t.Errorf("defaults = %q / %q", doc.Info.Title, doc.Info.Version)
 	}
 	if doc.Info.Description != "A described API." || doc.Info.TermsOfService == "" {

@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bytes"
@@ -298,8 +298,8 @@ func TestConsoleZeroTime(t *testing.T) {
 func TestTrimSourcePath(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ in, want string }{
-		{"/home/user/go/src/badele/logging.go", "badele/logging.go"},
-		{"badele/logging.go", "badele/logging.go"},
+		{"/home/user/go/src/muzak/logging.go", "muzak/logging.go"},
+		{"muzak/logging.go", "muzak/logging.go"},
 		{"logging.go", "logging.go"},
 		{"/logging.go", "/logging.go"},
 	}

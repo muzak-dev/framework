@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"fmt"
@@ -53,7 +53,7 @@ func (p *provider) get(c *Context) (any, error) {
 // error stops the chain and produces the response, so a guard that authorizes
 // a whole subtree can be declared once at the point of inclusion:
 //
-//	app.Include(admin.NewRouter(), badele.WithDependencies(GetTokenHeader))
+//	app.Include(admin.NewRouter(), muzak.WithDependencies(GetTokenHeader))
 //
 // Use [Needs] instead when the dependency must hand a value to the handler.
 func WithDependencies(guards ...Guard) SharedOption {
@@ -73,10 +73,10 @@ func WithDependencies(guards ...Guard) SharedOption {
 // The provider runs once per request, after every guard, and its result is
 // retrieved inside the handler with [From]:
 //
-//	r.Get("/items/{id}", func(ctx *badele.Context, in Params) (ItemOut, error) {
-//		user := badele.From[CurrentUser](ctx)
+//	r.Get("/items/{id}", func(ctx *muzak.Context, in Params) (ItemOut, error) {
+//		user := muzak.From[CurrentUser](ctx)
 //		return ItemOut{ID: in.ID, Owner: user.Username}, nil
-//	}, badele.Needs(GetCurrentUser))
+//	}, muzak.Needs(GetCurrentUser))
 //
 // The type parameter is inferred from the provider, so callers never write it
 // out. A provider that returns an error aborts the request, and that error is
@@ -105,7 +105,7 @@ func Needs[T any](provide func(ctx *Context) (T, error)) SharedOption {
 // Singleton declares a value dependency that is resolved once for the lifetime
 // of the application and shared by every request thereafter.
 //
-// It is the deliberate exception to Badele's request scoping, meant for
+// It is the deliberate exception to Muzak's request scoping, meant for
 // expensive, immutable values such as a parsed configuration or a compiled
 // template set. The provider runs on the first request that needs the value,
 // receiving that request's [Context]; it must not retain that Context, read
@@ -134,14 +134,14 @@ func Singleton[T any](provide func(ctx *Context) (T, error)) SharedOption {
 // application starts, so there is nothing to resolve and every request simply
 // receives it.
 //
-//	settings := badele.MustLoadConfig[Settings](badele.EnvFile(".env"))
-//	app := badele.New(badele.AppOptions{Title: "Awesome API"},
-//		badele.WithSingleton(settings),
+//	settings := muzak.MustLoadConfig[Settings](muzak.EnvFile(".env"))
+//	app := muzak.New(muzak.AppOptions{Title: "Awesome API"},
+//		muzak.WithSingleton(settings),
 //	)
 //
 // Handlers retrieve it by type, with no cast:
 //
-//	s := badele.From[Settings](ctx)
+//	s := muzak.From[Settings](ctx)
 //
 // If the value implements [Lifecycle], or a [LifecycleFunc] option is
 // supplied, the value is also registered as a lifecycle component: it is
@@ -205,8 +205,8 @@ func providerOption(p *provider) SharedOption {
 func From[T any](ctx *Context) T {
 	v, ok := TryFrom[T](ctx)
 	if !ok {
-		panic(fmt.Sprintf("badele: no dependency of type %s is declared for route %s %s; "+
-			"add badele.Needs(provider) to the route or an enclosing router",
+		panic(fmt.Sprintf("muzak: no dependency of type %s is declared for route %s %s; "+
+			"add muzak.Needs(provider) to the route or an enclosing router",
 			reflect.TypeFor[T](), ctx.route.Method, ctx.route.Path))
 	}
 	return v

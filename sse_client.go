@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bufio"
@@ -100,7 +100,7 @@ type SSEMessage struct {
 func (m SSEMessage) Decode[T any]() (T, error) {
 	var out T
 	if err := json.Unmarshal([]byte(m.Data), &out); err != nil {
-		return out, fmt.Errorf("badele: the event's data is not JSON that fits %T: %w", out, err)
+		return out, fmt.Errorf("muzak: the event's data is not JSON that fits %T: %w", out, err)
 	}
 	return out, nil
 }
@@ -111,7 +111,7 @@ func (m SSEMessage) Decode[T any]() (T, error) {
 // makes an SSE route testable end to end without a second implementation to
 // disagree with the first:
 //
-//	reader, _, err := badele.SSEDial(ctx, "http://"+app.Addr()+"/items/stream", badele.SSEDialOptions{})
+//	reader, _, err := muzak.SSEDial(ctx, "http://"+app.Addr()+"/items/stream", muzak.SSEDialOptions{})
 //	if err != nil {
 //		return err
 //	}
@@ -119,7 +119,7 @@ func (m SSEMessage) Decode[T any]() (T, error) {
 //
 //	for {
 //		message, err := reader.Next(ctx)
-//		if errors.Is(err, badele.ErrSSEStreamEnded) {
+//		if errors.Is(err, muzak.ErrSSEStreamEnded) {
 //			return nil
 //		}
 //		if err != nil {
@@ -147,7 +147,7 @@ func SSEDial(ctx context.Context, rawURL string, opts SSEDialOptions) (*SSEReade
 	}
 	request, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), rawURL, opts.Body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("badele: building the event stream request: %w", err)
+		return nil, nil, fmt.Errorf("muzak: building the event stream request: %w", err)
 	}
 	for name, values := range opts.Header {
 		for _, value := range values {
@@ -164,7 +164,7 @@ func SSEDial(ctx context.Context, rawURL string, opts SSEDialOptions) (*SSEReade
 
 	response, err := sseDialClient(opts.HTTPClient).Do(request)
 	if err != nil {
-		return nil, nil, fmt.Errorf("badele: the event stream request failed: %w", err)
+		return nil, nil, fmt.Errorf("muzak: the event stream request failed: %w", err)
 	}
 	if err := sseCheckResponse(response); err != nil {
 		return nil, sseBufferBody(response), err
@@ -175,11 +175,11 @@ func SSEDial(ctx context.Context, rawURL string, opts SSEDialOptions) (*SSEReade
 // sseCheckResponse reports a response that is not an event stream.
 func sseCheckResponse(response *http.Response) error {
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("badele: the event stream was refused with status %d", response.StatusCode)
+		return fmt.Errorf("muzak: the event stream was refused with status %d", response.StatusCode)
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || mediaType != "text/event-stream" {
-		return fmt.Errorf("badele: the response is %q, not an event stream", sseShorten(response.Header.Get("Content-Type")))
+		return fmt.Errorf("muzak: the response is %q, not an event stream", sseShorten(response.Header.Get("Content-Type")))
 	}
 	return nil
 }
@@ -432,7 +432,7 @@ func (r *SSEReader) abort(err error) {
 }
 
 // errSSEEventTooLarge reports an event larger than the reader accepts.
-var errSSEEventTooLarge = errors.New("badele: the event exceeds the reader's limit")
+var errSSEEventTooLarge = errors.New("muzak: the event exceeds the reader's limit")
 
 // readLine returns the next line of the stream without its terminator.
 //

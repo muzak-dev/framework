@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"badele"
+	"muzak.dev/framework"
 )
 
 // KeepComments delivers the comment lines of an event stream as messages of
@@ -66,7 +66,7 @@ func (c *Client) TrySSE(method, path string, opts ...RequestOption) (*SSEStream,
 	c.tb.Helper()
 	req, target := c.build(method, path, opts)
 
-	reader, httpResponse, err := badele.SSEDial(c.tb.Context(), target, badele.SSEDialOptions{
+	reader, httpResponse, err := muzak.SSEDial(c.tb.Context(), target, muzak.SSEDialOptions{
 		HTTPClient:   c.http,
 		Method:       method,
 		Body:         req.body,
@@ -115,13 +115,13 @@ type SSEStream struct {
 	tb      testing.TB
 	method  string
 	path    string
-	reader  *badele.SSEReader
+	reader  *muzak.SSEReader
 	timeout time.Duration
 }
 
 // Next returns the next event, failing the test if the stream ends or fails
 // first.
-func (s *SSEStream) Next() badele.SSEMessage {
+func (s *SSEStream) Next() muzak.SSEMessage {
 	s.tb.Helper()
 	message, err := s.TryNext()
 	if err != nil {
@@ -136,10 +136,10 @@ func (s *SSEStream) Next() badele.SSEMessage {
 // that expects it to end:
 //
 //	_, err := stream.TryNext()
-//	if !errors.Is(err, badele.ErrSSEStreamEnded) {
+//	if !errors.Is(err, muzak.ErrSSEStreamEnded) {
 //		t.Fatalf("err = %v, want the stream to have ended", err)
 //	}
-func (s *SSEStream) TryNext() (badele.SSEMessage, error) {
+func (s *SSEStream) TryNext() (muzak.SSEMessage, error) {
 	s.tb.Helper()
 	ctx := s.tb.Context()
 	if s.timeout > 0 {

@@ -1,11 +1,11 @@
-package badele
+package muzak
 
 import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"badele/validate"
+	"muzak.dev/framework/validate"
 )
 
 // locatedIn declares a rule for a field bound from every place a value can come

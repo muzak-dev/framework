@@ -5,8 +5,8 @@ import (
 	"slices"
 	"time"
 
-	"badele"
-	"badele-example/schemas"
+	"muzak.dev/framework"
+	"muzak.dev/framework/example/schemas"
 )
 
 // feedUpdatedAt stands in for the time the feed last changed, which a real
@@ -15,7 +15,7 @@ var feedUpdatedAt = time.Date(2026, time.August, 20, 9, 30, 0, 0, time.UTC)
 
 // feedEntries stands in for the feed itself.
 var feedEntries = []schemas.FeedEntry{
-	{ID: "1", Title: "Binding without reflection on the request path", Tags: []string{"go", "badele"},
+	{ID: "1", Title: "Binding without reflection on the request path", Tags: []string{"go", "muzak.dev/framework"},
 		Summary: "How the plan is compiled once, at start-up."},
 	{ID: "2", Title: "Uploads that cannot outgrow their limit", Tags: []string{"go", "http"},
 		Summary: "Why the body limit is enforced while the body is read."},
@@ -27,7 +27,7 @@ var feedEntries = []schemas.FeedEntry{
 //
 // Every header and cookie it reads is already bound and converted by the time
 // this runs, so the handler contains the decisions and none of the parsing.
-func Feed(ctx *badele.Context, in schemas.FeedIn) (schemas.FeedOut, error) {
+func Feed(ctx *muzak.Context, in schemas.FeedIn) (schemas.FeedOut, error) {
 	// A conditional request is answered without a body when nothing changed.
 	// The header was parsed into a time by the binder, so this is a comparison
 	// rather than a parse that could fail here.

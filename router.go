@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"errors"
@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Handler is the shape every Badele route handler takes.
+// Handler is the shape every Muzak route handler takes.
 //
 // In is the fully typed request: its fields are bound from the path, query
 // string, headers and JSON body according to their struct tags, and it is
@@ -81,6 +81,8 @@ type routerConfig struct {
 	sse                *SSEOptions
 	rateLimit          *RateLimitOptions
 	allowUnknownFields *bool
+	versions           []Version
+	versionsSet        bool
 	deprecated         bool
 	hidden             bool
 	skipRateLimit      bool
@@ -103,6 +105,8 @@ type routeConfig struct {
 	sse                *SSEOptions
 	rateLimit          *RateLimitOptions
 	allowUnknownFields *bool
+	versions           []Version
+	versionsSet        bool
 	skipValidation     bool
 	deprecated         bool
 	hidden             bool
@@ -128,6 +132,39 @@ func WithTags(tags ...string) SharedOption {
 	return sharedOption{
 		route:  func(c *routeConfig) { c.tags = append(c.tags, tags...) },
 		router: func(c *routerConfig) { c.tags = append(c.tags, tags...) },
+	}
+}
+
+// WithVersion declares the version(s) a router or route answers, for an
+// application with versioning enabled through [AppOptions.Versioning].
+//
+// Declaring it on a route overrides whatever an enclosing router declared,
+// exactly as [Status] overrides a router's declared default; declaring it on
+// a router applies to every route beneath it that does not declare its own.
+// A route or router that never declares one falls back to
+// [VersioningOptions.DefaultVersion], and if that is unset too, answers no
+// request at all while versioning is enabled: an application has to opt a
+// route into being unversioned deliberately, with [VersionNeutral], rather
+// than by omission.
+//
+//	admin := muzak.NewRouter(muzak.WithVersion("1"))
+//	admin.Get("/cats", findAllV1)
+//	admin.Get("/cats", findAllV2, muzak.WithVersion("2"))
+//	admin.Get("/health", health, muzak.WithVersion(muzak.VersionNeutral))
+//
+// Calling it with more than one version answers every one of them; calling
+// it with no versions at all is a build error, since there would be nothing
+// left for the declaration to mean. [VersionNeutral] cannot be combined with
+// another version in the same call, because it already answers every
+// request the narrower version would.
+func WithVersion(versions ...Version) SharedOption {
+	return sharedOption{
+		route: func(c *routeConfig) {
+			c.versions, c.versionsSet = versions, true
+		},
+		router: func(c *routerConfig) {
+			c.versions, c.versionsSet = versions, true
+		},
 	}
 }
 
@@ -167,7 +204,7 @@ func Description(description string) RouteOption {
 }
 
 // OperationID sets the operation's unique identifier in the OpenAPI document,
-// which client generators use to name the method they emit. When unset, Badele
+// which client generators use to name the method they emit. When unset, Muzak
 // derives one from the method and path. Identifiers must be unique across the
 // application; a collision is reported when the application is built.
 func OperationID(id string) RouteOption {
@@ -241,7 +278,7 @@ func MaxFileSize(bytes int64) SharedOption {
 // AllowUnknownFields relaxes JSON decoding so that members with no
 // corresponding field are ignored rather than rejected.
 //
-// Badele rejects unknown members by default, which turns a client's typo into
+// Muzak rejects unknown members by default, which turns a client's typo into
 // an immediate 422 instead of a silently dropped value. Opt out only where
 // forward compatibility with clients that send extra members matters more.
 // Duplicate object members and invalid UTF-8 remain rejected regardless.
@@ -291,6 +328,13 @@ type Route struct {
 	// Status is the status code written when the handler succeeds without
 	// calling [Context.SetStatus].
 	Status int
+	// Versions lists the versions this route answers, resolved from
+	// [WithVersion] and [VersioningOptions.DefaultVersion]. It is empty for
+	// an application that never enables versioning, and also, deliberately,
+	// for a route that answers no request at all because versioning is
+	// enabled but neither it nor anything it is declared under named a
+	// version; see [WithVersion].
+	Versions []Version
 
 	guards             []Guard
 	providers          []*provider
@@ -345,8 +389,8 @@ type include struct {
 // NewRouter function returning its own routes, and the application decides
 // where to mount them and what guards apply.
 //
-//	func NewRouter() *badele.Router {
-//		r := badele.NewRouter(badele.WithTags("users"))
+//	func NewRouter() *muzak.Router {
+//		r := muzak.NewRouter(muzak.WithTags("users"))
 //		r.Get("/users/me", currentUser)
 //		return r
 //	}
@@ -383,10 +427,10 @@ func NewRouter(opts ...RouterOption) *Router {
 // parent, with the include's options layered in between:
 //
 //	app.Include(admin.NewRouter(),
-//		badele.WithPrefix("/admin"),
-//		badele.WithTags("admin"),
-//		badele.WithDependencies(GetTokenHeader),
-//		badele.WithResponseDoc(418, "I'm a teapot"),
+//		muzak.WithPrefix("/admin"),
+//		muzak.WithTags("admin"),
+//		muzak.WithDependencies(GetTokenHeader),
+//		muzak.WithResponseDoc(418, "I'm a teapot"),
 //	)
 //
 // Guards contributed by the parent run before those contributed here, which
@@ -395,11 +439,11 @@ func NewRouter(opts ...RouterOption) *Router {
 // has a single resolved path.
 func (r *Router) Include(child *Router, opts ...RouterOption) {
 	if child == nil {
-		r.errs = append(r.errs, errors.New("badele: Include was given a nil router"))
+		r.errs = append(r.errs, errors.New("muzak: Include was given a nil router"))
 		return
 	}
 	if child == r {
-		r.errs = append(r.errs, errors.New("badele: a router cannot include itself"))
+		r.errs = append(r.errs, errors.New("muzak: a router cannot include itself"))
 		return
 	}
 	cfg := routerConfig{}
@@ -421,7 +465,7 @@ func (r *Router) Routes() []*Route {
 // The input and output types are inferred from the handler literal, so the
 // type arguments are never written at the call site:
 //
-//	r.Get("/users/{username}", func(ctx *badele.Context, in Params) (UserOut, error) {
+//	r.Get("/users/{username}", func(ctx *muzak.Context, in Params) (UserOut, error) {
 //		return UserOut{Username: in.Username}, nil
 //	})
 //
@@ -501,11 +545,11 @@ func register[In, Out any](r *Router, method, path string, h Handler[In, Out], o
 		opt.applyRoute(&rt.cfg)
 	}
 	if h == nil {
-		r.errs = append(r.errs, fmt.Errorf("badele: %s %s: handler is nil", method, path))
+		r.errs = append(r.errs, fmt.Errorf("muzak: %s %s: handler is nil", method, path))
 		return rt
 	}
 	if !strings.HasPrefix(path, "/") {
-		r.errs = append(r.errs, fmt.Errorf("badele: %s %s: path must begin with %q", method, path, "/"))
+		r.errs = append(r.errs, fmt.Errorf("muzak: %s %s: path must begin with %q", method, path, "/"))
 		return rt
 	}
 
@@ -555,6 +599,7 @@ type inherited struct {
 	sseMaxStreamsPerIP    int
 	rateLimit             RateLimitOptions
 	allowUnknownFields    bool
+	versions              []Version
 	deprecated            bool
 	hidden                bool
 	skipRateLimit         bool
@@ -580,6 +625,7 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		sseMaxStreamsPerIP:    in.sseMaxStreamsPerIP,
 		rateLimit:             in.rateLimit,
 		allowUnknownFields:    in.allowUnknownFields,
+		versions:              in.versions,
 		deprecated:            in.deprecated || cfg.deprecated,
 		hidden:                in.hidden || cfg.hidden,
 		skipRateLimit:         in.skipRateLimit || cfg.skipRateLimit,
@@ -605,6 +651,9 @@ func (in inherited) merge(cfg routerConfig) inherited {
 	if cfg.allowUnknownFields != nil {
 		out.allowUnknownFields = *cfg.allowUnknownFields
 	}
+	if cfg.versionsSet {
+		out.versions = cfg.versions
+	}
 	return out
 }
 
@@ -626,7 +675,7 @@ func concat[T any](a, b []T) []T {
 // reports every problem in a single pass.
 func (r *Router) finalize(in inherited, emit func(*Route) error, state *buildState) {
 	if r.mounted {
-		state.errs = append(state.errs, errors.New("badele: a router was included more than once; build a separate router for each mount point"))
+		state.errs = append(state.errs, errors.New("muzak: a router was included more than once; build a separate router for each mount point"))
 		return
 	}
 	r.mounted = true
@@ -683,7 +732,7 @@ func (rt *Route) resolve(in inherited) error {
 		rt.Status = http.StatusSwitchingProtocols
 	}
 	if rt.Status != clampStatus(rt.Status) {
-		return fmt.Errorf("badele: %s %s: declared status %d is not a valid HTTP status code", rt.Method, rt.Path, cfg.status)
+		return fmt.Errorf("muzak: %s %s: declared status %d is not a valid HTTP status code", rt.Method, rt.Path, cfg.status)
 	}
 
 	rt.maxBodySize = in.maxBodySize
@@ -704,6 +753,17 @@ func (rt *Route) resolve(in inherited) error {
 	}
 	rt.skipValidation = cfg.skipValidation
 
+	rt.Versions = in.versions
+	if cfg.versionsSet {
+		rt.Versions = cfg.versions
+	}
+	if cfg.versionsSet && len(cfg.versions) == 0 {
+		return fmt.Errorf("muzak: %s %s: WithVersion was called with no versions", rt.Method, rt.Path)
+	}
+	if err := validateVersionList(rt.Versions, fmt.Sprintf("%s %s", rt.Method, rt.Path)); err != nil {
+		return err
+	}
+
 	// Rate limiting is resolved before the protocol branches below, because a
 	// WebSocket route's message limits are built from the same policy.
 	if err := rt.resolveRateLimit(in); err != nil {
@@ -713,6 +773,15 @@ func (rt *Route) resolve(in inherited) error {
 	rt.OperationID = cfg.operationID
 	if rt.OperationID == "" {
 		rt.OperationID = deriveOperationID(rt.Method, rt.Path)
+		// A header, media type or custom versioning scheme can register more
+		// than one route at this exact method and path, distinguished only
+		// by the version each answers rather than by the path itself, which
+		// would otherwise derive the identical ID for every one of them.
+		// [VersioningURI] does not need this: its own expansion re-derives
+		// the ID from each version's own, already-distinct path.
+		if len(rt.Versions) > 0 && !rt.isVersionNeutral() {
+			rt.OperationID += "_" + versionSuffix(rt.Versions)
+		}
 	}
 
 	plan, err := newBindPlan(rt.inType, rt.Method, rt.Path)
@@ -744,10 +813,10 @@ func validatePrefix(prefix string) error {
 		return nil
 	}
 	if !strings.HasPrefix(prefix, "/") {
-		return fmt.Errorf("badele: route prefix %q must begin with %q", prefix, "/")
+		return fmt.Errorf("muzak: route prefix %q must begin with %q", prefix, "/")
 	}
 	if strings.HasSuffix(prefix, "/") {
-		return fmt.Errorf("badele: route prefix %q must not end with %q, because route paths already begin with one", prefix, "/")
+		return fmt.Errorf("muzak: route prefix %q must not end with %q, because route paths already begin with one", prefix, "/")
 	}
 	return nil
 }

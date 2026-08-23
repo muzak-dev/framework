@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bytes"
@@ -313,7 +313,7 @@ func BenchmarkBaselineServeMux(b *testing.B) {
 	}
 }
 
-// BenchmarkRouteParamBare measures a Badele route with the optional middleware
+// BenchmarkRouteParamBare measures a Muzak route with the optional middleware
 // removed, which isolates routing, binding and encoding from the request
 // identifier and the security headers.
 func BenchmarkRouteParamBare(b *testing.B) {

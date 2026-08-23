@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	"badele"
-	"badele/validate"
+	"muzak.dev/framework"
+	"muzak.dev/framework/validate"
 )
 
 // HTTPDate is a time carried in the format HTTP dates use.
@@ -81,7 +81,7 @@ type FeedIn struct {
 // as a query parameter is and its failure is reported against the header name
 // the client sent. Transforms run first, which is what lets Save-Data be
 // compared against a single spelling further down.
-func (in *FeedIn) Validate(v *badele.Validation) {
+func (in *FeedIn) Validate(v *muzak.Validation) {
 	v.String(&in.SaveData).Trim().Lower().OneOf("on", "off")
 	v.String(&in.Traceparent).Matches(`^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`).
 		Message("must be a W3C trace context, such as 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")

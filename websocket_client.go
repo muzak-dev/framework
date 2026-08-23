@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bufio"
@@ -54,11 +54,11 @@ type WSDialOptions struct {
 // implementation to disagree with the first. The URL may be written with
 // either the ws and wss schemes or the http and https ones.
 //
-//	conn, _, err := badele.WSDial(ctx, "ws://"+app.Addr()+"/items/plumbus/ws", badele.WSDialOptions{})
+//	conn, _, err := muzak.WSDial(ctx, "ws://"+app.Addr()+"/items/plumbus/ws", muzak.WSDialOptions{})
 //	if err != nil {
 //		return err
 //	}
-//	defer conn.Close(badele.WSStatusNormalClosure, "")
+//	defer conn.Close(muzak.WSStatusNormalClosure, "")
 //
 // The response is returned alongside the connection so that a caller can read
 // the headers of the handshake, and on failure so that it can read the status
@@ -76,7 +76,7 @@ func WSDial(ctx context.Context, rawURL string, opts WSDialOptions) (*WSConn, *h
 	var keyBytes [16]byte
 	if _, err := crand.Read(keyBytes[:]); err != nil {
 		// coverage: crypto/rand does not fail on any supported platform.
-		return nil, nil, fmt.Errorf("badele: generating a websocket key: %w", err)
+		return nil, nil, fmt.Errorf("muzak: generating a websocket key: %w", err)
 	}
 	key := base64.StdEncoding.EncodeToString(keyBytes[:])
 
@@ -84,7 +84,7 @@ func WSDial(ctx context.Context, rawURL string, opts WSDialOptions) (*WSConn, *h
 	if err != nil {
 		// coverage: the URL was already parsed above, so building the request
 		// cannot fail for any reason a caller could produce.
-		return nil, nil, fmt.Errorf("badele: building the websocket handshake: %w", err)
+		return nil, nil, fmt.Errorf("muzak: building the websocket handshake: %w", err)
 	}
 	for name, values := range opts.Header {
 		for _, value := range values {
@@ -101,11 +101,11 @@ func WSDial(ctx context.Context, rawURL string, opts WSDialOptions) (*WSConn, *h
 
 	response, err := wsDialClient(opts.HTTPClient).Do(request)
 	if err != nil {
-		return nil, nil, fmt.Errorf("badele: the websocket handshake failed: %w", err)
+		return nil, nil, fmt.Errorf("muzak: the websocket handshake failed: %w", err)
 	}
 	if response.StatusCode != http.StatusSwitchingProtocols {
 		return nil, wsBufferBody(response), fmt.Errorf(
-			"badele: the websocket handshake was refused with status %d", response.StatusCode)
+			"muzak: the websocket handshake was refused with status %d", response.StatusCode)
 	}
 
 	conn, err := wsClientConn(response, key, opts)
@@ -120,7 +120,7 @@ func WSDial(ctx context.Context, rawURL string, opts WSDialOptions) (*WSConn, *h
 func wsClientConn(response *http.Response, key string, opts WSDialOptions) (*WSConn, error) {
 	if !headerHasToken(response.Header, "Upgrade", "websocket") ||
 		!headerHasToken(response.Header, "Connection", "upgrade") {
-		return nil, fmt.Errorf("badele: the server answered 101 without upgrading to websocket")
+		return nil, fmt.Errorf("muzak: the server answered 101 without upgrading to websocket")
 	}
 	expected, err := wsAcceptKey(key)
 	if err != nil {
@@ -129,20 +129,20 @@ func wsClientConn(response *http.Response, key string, opts WSDialOptions) (*WSC
 		return nil, err
 	}
 	if response.Header.Get("Sec-WebSocket-Accept") != expected {
-		return nil, fmt.Errorf("badele: the server's Sec-WebSocket-Accept header does not match the key that was sent")
+		return nil, fmt.Errorf("muzak: the server's Sec-WebSocket-Accept header does not match the key that was sent")
 	}
 	subprotocol := response.Header.Get("Sec-WebSocket-Protocol")
 	if subprotocol != "" && !slices.Contains(opts.Subprotocols, subprotocol) {
 		// A server may only choose from what the client offered. Accepting
 		// anything else would let it pick the protocol the conversation is
 		// interpreted under.
-		return nil, fmt.Errorf("badele: the server chose the subprotocol %q, which was not offered", subprotocol)
+		return nil, fmt.Errorf("muzak: the server chose the subprotocol %q, which was not offered", subprotocol)
 	}
 	transport, ok := response.Body.(io.ReadWriteCloser)
 	if !ok {
 		// coverage: net/http hands back a read-write body for every 101 that
 		// carries the upgrade headers checked above.
-		return nil, fmt.Errorf("badele: the switched connection cannot be written to")
+		return nil, fmt.Errorf("muzak: the switched connection cannot be written to")
 	}
 
 	settings := WSOptions{
@@ -180,7 +180,7 @@ func wsDialClient(client *http.Client) *http.Client {
 func wsRequestURL(rawURL string) (string, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("badele: the websocket address could not be parsed: %w", err)
+		return "", fmt.Errorf("muzak: the websocket address could not be parsed: %w", err)
 	}
 	switch parsed.Scheme {
 	case "ws", "http":
@@ -188,7 +188,7 @@ func wsRequestURL(rawURL string) (string, error) {
 	case "wss", "https":
 		parsed.Scheme = "https"
 	default:
-		return "", fmt.Errorf("badele: %q is not a websocket address; use ws, wss, http or https", rawURL)
+		return "", fmt.Errorf("muzak: %q is not a websocket address; use ws, wss, http or https", rawURL)
 	}
 	return parsed.String(), nil
 }

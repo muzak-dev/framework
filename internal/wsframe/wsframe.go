@@ -66,7 +66,7 @@ func (op Opcode) String() string {
 }
 
 // Close status codes used by this package when it refuses a frame. The full
-// set lives in the badele package, which is what a handler sees; these are the
+// set lives in the muzak package, which is what a handler sees; these are the
 // few the codec itself has to name.
 const (
 	// StatusNormalClosure reports a connection closed because its purpose was
@@ -107,7 +107,7 @@ type Header struct {
 	// Fin reports whether this frame completes its message.
 	Fin bool
 	// RSV1, RSV2 and RSV3 are the reserved bits. They carry meaning only for a
-	// negotiated extension, and Badele negotiates none, so a set bit is a
+	// negotiated extension, and Muzak negotiates none, so a set bit is a
 	// protocol violation.
 	RSV1, RSV2, RSV3 bool
 	// Opcode says what the frame carries.
@@ -160,7 +160,7 @@ func ReadHeader(r io.Reader) (Header, error) {
 		return h, &Error{Status: StatusProtocolError, Reason: "reserved opcode " + h.Opcode.String()}
 	}
 	if h.RSV1 || h.RSV2 || h.RSV3 {
-		// A reserved bit means an extension is in use. Badele negotiates none,
+		// A reserved bit means an extension is in use. Muzak negotiates none,
 		// so the peer is sending something this connection agreed not to.
 		return h, &Error{Status: StatusProtocolError, Reason: "a reserved bit is set but no extension was negotiated"}
 	}

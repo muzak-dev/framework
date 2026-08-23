@@ -1,4 +1,4 @@
-// Package badele is a type-safe web framework for Go that brings FastAPI's
+// Package muzak is a type-safe web framework for Go that brings FastAPI's
 // developer experience to the language without giving up the compiler.
 //
 // A handler is an ordinary typed function. Its input type is the request, its
@@ -13,7 +13,7 @@
 //		Username string `json:"username"`
 //	}
 //
-//	r.Get("/users/{username}", func(ctx *badele.Context, in Params) (UserOut, error) {
+//	r.Get("/users/{username}", func(ctx *muzak.Context, in Params) (UserOut, error) {
 //		return UserOut{Username: in.Username}, nil
 //	})
 //
@@ -29,19 +29,19 @@
 // package exports its own routes and stays unaware of the prefix, tags and
 // guards under which it will eventually run:
 //
-//	app := badele.New(badele.AppOptions{
+//	app := muzak.New(muzak.AppOptions{
 //		Title:   "Bigger Applications Example",
 //		Version: "1.0.0",
 //		Addr:    ":8080",
-//	}, badele.WithDependencies(GetQueryToken))
+//	}, muzak.WithDependencies(GetQueryToken))
 //
 //	app.Include(users.NewRouter())
 //	app.Include(items.NewRouter())
 //	app.Include(admin.NewRouter(),
-//		badele.WithPrefix("/admin"),
-//		badele.WithTags("admin"),
-//		badele.WithDependencies(GetTokenHeader),
-//		badele.WithResponseDoc(418, "I'm a teapot"),
+//		muzak.WithPrefix("/admin"),
+//		muzak.WithTags("admin"),
+//		muzak.WithDependencies(GetTokenHeader),
+//		muzak.WithResponseDoc(418, "I'm a teapot"),
 //	)
 //
 //	log.Fatal(app.RunSignals())
@@ -61,9 +61,9 @@
 //
 // Dependencies come in two shapes. A guard validates and produces nothing:
 //
-//	func GetQueryToken(ctx *badele.Context) error {
+//	func GetQueryToken(ctx *muzak.Context) error {
 //		if ctx.Query("token") == "" {
-//			return badele.NewHTTPError(400, "token is required")
+//			return muzak.NewHTTPError(400, "token is required")
 //		}
 //		return nil
 //	}
@@ -71,10 +71,10 @@
 // A provider produces a typed value, retrieved in the handler with [From] and
 // checked by the compiler, with no cast anywhere in application code:
 //
-//	r.Get("/items/{id}", func(ctx *badele.Context, in Params) (ItemOut, error) {
-//		user := badele.From[CurrentUser](ctx)
+//	r.Get("/items/{id}", func(ctx *muzak.Context, in Params) (ItemOut, error) {
+//		user := muzak.From[CurrentUser](ctx)
 //		return ItemOut{ID: in.ID, Owner: user.Username}, nil
-//	}, badele.Needs(GetCurrentUser))
+//	}, muzak.Needs(GetCurrentUser))
 //
 // Guards attach to an application or a router with [WithDependencies] and
 // cover everything beneath them; providers attach per route with [Needs].
@@ -91,18 +91,18 @@
 // []byte reads it straight into memory:
 //
 //	type UploadFileIn struct {
-//		File badele.File `file:"file" doc:"A file read as an upload"`
+//		File muzak.File `file:"file" doc:"A file read as an upload"`
 //	}
 //
-//	r.Post("/uploadfile/", func(ctx *badele.Context, in UploadFileIn) (UploadFileOut, error) {
+//	r.Post("/uploadfile/", func(ctx *muzak.Context, in UploadFileIn) (UploadFileOut, error) {
 //		return UploadFileOut{Filename: in.File.Filename}, nil
 //	})
 //
-// Declaring the field as []badele.File, or as [][]byte, accepts every file
+// Declaring the field as []muzak.File, or as [][]byte, accepts every file
 // sent under the name instead of one:
 //
 //	type MultiUploadIn struct {
-//		Files []badele.File `file:"files"`
+//		Files []muzak.File `file:"files"`
 //	}
 //
 // A field tagged `form:"name"` is bound from a form value, converted by the
@@ -124,8 +124,8 @@
 // A handler that returns [HTML] writes an HTML document instead of JSON, which
 // is what serving an upload form from the same application takes:
 //
-//	r.Get("/", func(ctx *badele.Context, _ badele.Empty) (badele.HTML, error) {
-//		return badele.HTML(`<form action="/files/" enctype="multipart/form-data" method="post">` +
+//	r.Get("/", func(ctx *muzak.Context, _ muzak.Empty) (muzak.HTML, error) {
+//		return muzak.HTML(`<form action="/files/" enctype="multipart/form-data" method="post">` +
 //			`<input name="files" type="file" multiple><input type="submit"></form>`), nil
 //	})
 //
@@ -136,7 +136,7 @@
 // installs more inside that chain, so anything added there already has an
 // identifier and is already covered by recovery:
 //
-//	app.Use(badele.Compress(badele.CompressionOptions{}))
+//	app.Use(muzak.Compress(muzak.CompressionOptions{}))
 //
 // Two are ready to use. [CORS] is configured rather than installed: a policy on
 // [AppOptions.CORS] installs it, and no policy at all means no CORS header is
@@ -165,11 +165,11 @@
 // several quotas at once, because one number cannot tell a burst from sustained
 // abuse:
 //
-//	app := badele.New(badele.AppOptions{Title: "Shop"},
-//		badele.WithRateLimit(badele.RateLimitOptions{
+//	app := muzak.New(muzak.AppOptions{Title: "Shop"},
+//		muzak.WithRateLimit(muzak.RateLimitOptions{
 //			Storage: NewRedisRateLimitStorage(settings.RedisAddr),
 //			Tracker: UserOrIPTracker,
-//			Quotas: []badele.Quota{
+//			Quotas: []muzak.Quota{
 //				{Name: "short", Window: time.Second, Limit: 3},
 //				{Name: "medium", Window: 10 * time.Second, Limit: 20},
 //				{Name: "long", Window: time.Minute, Limit: 100},
@@ -195,8 +195,8 @@
 // for one route, which is what a login route wants, and [SkipRateLimit] exempts
 // one, which is what a health check wants:
 //
-//	r.Get("/health", health, badele.SkipRateLimit())
-//	r.Post("/login", login, badele.RateLimit(badele.Quota{Name: "login", Window: time.Minute, Limit: 5}))
+//	r.Get("/health", health, muzak.SkipRateLimit())
+//	r.Post("/login", login, muzak.RateLimit(muzak.Quota{Name: "login", Window: time.Minute, Limit: 5}))
 //
 // The count happens before the route's guards and dependencies, so a client
 // past its limit is refused before anything expensive runs on its behalf and a
@@ -209,6 +209,37 @@
 // [WSOptions.MessageLimits] applies the same quotas, storage and tracker to the
 // messages a connected peer sends, which is the one thing the other WebSocket
 // bounds do not cover.
+//
+// # Versioning
+//
+// Versioning is off until [AppOptions.Versioning] names a [VersioningType]. A
+// route or router opts into a version with [WithVersion], and a route without
+// one answers no request at all once versioning is on, unless
+// [VersioningOptions.DefaultVersion] supplies it or the route is deliberately
+// marked [VersionNeutral], which answers every version, including a request
+// naming none:
+//
+//	app := muzak.New(muzak.AppOptions{
+//		Versioning: muzak.VersioningOptions{Type: muzak.VersioningURI},
+//	})
+//	r.Get("/cats", findAllV1, muzak.WithVersion("1"))
+//	r.Get("/cats", findAllV2, muzak.WithVersion("2"))
+//	r.Get("/health", health, muzak.WithVersion(muzak.VersionNeutral))
+//
+// [VersioningURI] reads the version from the path itself, inserting a prefix
+// ("v" by default; see [VersioningOptions.Prefix]) in front of every route
+// that declares one, so findAllV1 above answers "/v1/cats". A route naming
+// more than one version is registered once per version, each at its own path,
+// because there the version is part of routing rather than something read
+// off the request. [VersioningHeader], [VersioningMediaType] and
+// [VersioningCustom] instead leave the path alone and read the version from a
+// header, from a parameter of the Accept header, or from
+// [VersioningOptions.Extractor], matching whichever registered route answers
+// it; more than one such route may share a path so long as their versions
+// never overlap, which is checked when the application is built.
+// [VersioningCustom] alone can offer several versions in order of
+// preference, matched from most to least preferred against whatever a route
+// actually answers.
 //
 // # WebSockets
 //
@@ -223,8 +254,8 @@
 //		Q      *int   `query:"q"`
 //	}
 //
-//	r.WS("/items/{item_id}/ws", func(ctx *badele.Context, in WSItemIn, conn *badele.WSConn) error {
-//		session := badele.From[SessionOrToken](ctx)
+//	r.WS("/items/{item_id}/ws", func(ctx *muzak.Context, in WSItemIn, conn *muzak.WSConn) error {
+//		session := muzak.From[SessionOrToken](ctx)
 //		for {
 //			message, err := conn.ReadText(ctx.Context())
 //			if err != nil {
@@ -235,7 +266,7 @@
 //			}
 //			_ = session
 //		}
-//	}, badele.Needs(GetSessionOrToken))
+//	}, muzak.Needs(GetSessionOrToken))
 //
 // A request that fails to bind, or a guard that refuses, is answered with the
 // usual JSON error and never becomes a connection at all, which is what makes
@@ -297,7 +328,7 @@
 // It checks what a server answers rather than trusting it, and never follows a
 // redirect, because following one would send the headers of the handshake to
 // whatever host the answer named. The test client wraps it as
-// [badele/testclient.Client.WS].
+// [muzak.dev/framework/testclient.Client.WS].
 //
 // # Server-sent events
 //
@@ -310,7 +341,7 @@
 //		Room string `path:"room"`
 //	}
 //
-//	r.SSE("/rooms/{room}/stream", func(ctx *badele.Context, in StreamIn, stream *badele.SSEStream[MessageOut]) error {
+//	r.SSE("/rooms/{room}/stream", func(ctx *muzak.Context, in StreamIn, stream *muzak.SSEStream[MessageOut]) error {
 //		for message := range room(in.Room).Messages(stream.Context()) {
 //			if err := stream.Send(message); err != nil {
 //				return err
@@ -385,14 +416,14 @@
 //
 // [SSEDial] is the reading end of the same engine, so a stream route is tested
 // over a real connection rather than against a second implementation, and the
-// test client wraps it as [badele/testclient.Client.SSE].
+// test client wraps it as [muzak.dev/framework/testclient.Client.SSE].
 //
 // # Serving a frontend
 //
 // [Router.Frontend] serves the static output of a frontend build, which is what
 // React, Vue, Svelte, Angular, Solid and Astro produce:
 //
-//	app.Frontend("/", badele.FrontendOptions{Dir: "dist"})
+//	app.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
 //
 // Routes win. A request is matched against every registered route first and
 // reaches the frontend only when none of them answered, so mounting at the root
@@ -416,7 +447,7 @@
 //	//go:embed all:dist
 //	var assets embed.FS
 //
-//	app.Frontend("/", badele.FrontendOptions{FS: assets, Dir: "dist"})
+//	app.Frontend("/", muzak.FrontendOptions{FS: assets, Dir: "dist"})
 //
 // Nothing is rendered on the server and nothing is built here. A directory is
 // never listed, a symbolic link cannot lead out of the build output, a method
@@ -427,7 +458,7 @@
 // [Router.Static] mounts a directory of files on the same machinery, without
 // the part that makes a frontend work:
 //
-//	app.Static("/static", badele.StaticOptions{Dir: "static"})
+//	app.Static("/static", muzak.StaticOptions{Dir: "static"})
 //
 // Nothing stands in for a path with no file behind it, so a miss is a 404 and
 // stays one, and a directory is served by its index.html only when
@@ -470,7 +501,7 @@
 //
 // # Defaults worth knowing
 //
-// Badele starts from settings that are safe rather than permissive. Every
+// Muzak starts from settings that are safe rather than permissive. Every
 // listener timeout is non-zero, request bodies are capped at one mebibyte and
 // uploads at 32, WebSocket messages at one mebibyte, unknown JSON members are
 // rejected, duplicate members and invalid UTF-8 are refused by
@@ -491,8 +522,8 @@
 //
 // # Testing
 //
-// The badele/testclient package serves an application in-process and issues
+// The muzak.dev/framework/testclient package serves an application in-process and issues
 // real requests against it, so a test exercises middleware, routing, binding,
 // dependencies and error rendering together rather than any one of them in
 // isolation.
-package badele
+package muzak

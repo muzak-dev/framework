@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"compress/flate"
@@ -148,12 +148,12 @@ func (o CompressionOptions) compressible(contentType string) bool {
 //
 // Install it with [App.Use]:
 //
-//	app.Use(badele.Compress(badele.CompressionOptions{}))
+//	app.Use(muzak.Compress(muzak.CompressionOptions{}))
 //
 // Compression and secrecy interact badly. When a response mixes a secret with
 // something the client controls, its compressed length leaks how much the two
 // have in common, which is what the BREACH attack recovers a token from over
-// many requests. Badele's own responses do not mix the two, but a handler that
+// many requests. Muzak's own responses do not mix the two, but a handler that
 // reflects a query parameter back alongside a CSRF token does. Where that is
 // possible, leave compression off for the route or stop reflecting the input.
 func Compress(opts CompressionOptions) Middleware {
@@ -241,7 +241,7 @@ type compressorPool struct {
 //
 // The decision needs the status, the media type and the length. The first two
 // are known when the header is written; the length is too when the handler
-// declared Content-Length, which every response Badele encodes does. A handler
+// declared Content-Length, which every response Muzak encodes does. A handler
 // that writes the body itself declares no length, so the first writes are held
 // until either the minimum size is passed or the handler finishes.
 type compressWriter struct {

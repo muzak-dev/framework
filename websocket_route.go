@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bufio"
@@ -188,8 +188,8 @@ type WSOptions struct {
 	// many peers there are, but neither bounds a peer that stays inside both
 	// and simply never pauses. This is what does:
 	//
-	//	badele.WithWebSocket(badele.WSOptions{
-	//		MessageLimits: []badele.Quota{{Name: "ws-messages", Window: time.Second, Limit: 20}},
+	//	muzak.WithWebSocket(muzak.WSOptions{
+	//		MessageLimits: []muzak.Quota{{Name: "ws-messages", Window: time.Second, Limit: 20}},
 	//	})
 	//
 	// Messages are what is counted, one per message the handler reads, which
@@ -315,9 +315,9 @@ func (o WSOptions) withDefaults() WSOptions {
 // WithWebSocket configures the WebSocket connections of a route, or of every
 // route beneath a router.
 //
-//	chat := badele.NewRouter()
+//	chat := muzak.NewRouter()
 //	chat.WS("/rooms/{room}/ws", joinRoom)
-//	app.Include(chat, badele.WithWebSocket(badele.WSOptions{
+//	app.Include(chat, muzak.WithWebSocket(muzak.WSOptions{
 //		ReadLimit:      64 << 10,
 //		PingInterval:   30 * time.Second,
 //		AllowedOrigins: []string{"https://app.example.com"},
@@ -333,7 +333,7 @@ func WithWebSocket(opts WSOptions) SharedOption {
 	}
 }
 
-// WSHandler is the shape every Badele WebSocket handler takes.
+// WSHandler is the shape every Muzak WebSocket handler takes.
 //
 // In is bound from the request exactly as it is for any other route, from the
 // path, query string, headers and cookies of the handshake. There is no output
@@ -368,8 +368,8 @@ type wsConfig struct {
 //		Q      *int   `query:"q"`
 //	}
 //
-//	r.WS("/items/{item_id}/ws", func(ctx *badele.Context, in WSItemIn, conn *badele.WSConn) error {
-//		token := badele.From[SessionOrToken](ctx)
+//	r.WS("/items/{item_id}/ws", func(ctx *muzak.Context, in WSItemIn, conn *muzak.WSConn) error {
+//		token := muzak.From[SessionOrToken](ctx)
 //		for {
 //			message, err := conn.ReadText(ctx.Context())
 //			if err != nil {
@@ -380,7 +380,7 @@ type wsConfig struct {
 //			}
 //			_ = token
 //		}
-//	}, badele.Needs(GetSessionOrToken))
+//	}, muzak.Needs(GetSessionOrToken))
 //
 // The connection is closed when the handler returns, so a handler owns its
 // connection for as long as it runs and never has to arrange for the teardown
@@ -403,11 +403,11 @@ func (r *Router) WS[In any](path string, h WSHandler[In], opts ...RouteOption) *
 		opt.applyRoute(&rt.cfg)
 	}
 	if h == nil {
-		r.errs = append(r.errs, fmt.Errorf("badele: WS %s: handler is nil", path))
+		r.errs = append(r.errs, fmt.Errorf("muzak: WS %s: handler is nil", path))
 		return rt
 	}
 	if !strings.HasPrefix(path, "/") {
-		r.errs = append(r.errs, fmt.Errorf("badele: WS %s: path must begin with %q", path, "/"))
+		r.errs = append(r.errs, fmt.Errorf("muzak: WS %s: path must begin with %q", path, "/"))
 		return rt
 	}
 
@@ -437,11 +437,11 @@ func (r *Router) WS[In any](path string, h WSHandler[In], opts ...RouteOption) *
 // mistakes a WebSocket route can be declared with.
 func (rt *Route) resolveWebSocket(in inherited) error {
 	if rt.cfg.status != 0 {
-		return fmt.Errorf("badele: WS %s: Status cannot be declared on a websocket route, which always answers %d",
+		return fmt.Errorf("muzak: WS %s: Status cannot be declared on a websocket route, which always answers %d",
 			rt.Path, http.StatusSwitchingProtocols)
 	}
 	if rt.plan.body != nil || rt.plan.multipart {
-		return fmt.Errorf("badele: WS %s: a websocket handshake carries no request body, so every field of %s must be tagged path, query, header or cookie",
+		return fmt.Errorf("muzak: WS %s: a websocket handshake carries no request body, so every field of %s must be tagged path, query, header or cookie",
 			rt.Path, rt.inType)
 	}
 	opts := in.ws
@@ -449,10 +449,10 @@ func (rt *Route) resolveWebSocket(in inherited) error {
 		opts = opts.overlay(*rt.cfg.ws)
 	}
 	if opts.MaxConnections != in.wsMaxConnections {
-		return fmt.Errorf("badele: WS %s: MaxConnections may only be set on the application, because the connections it bounds belong to the process rather than to one route", rt.Path)
+		return fmt.Errorf("muzak: WS %s: MaxConnections may only be set on the application, because the connections it bounds belong to the process rather than to one route", rt.Path)
 	}
 	if opts.MaxConnectionsPerIP != in.wsMaxConnectionsPerIP {
-		return fmt.Errorf("badele: WS %s: MaxConnectionsPerIP may only be set on the application, because the connections it bounds belong to the process rather than to one route", rt.Path)
+		return fmt.Errorf("muzak: WS %s: MaxConnectionsPerIP may only be set on the application, because the connections it bounds belong to the process rather than to one route", rt.Path)
 	}
 	rt.websocket.opts = opts.withDefaults()
 	for _, name := range rt.websocket.opts.Subprotocols {
@@ -461,13 +461,13 @@ func (rt *Route) resolveWebSocket(in inherited) error {
 		// refused here rather than sanitised, because a name that needs
 		// sanitising is a mistake to fix rather than to paper over.
 		if !isHTTPToken(name) {
-			return fmt.Errorf("badele: WS %s: subprotocol %q is not a valid token", rt.Path, wsShorten(name))
+			return fmt.Errorf("muzak: WS %s: subprotocol %q is not a valid token", rt.Path, wsShorten(name))
 		}
 	}
 	if limits := rt.websocket.opts.MessageLimits; len(limits) > 0 && !rt.skipRateLimit {
 		messages, err := newRateLimitConfig(rt.rateLimitOpts, limits)
 		if err != nil {
-			return fmt.Errorf("badele: WS %s: MessageLimits: %w", rt.Path, err)
+			return fmt.Errorf("muzak: WS %s: MessageLimits: %w", rt.Path, err)
 		}
 		rt.websocket.messages = messages
 	}
@@ -884,7 +884,7 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 			// Nothing derived from the error reaches the peer: it may name a
 			// query, a path or a driver failure, none of which is theirs.
 			status, reason = WSStatusInternalError, "the handler failed"
-			a.logger.ErrorContext(c.Context(), "badele: a websocket handler failed",
+			a.logger.ErrorContext(c.Context(), "muzak: a websocket handler failed",
 				slog.String("route", c.route.Path),
 				slog.String(RequestIDKey, c.RequestID()),
 				slog.String("error", err.Error()))

@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"fmt"
@@ -126,11 +126,14 @@ func TestCoverageExemptionsAreJustified(t *testing.T) {
 // path rendered relative to the repository root.
 func walkProject(t *testing.T, visit func(name, content string)) {
 	t.Helper()
-	wd, err := os.Getwd()
+	// The module root is this repository's root, so the walk starts here. It
+	// deliberately does not climb any higher: a checkout may sit inside a
+	// wider workspace holding the site and the dashboard, and those are not
+	// this module's to police.
+	root, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	root := filepath.Dir(wd)
 
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -165,12 +168,12 @@ func walkProject(t *testing.T, visit func(name, content string)) {
 
 // skipDir reports whether a directory should not be walked.
 //
-// The panels directory holds the front-end workspace, whose dependencies and
-// vendored documentation are not this module's to police; the rules enforced
-// here are about Go sources and the documents written alongside them.
+// The rules enforced here are about Go sources and the documents written
+// alongside them, so anything vendored, generated or belonging to a build tool
+// is left alone.
 func skipDir(name string) bool {
 	switch name {
-	case ".git", "node_modules", "testdata", "vendor", "panels":
+	case ".git", "node_modules", "testdata", "vendor", ".nuxt", ".output", "dist":
 		return true
 	}
 	return false
@@ -219,7 +222,7 @@ func TestFindNonASCII(t *testing.T) {
 
 func TestSkipDirAndCheckedExtension(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{".git", "node_modules", "testdata", "vendor", "panels"} {
+	for _, name := range []string{".git", "node_modules", "testdata", "vendor", ".nuxt", ".output", "dist"} {
 		if !skipDir(name) {
 			t.Errorf("skipDir(%q) = false, want true", name)
 		}

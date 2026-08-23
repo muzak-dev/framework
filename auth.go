@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"crypto/sha256"
@@ -51,8 +51,8 @@ func BearerToken(ctx *Context) (string, bool) {
 // that resolves the user instead.
 //
 //	app.Include(admin.NewRouter(),
-//		badele.WithPrefix("/admin"),
-//		badele.WithDependencies(badele.RequireBearerToken(settings.AdminToken)),
+//		muzak.WithPrefix("/admin"),
+//		muzak.WithDependencies(muzak.RequireBearerToken(settings.AdminToken)),
 //	)
 func RequireBearerToken(expected string) Guard {
 	return func(ctx *Context) error {
@@ -74,7 +74,7 @@ func RequireBearerToken(expected string) Guard {
 // It covers the shared-secret headers that are not bearer credentials, such as
 // the X-Token header in the FastAPI tutorial or a webhook signing key:
 //
-//	badele.WithDependencies(badele.RequireHeaderToken("X-Token", "coneofsilence"))
+//	muzak.WithDependencies(muzak.RequireHeaderToken("X-Token", "coneofsilence"))
 func RequireHeaderToken(header, expected string) Guard {
 	return func(ctx *Context) error {
 		given := ctx.Header(header)

@@ -1,28 +1,28 @@
 package routers
 
 import (
-	"badele"
-	"badele-example/handlers"
+	"muzak.dev/framework"
+	"muzak.dev/framework/example/handlers"
 )
 
 // Meta returns the router for the service's own endpoints: what it is
 // configured with, what it can predict, and whether it is alive.
-func Meta() *badele.Router {
-	r := badele.NewRouter(badele.WithTags("meta"))
+func Meta() *muzak.Router {
+	r := muzak.NewRouter(muzak.WithTags("meta"))
 
 	r.Get("/info", handlers.Info,
-		badele.Summary("Report the running configuration"))
+		muzak.Summary("Report the running configuration"))
 
 	r.Get("/predict", handlers.Predict,
-		badele.Summary("Run the loaded model"))
+		muzak.Summary("Run the loaded model"))
 
 	r.Get("/healthz", handlers.Health,
-		badele.Summary("Liveness probe"),
+		muzak.Summary("Liveness probe"),
 		// Routable, but left out of the documentation.
-		badele.Hidden(),
+		muzak.Hidden(),
 		// A monitor polling every second is the one client that should never
 		// be told to slow down.
-		badele.SkipRateLimit())
+		muzak.SkipRateLimit())
 
 	return r
 }

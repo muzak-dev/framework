@@ -1,4 +1,4 @@
-// Package radix implements the path-matching tree that backs Badele's router.
+// Package radix implements the path-matching tree that backs Muzak's router.
 //
 // The tree is a segment-wise radix trie: each edge consumes one complete path
 // segment (the text between two '/' separators) rather than a single byte.
@@ -53,5 +53,5 @@
 //
 // A Tree is safe for concurrent [Tree.Lookup] once every [Tree.Insert] has
 // returned; it does not support insertion concurrent with lookup, because
-// Badele registers all routes at startup and only reads them thereafter.
+// Muzak registers all routes at startup and only reads them thereafter.
 package radix

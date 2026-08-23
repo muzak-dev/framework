@@ -3,7 +3,7 @@ package testclient
 import (
 	"net/http"
 
-	"badele"
+	"muzak.dev/framework"
 )
 
 // Subprotocols offers WebSocket subprotocols on a [Client.WS] call, in order
@@ -30,7 +30,7 @@ func Subprotocols(names ...string) RequestOption {
 // The connection is closed when the test finishes, so a handler blocked on a
 // read is released even if the test forgets. Use [Client.TryWS] to assert on a
 // handshake that is meant to be refused.
-func (c *Client) WS(path string, opts ...RequestOption) *badele.WSConn {
+func (c *Client) WS(path string, opts ...RequestOption) *muzak.WSConn {
 	c.tb.Helper()
 	conn, response := c.TryWS(path, opts...)
 	if conn == nil {
@@ -52,11 +52,11 @@ func (c *Client) WS(path string, opts ...RequestOption) *badele.WSConn {
 //
 //	_, response := client.TryWS("/items/plumbus/ws")
 //	response.AssertStatus(401)
-func (c *Client) TryWS(path string, opts ...RequestOption) (*badele.WSConn, *Response) {
+func (c *Client) TryWS(path string, opts ...RequestOption) (*muzak.WSConn, *Response) {
 	c.tb.Helper()
 	req, target := c.build(http.MethodGet, path, opts)
 
-	conn, httpResponse, err := badele.WSDial(c.tb.Context(), target, badele.WSDialOptions{
+	conn, httpResponse, err := muzak.WSDial(c.tb.Context(), target, muzak.WSDialOptions{
 		HTTPClient:   c.http,
 		Header:       req.header,
 		Subprotocols: req.subprotocols,
@@ -81,6 +81,6 @@ func (c *Client) TryWS(path string, opts ...RequestOption) (*badele.WSConn, *Res
 	}
 	// The body of a handshake that succeeded is the connection itself, so it
 	// is closed by closing the connection and never before.
-	c.tb.Cleanup(func() { _ = conn.Close(badele.WSStatusNormalClosure, "") })
+	c.tb.Cleanup(func() { _ = conn.Close(muzak.WSStatusNormalClosure, "") })
 	return conn, response
 }

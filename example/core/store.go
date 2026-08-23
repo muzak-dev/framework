@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"badele"
+	"muzak.dev/framework"
 )
 
 // Errors the store reports. Handlers translate them into HTTP errors, which
@@ -46,8 +46,8 @@ const watcherBuffer = 16
 
 // ItemStore is the example's stand-in for a database.
 //
-// Unlike [ModelRegistry] it does not implement badele.Lifecycle, so it is
-// registered with badele.LifecycleFunc instead. Both routes into the lifecycle
+// Unlike [ModelRegistry] it does not implement muzak.Lifecycle, so it is
+// registered with muzak.LifecycleFunc instead. Both routes into the lifecycle
 // are shown here because both come up in practice: a type you own can implement
 // the interface, and a type you do not own needs the closure form.
 type ItemStore struct {
@@ -127,8 +127,8 @@ func (s *ItemStore) record(item Item) {
 //
 // The closures capture the store by pointer, so what they mutate is what
 // handlers later read.
-func (s *ItemStore) Lifecycle() badele.SingletonOption {
-	return badele.LifecycleFunc("item-store",
+func (s *ItemStore) Lifecycle() muzak.SingletonOption {
+	return muzak.LifecycleFunc("item-store",
 		func(ctx context.Context) error {
 			s.mu.Lock()
 			defer s.mu.Unlock()

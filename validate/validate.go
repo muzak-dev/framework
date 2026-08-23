@@ -66,7 +66,7 @@ func (c Constraints) IsZero() bool {
 
 // Evaluator is a rule set bound to a field, ready to run.
 //
-// Badele collects one per field during a call to the model's Validate method
+// Muzak collects one per field during a call to the model's Validate method
 // and then evaluates them all, so the rules a model declares are data rather
 // than control flow. The interface is deliberately closed: only this package
 // implements it, which keeps the set of rule shapes small enough to reason

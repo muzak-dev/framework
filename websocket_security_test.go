@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bufio"
@@ -327,7 +327,7 @@ func TestWebSocketDisclosesNothingToARefusedPeer(t *testing.T) {
 
 	conn := dialWS(t, server.URL, "/ws")
 	reason := conn.expectClose(uint16(WSStatusInternalError))
-	for _, secret := range []string{"10.0.0.7", "5432", "SELECT", "secrets", "badele.", ".go:"} {
+	for _, secret := range []string{"10.0.0.7", "5432", "SELECT", "secrets", "muzak.", ".go:"} {
 		if strings.Contains(reason, secret) {
 			t.Errorf("the close reason %q leaks %q", reason, secret)
 		}

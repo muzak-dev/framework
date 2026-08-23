@@ -1,6 +1,6 @@
 // Package wsframe implements the WebSocket wire format of RFC 6455.
 //
-// It is the layer below Badele's WebSocket connections: it reads and writes
+// It is the layer below Muzak's WebSocket connections: it reads and writes
 // frame headers, applies the masking transformation, and decodes close
 // payloads. It knows nothing about handshakes, connections or messages, which
 // is what makes the rules it enforces testable one at a time.

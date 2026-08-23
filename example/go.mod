@@ -1,7 +1,7 @@
-module badele-example
+module muzak.dev/framework/example
 
 go 1.27
 
-require badele v0.0.0
+require muzak.dev/framework v0.0.0
 
-replace badele => ../
+replace muzak.dev/framework => ../

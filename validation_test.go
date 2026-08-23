@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"encoding/json/v2"
@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"badele/validate"
+	"muzak.dev/framework/validate"
 )
 
 // signup is the model the validation tests exercise. It covers every shape the

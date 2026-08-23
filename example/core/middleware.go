@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"badele"
+	"muzak.dev/framework"
 )
 
 // ProcessTime reports how long the service spent on a request in an
@@ -30,7 +30,7 @@ import (
 //
 // The framework's own access log already records a duration. This exists to
 // report it to the client rather than to the operator.
-func ProcessTime() badele.Middleware {
+func ProcessTime() muzak.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			next.ServeHTTP(&processTimer{ResponseWriter: w, start: time.Now()}, r)

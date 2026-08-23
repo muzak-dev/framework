@@ -1,7 +1,7 @@
 package schemas
 
 import (
-	"badele"
+	"muzak.dev/framework"
 )
 
 // InfoOut is the response model for the settings endpoint.
@@ -32,6 +32,6 @@ type HealthOut struct {
 }
 
 // Validate keeps the prediction input inside the range the model was fitted on.
-func (in *PredictParams) Validate(v *badele.Validation) {
+func (in *PredictParams) Validate(v *muzak.Validation) {
 	v.Number(&in.X).Between(-1000, 1000)
 }

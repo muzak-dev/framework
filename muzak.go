@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"bytes"
@@ -15,19 +15,19 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"badele/internal/radix"
+	"muzak.dev/framework/internal/radix"
 )
 
-// Errors reported for configurations Badele refuses to serve.
+// Errors reported for configurations Muzak refuses to serve.
 var (
 	// ErrCORSWildcardCredentials reports a CORS policy that pairs a wildcard
 	// origin with credentials. Browsers reject that combination, so accepting
 	// it here would only hide the mistake until it reached a browser.
-	ErrCORSWildcardCredentials = errors.New("badele: a wildcard CORS origin cannot be combined with AllowCredentials")
+	ErrCORSWildcardCredentials = errors.New("muzak: a wildcard CORS origin cannot be combined with AllowCredentials")
 
 	// ErrNotBuilt reports an operation attempted on an application whose
 	// routes failed to build.
-	ErrNotBuilt = errors.New("badele: the application could not be built")
+	ErrNotBuilt = errors.New("muzak: the application could not be built")
 )
 
 // Default limits applied when [AppOptions] leaves them unset. Every one of
@@ -52,7 +52,7 @@ const (
 // timeouts and body limit, and logs to standard error. Because
 // [OpenAPIOptions] is embedded, its fields can be set inline:
 //
-//	app := badele.New(badele.AppOptions{
+//	app := muzak.New(muzak.AppOptions{
 //		Title:   "Bigger Applications Example",
 //		Version: "1.0.0",
 //		Addr:    ":8080",
@@ -154,9 +154,15 @@ type AppOptions struct {
 	// attributes every request to the proxy until the proxy is named in
 	// [ClientIPOptions.TrustedProxies].
 	ClientIP ClientIPOptions
+
+	// Versioning configures how requests declare which version of the API
+	// they want. The zero value leaves versioning off, which is what every
+	// route gets unless this is set; see [VersioningOptions] and
+	// [WithVersion].
+	Versioning VersioningOptions
 }
 
-// App is a Badele application: a root router plus the server, middleware,
+// App is a Muzak application: a root router plus the server, middleware,
 // generated documentation and error handling that turn it into something that
 // serves HTTP.
 //
@@ -221,8 +227,15 @@ type buildState struct {
 
 // pathEntry holds every method served at one path template, so that a single
 // tree walk answers both "does this path exist" and "is this method allowed".
+//
+// A method maps to a slice rather than a single Route because versioning can
+// register more than one route at the same method and path, distinguished
+// only by the version a request declares; see [Route.versionVariants] and
+// [selectVersion]. An application that never enables versioning never sees a
+// slice longer than one, so the indirection costs it nothing beyond the
+// slice header itself.
 type pathEntry struct {
-	methods map[string]*Route
+	methods map[string][]*Route
 	allow   string
 }
 
@@ -232,11 +245,11 @@ type pathEntry struct {
 // inherited by every route and every included router, which is how an
 // application-wide guard is declared:
 //
-//	app := badele.New(badele.AppOptions{
+//	app := muzak.New(muzak.AppOptions{
 //		Title:   "Bigger Applications Example",
 //		Version: "1.0.0",
 //		Addr:    ":8080",
-//	}, badele.WithDependencies(GetQueryToken))
+//	}, muzak.WithDependencies(GetQueryToken))
 //
 // New never fails. Problems with the routes, such as a duplicate path or an
 // unbindable input type, are reported by [App.Build] and by the methods that
@@ -323,7 +336,7 @@ func (a *App) Logger() *slog.Logger { return a.logger }
 // Options applies further router options to the application after it was
 // created, which is how a dependency discovered later is published:
 //
-//	app.Options(badele.WithSingleton(models, badele.LifecycleFunc("ml-model", start, stop)))
+//	app.Options(muzak.WithSingleton(models, muzak.LifecycleFunc("ml-model", start, stop)))
 //
 // Options must be called before the application is built. Calls made
 // afterwards have no effect, because the routing tree and the dependency
@@ -357,26 +370,46 @@ func (a *App) Build() error {
 // build performs the one-time resolution behind [App.Build].
 func (a *App) build() {
 	startup := Scoped(a.logger, ScopeServer)
-	startup.Info("Starting Badele application...")
+	startup.Info("Starting Muzak application...")
 
 	state := &buildState{}
 	seenOperationIDs := make(map[string]string)
 
 	emit := func(rt *Route) error {
-		entry, err := a.entryFor(rt.Path)
-		if err != nil {
-			return err
+		variants := rt.versionVariants(a.opts.Versioning)
+		if len(variants) == 0 && a.opts.Versioning.enabled() {
+			Scoped(a.logger, ScopeRouter).Warn(fmt.Sprintf(
+				"%s %s declares no version and no default version applies; it will answer no request while versioning is enabled",
+				rt.Method, rt.Path))
 		}
-		if existing, taken := entry.methods[rt.Method]; taken {
-			return fmt.Errorf("badele: %s %s is registered twice (the first registration returned %s)", rt.Method, rt.Path, existing.OperationID)
+		for _, variant := range variants {
+			entry, err := a.entryFor(variant.Path)
+			if err != nil {
+				return err
+			}
+			for _, existing := range entry.methods[variant.Method] {
+				// Without versioning there is no dimension to distinguish two
+				// routes at the same method and path by, so any second
+				// registration conflicts; with it, only an overlapping
+				// version does, since disjoint versions are exactly what
+				// lets more than one route share a method and path.
+				if !a.opts.Versioning.enabled() || versionsOverlap(existing.Versions, variant.Versions) {
+					return fmt.Errorf("muzak: %s %s is registered twice (the first registration returned %s)",
+						variant.Method, variant.Path, existing.OperationID)
+				}
+			}
+			if previous, taken := seenOperationIDs[variant.OperationID]; taken {
+				return fmt.Errorf("muzak: operation id %q is used by both %s and %s %s; set a unique one with muzak.OperationID", variant.OperationID, previous, variant.Method, variant.Path)
+			}
+			seenOperationIDs[variant.OperationID] = variant.Method + " " + variant.Path
+			entry.methods[variant.Method] = append(entry.methods[variant.Method], variant)
+			a.routes = append(a.routes, variant)
 		}
-		if previous, taken := seenOperationIDs[rt.OperationID]; taken {
-			return fmt.Errorf("badele: operation id %q is used by both %s and %s %s; set a unique one with badele.OperationID", rt.OperationID, previous, rt.Method, rt.Path)
-		}
-		seenOperationIDs[rt.OperationID] = rt.Method + " " + rt.Path
-		entry.methods[rt.Method] = rt
-		a.routes = append(a.routes, rt)
 		return nil
+	}
+
+	if err := a.opts.Versioning.validate(); err != nil {
+		state.errs = append(state.errs, err)
 	}
 
 	a.routers = countRouters(a.Router)
@@ -391,11 +424,27 @@ func (a *App) build() {
 		sseMaxStreams:         a.opts.SSE.MaxStreams,
 		sseMaxStreamsPerIP:    a.opts.SSE.MaxStreamsPerIP,
 		rateLimit:             a.opts.RateLimit,
+		versions:              a.opts.Versioning.DefaultVersion,
 	}, emit, state)
 	a.websockets.limit = wsConnectionLimit(a.opts.WebSocket.MaxConnections)
 	a.websockets.perKeyLimit = wsConnectionsPerIPLimit(a.opts.WebSocket.MaxConnectionsPerIP)
 	a.streams.limit = sseStreamLimit(a.opts.SSE.MaxStreams)
 	a.streams.perKeyLimit = sseStreamsPerIPLimit(a.opts.SSE.MaxStreamsPerIP)
+	if !a.opts.Versioning.enabled() {
+		// A resolved version can only exist here because [WithVersion] was
+		// called somewhere, since nothing else can produce one without
+		// AppOptions.Versioning.DefaultVersion, which validate() above
+		// already refused to let exist without Type set too. Registering
+		// such a route anyway, silently ignoring the version it declared,
+		// would be a much easier mistake to ship than to notice.
+		for _, rt := range a.routes {
+			if len(rt.Versions) > 0 {
+				state.errs = append(state.errs, fmt.Errorf(
+					"muzak: %s %s: a version is declared but versioning is not enabled; set AppOptions.Versioning to enable it",
+					rt.Method, rt.Path))
+			}
+		}
+	}
 	if a.clientIPErr != nil {
 		state.errs = append(state.errs, a.clientIPErr)
 	}
@@ -411,7 +460,7 @@ func (a *App) build() {
 
 	if len(state.errs) > 0 {
 		a.buildErr = errors.Join(state.errs...)
-		startup.Error("badele: the application could not be built", slog.String("error", a.buildErr.Error()))
+		startup.Error("muzak: the application could not be built", slog.String("error", a.buildErr.Error()))
 		return
 	}
 
@@ -441,9 +490,9 @@ func (a *App) entryFor(path string) (*pathEntry, error) {
 	if entry, ok := a.entries[path]; ok {
 		return entry, nil
 	}
-	entry := &pathEntry{methods: make(map[string]*Route, 4)}
+	entry := &pathEntry{methods: make(map[string][]*Route, 4)}
 	if err := a.tree.Insert(path, entry); err != nil {
-		return nil, fmt.Errorf("badele: %w", err)
+		return nil, fmt.Errorf("muzak: %w", err)
 	}
 	a.entries[path] = entry
 	return entry, nil
@@ -468,8 +517,8 @@ func plural(n int, word string) string {
 }
 
 // allowHeader builds the Allow header value for a path, including the methods
-// Badele answers automatically.
-func allowHeader(methods map[string]*Route) string {
+// Muzak answers automatically.
+func allowHeader(methods map[string][]*Route) string {
 	names := make([]string, 0, len(methods)+2)
 	for method := range methods {
 		names = append(names, method)
@@ -477,8 +526,11 @@ func allowHeader(methods map[string]*Route) string {
 	// A GET route answers HEAD automatically, unless it is one whose body is a
 	// conversation: there is no way to upgrade a HEAD, and answering one from
 	// an event stream would run a handler whose every write is discarded until
-	// it gave up, so promising either would be a lie.
-	if get, hasGet := methods[http.MethodGet]; hasGet && get.answersHead() {
+	// it gave up, so promising either would be a lie. Versioning can register
+	// more than one GET route here; HEAD is offered if any of them would
+	// answer it, since which one actually does is a per-request decision
+	// this header cannot make.
+	if get, hasGet := methods[http.MethodGet]; hasGet && anyAnswersHead(get) {
 		if _, hasHead := methods[http.MethodHead]; !hasHead {
 			names = append(names, http.MethodHead)
 		}
@@ -488,6 +540,17 @@ func allowHeader(methods map[string]*Route) string {
 	}
 	slices.Sort(names)
 	return strings.Join(names, ", ")
+}
+
+// anyAnswersHead reports whether any of a method's registered routes answers
+// a HEAD request; see [Route.answersHead].
+func anyAnswersHead(routes []*Route) bool {
+	for _, rt := range routes {
+		if rt.answersHead() {
+			return true
+		}
+	}
+	return false
 }
 
 // buildHandler wraps the router in the middleware chain and the documentation
@@ -554,12 +617,41 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	route, ok := entry.methods[r.Method]
+	candidates, ok := entry.methods[r.Method]
 	if !ok {
 		a.dispatchFallback(c, entry)
 		return
 	}
+	route := a.matchVersion(candidates, r)
+	if route == nil {
+		// The path and method both exist, but nothing registered for them
+		// answers the version this request declared, which the framework
+		// treats exactly as it would a path nothing matches at all: see
+		// [selectVersion].
+		a.fail(c, NewHTTPErrorf(http.StatusNotFound, "no route matches %s %s", r.Method, r.URL.Path))
+		return
+	}
 	a.run(c, route)
+}
+
+// matchVersion picks the candidate that answers r's declared version, among
+// every route registered for the same method and path.
+//
+// Versioning off guarantees exactly one candidate, since [WithVersion] may
+// not be used anywhere without it: that candidate is returned directly,
+// without resolving a version from the request at all, which is what keeps
+// an application that never enables versioning paying nothing for it.
+// [VersioningURI] is answered the same way, for a different reason: the
+// version there is part of the path, so reaching this method's slot for a
+// given path already settled which version matched, and there is nothing
+// left to extract from the request itself. Every other type keeps more than
+// one candidate at one path and resolves the version from the request to
+// choose between them; see [selectVersion].
+func (a *App) matchVersion(candidates []*Route, r *http.Request) *Route {
+	if !a.opts.Versioning.enabled() || a.opts.Versioning.Type == VersioningURI {
+		return candidates[0]
+	}
+	return selectVersion(candidates, a.opts.Versioning.requestedVersions(r))
 }
 
 // dispatchFallback answers a request whose path exists but whose method has no
@@ -567,11 +659,13 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 func (a *App) dispatchFallback(c *Context, entry *pathEntry) {
 	switch c.r.Method {
 	case http.MethodHead:
-		if route, ok := entry.methods[http.MethodGet]; ok && route.answersHead() {
-			// net/http discards the body of a HEAD response, so running the
-			// GET handler yields correct headers with no body.
-			a.run(c, route)
-			return
+		if candidates, ok := entry.methods[http.MethodGet]; ok {
+			if route := a.matchVersion(candidates, c.r); route != nil && route.answersHead() {
+				// net/http discards the body of a HEAD response, so running
+				// the GET handler yields correct headers with no body.
+				a.run(c, route)
+				return
+			}
 		}
 	case http.MethodOptions:
 		c.w.Header().Set("Allow", entry.allow)
@@ -635,7 +729,7 @@ func (a *App) recoverRoute(c *Context) {
 	if recovered == http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
 		panic(recovered)
 	}
-	a.logger.ErrorContext(c.Context(), "badele: recovered from a panic in a handler",
+	a.logger.ErrorContext(c.Context(), "muzak: recovered from a panic in a handler",
 		slog.Any("panic", recovered),
 		slog.String("method", c.r.Method),
 		slog.String("route", c.route.Path),
@@ -646,12 +740,12 @@ func (a *App) recoverRoute(c *Context) {
 
 // errPanic stands in for a recovered panic so that the error renderer sees an
 // ordinary error and produces the standard opaque 500.
-var errPanic = errors.New("badele: handler panicked")
+var errPanic = errors.New("muzak: handler panicked")
 
 // fail renders an error into the response using the configured renderer.
 func (a *App) fail(c *Context, err error) {
 	if cause := logCause(err); cause != nil {
-		a.logger.ErrorContext(c.Context(), "badele: request failed",
+		a.logger.ErrorContext(c.Context(), "muzak: request failed",
 			slog.String("method", c.r.Method),
 			slog.String("path", c.r.URL.Path),
 			slog.String(RequestIDKey, c.RequestID()),
@@ -669,7 +763,7 @@ func (a *App) fail(c *Context, err error) {
 	if writeErr := c.writeResponse(body); writeErr != nil {
 		// The renderer produced something that cannot be serialized. Fall back
 		// to the fixed envelope so the client still receives valid JSON.
-		a.logger.ErrorContext(c.Context(), "badele: the error renderer produced an unserializable body",
+		a.logger.ErrorContext(c.Context(), "muzak: the error renderer produced an unserializable body",
 			slog.String("error", writeErr.Error()))
 		writeMinimalError(c.w, c.RequestID())
 	}
@@ -746,7 +840,7 @@ func (c *Context) writeResponse(v any) error {
 	}()
 
 	if err := json.MarshalWrite(buf, v); err != nil {
-		return fmt.Errorf("badele: encoding the response of %s %s failed: %w", c.r.Method, c.route.pathOrRequest(c.r), err)
+		return fmt.Errorf("muzak: encoding the response of %s %s failed: %w", c.r.Method, c.route.pathOrRequest(c.r), err)
 	}
 	header := c.w.Header()
 	setIfAbsent(header, "Content-Type", "application/json; charset=utf-8")

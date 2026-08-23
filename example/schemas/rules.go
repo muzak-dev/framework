@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"badele/validate"
+	"muzak.dev/framework/validate"
 )
 
 // commonPasswords stands in for the list a real service would load. Keeping it

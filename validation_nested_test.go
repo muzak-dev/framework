@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"errors"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"badele/validate"
+	"muzak.dev/framework/validate"
 )
 
 // address is a model held inside another, which is what Nested exists for.

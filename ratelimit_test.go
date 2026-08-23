@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -463,7 +463,7 @@ func TestIPTrackerWithoutAnAddress(t *testing.T) {
 	app := limitedApp(t, oneQuota())
 
 	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
-	req.RemoteAddr = "/var/run/badele.sock"
+	req.RemoteAddr = "/var/run/muzak.sock"
 	rec := doRequest(t, app, req)
 	assertStatus(t, rec, http.StatusInternalServerError)
 }

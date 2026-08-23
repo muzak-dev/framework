@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"badele"
-	"badele/testclient"
+	"muzak.dev/framework"
+	"muzak.dev/framework/testclient"
 )
 
 // The application below mirrors the FastAPI testing tutorial, so the tests read
@@ -38,36 +38,36 @@ func newStore() *store {
 
 // buildApp returns an application with a shared secret guard and a small
 // in-memory store.
-func buildApp() *badele.App {
+func buildApp() *muzak.App {
 	data := newStore()
 
-	app := badele.New(badele.AppOptions{
+	app := muzak.New(muzak.AppOptions{
 		Title:         "Test Client Example",
 		Version:       "1.0.0",
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
-	}, badele.WithDependencies(badele.RequireHeaderToken("X-Token", "coneofsilence")))
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
+	}, muzak.WithDependencies(muzak.RequireHeaderToken("X-Token", "coneofsilence")))
 
-	app.Get("/items/{item_id}", func(ctx *badele.Context, in itemParams) (Item, error) {
+	app.Get("/items/{item_id}", func(ctx *muzak.Context, in itemParams) (Item, error) {
 		data.mu.Lock()
 		defer data.mu.Unlock()
 		item, found := data.items[in.ID]
 		if !found {
-			return Item{}, badele.NewHTTPError(http.StatusNotFound, "Item not found")
+			return Item{}, muzak.NewHTTPError(http.StatusNotFound, "Item not found")
 		}
 		return item, nil
 	})
 
-	app.Post("/items/", func(ctx *badele.Context, in Item) (Item, error) {
+	app.Post("/items/", func(ctx *muzak.Context, in Item) (Item, error) {
 		data.mu.Lock()
 		defer data.mu.Unlock()
 		if _, exists := data.items[in.ID]; exists {
-			return Item{}, badele.NewHTTPError(http.StatusConflict, "Item already exists")
+			return Item{}, muzak.NewHTTPError(http.StatusConflict, "Item already exists")
 		}
 		data.items[in.ID] = in
 		return in, nil
 	})
 
-	app.Put("/items/{item_id}", func(ctx *badele.Context, in struct {
+	app.Put("/items/{item_id}", func(ctx *muzak.Context, in struct {
 		ID    string `path:"item_id"`
 		Title string `json:"title"`
 	}) (Item, error) {
@@ -75,36 +75,36 @@ func buildApp() *badele.App {
 		defer data.mu.Unlock()
 		item, found := data.items[in.ID]
 		if !found {
-			return Item{}, badele.NewHTTPError(http.StatusNotFound, "Item not found")
+			return Item{}, muzak.NewHTTPError(http.StatusNotFound, "Item not found")
 		}
 		item.Title = in.Title
 		data.items[in.ID] = item
 		return item, nil
 	})
 
-	app.Delete("/items/{item_id}", func(ctx *badele.Context, in itemParams) (badele.Empty, error) {
+	app.Delete("/items/{item_id}", func(ctx *muzak.Context, in itemParams) (muzak.Empty, error) {
 		data.mu.Lock()
 		defer data.mu.Unlock()
 		delete(data.items, in.ID)
-		return badele.Empty{}, nil
-	}, badele.Status(http.StatusNoContent))
+		return muzak.Empty{}, nil
+	}, muzak.Status(http.StatusNoContent))
 
-	app.Patch("/items/{item_id}", func(ctx *badele.Context, in itemParams) (Item, error) {
+	app.Patch("/items/{item_id}", func(ctx *muzak.Context, in itemParams) (Item, error) {
 		return Item{ID: in.ID, Title: "patched"}, nil
 	})
 
-	app.Handle(http.MethodOptions, "/items/", func(ctx *badele.Context, _ badele.Empty) (badele.Empty, error) {
+	app.Handle(http.MethodOptions, "/items/", func(ctx *muzak.Context, _ muzak.Empty) (muzak.Empty, error) {
 		ctx.SetHeader("X-Options", "yes")
-		return badele.Empty{}, nil
-	}, badele.Status(http.StatusNoContent))
+		return muzak.Empty{}, nil
+	}, muzak.Status(http.StatusNoContent))
 
-	app.Get("/whoami", func(ctx *badele.Context, in struct {
+	app.Get("/whoami", func(ctx *muzak.Context, in struct {
 		Name string `query:"name"`
 	}) (map[string]string, error) {
 		return map[string]string{"name": in.Name}, nil
 	})
 
-	app.Get("/session", func(ctx *badele.Context, _ badele.Empty) (map[string]string, error) {
+	app.Get("/session", func(ctx *muzak.Context, _ muzak.Empty) (map[string]string, error) {
 		if cookie, err := ctx.Cookie("session"); err == nil {
 			return map[string]string{"session": cookie.Value}, nil
 		}
@@ -112,17 +112,17 @@ func buildApp() *badele.App {
 		return map[string]string{"session": ""}, nil
 	})
 
-	app.Get("/plain", func(ctx *badele.Context, _ badele.Empty) (badele.Empty, error) {
+	app.Get("/plain", func(ctx *muzak.Context, _ muzak.Empty) (muzak.Empty, error) {
 		w := ctx.ResponseWriter()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("not json at all"))
-		return badele.Empty{}, nil
+		return muzak.Empty{}, nil
 	})
 
-	app.Get("/redirect", func(ctx *badele.Context, _ badele.Empty) (badele.Empty, error) {
+	app.Get("/redirect", func(ctx *muzak.Context, _ muzak.Empty) (muzak.Empty, error) {
 		ctx.SetHeader("Location", "/items/foo")
 		ctx.SetStatus(http.StatusFound)
-		return badele.Empty{}, nil
+		return muzak.Empty{}, nil
 	})
 
 	return app
@@ -150,7 +150,7 @@ func TestReadItemBadToken(t *testing.T) {
 	res := client.Get("/items/foo", testclient.Header("X-Token", "hailhydra"))
 
 	res.AssertStatus(http.StatusUnauthorized)
-	res.AssertErrorCode(badele.CodeUnauthorized)
+	res.AssertErrorCode(muzak.CodeUnauthorized)
 }
 
 func TestReadNonexistentItem(t *testing.T) {
@@ -185,7 +185,7 @@ func TestCreateExistingItem(t *testing.T) {
 		`{"id":"foo","title":"The Foo ID Stealers","description":"There goes my stealer"}`))
 
 	res.AssertStatus(http.StatusConflict)
-	res.AssertErrorCode(badele.CodeConflict)
+	res.AssertErrorCode(muzak.CodeConflict)
 }
 
 // TestDecodeIntoATypedValue exercises the generic method that keeps the
@@ -322,13 +322,13 @@ func TestLifecycleComponentsRunForTheClient(t *testing.T) {
 	var started, stopped bool
 	var mu sync.Mutex
 
-	app := badele.New(badele.AppOptions{
-		LoggerOptions: badele.LoggerOptions{Format: badele.LogFormatNone},
-	}, badele.WithLifecycle(badele.NewLifecycle("probe",
+	app := muzak.New(muzak.AppOptions{
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
+	}, muzak.WithLifecycle(muzak.NewLifecycle("probe",
 		func(context.Context) error { mu.Lock(); started = true; mu.Unlock(); return nil },
 		func(context.Context) error { mu.Lock(); stopped = true; mu.Unlock(); return nil },
 	)))
-	app.Get("/x", func(ctx *badele.Context, _ badele.Empty) (map[string]bool, error) {
+	app.Get("/x", func(ctx *muzak.Context, _ muzak.Empty) (map[string]bool, error) {
 		return map[string]bool{"ok": true}, nil
 	})
 
@@ -413,10 +413,10 @@ func TestAssertionCheckers(t *testing.T) {
 
 	t.Run("error code", func(t *testing.T) {
 		failing := client.Get("/items/missing")
-		if got := testclient.CheckErrorCode(failing, badele.CodeNotFound); got != "" {
+		if got := testclient.CheckErrorCode(failing, muzak.CodeNotFound); got != "" {
 			t.Errorf("a matching error code reported %q", got)
 		}
-		got := testclient.CheckErrorCode(failing, badele.CodeConflict)
+		got := testclient.CheckErrorCode(failing, muzak.CodeConflict)
 		if !strings.Contains(got, "error code =") {
 			t.Errorf("message = %q", got)
 		}

@@ -1,4 +1,4 @@
-package badele
+package muzak
 
 import (
 	"context"
@@ -29,7 +29,7 @@ import (
 // A handler that returns it is treated as a stream that finished rather than
 // as one that failed, so a client going away is not logged as an error. Test
 // for it with [errors.Is]; the reason the stream ended is wrapped inside.
-var ErrSSEStreamEnded = errors.New("badele: the event stream has ended")
+var ErrSSEStreamEnded = errors.New("muzak: the event stream has ended")
 
 // ended reports a stream that ended for a reason of its own.
 func ended(reason string) error {
@@ -49,7 +49,7 @@ var errSSEFinished = ended("the handler has returned")
 
 // errSSEBothPayloads reports an event that was given both a value and a text
 // payload, which cannot both be the data field.
-var errSSEBothPayloads = errors.New("badele: an event carries either Data or Text, not both")
+var errSSEBothPayloads = errors.New("muzak: an event carries either Data or Text, not both")
 
 // sseKeepAliveComment is what a keepalive says. The content is meaningless to
 // every client, which ignores comments; it is spelled out so that anyone
@@ -62,7 +62,7 @@ const sseKeepAliveComment = "keepalive"
 // this when the event needs a name to be dispatched under, an identifier to
 // resume from, a reconnection delay, or a payload that is not JSON:
 //
-//	stream.SendEvent(badele.SSEEvent[ItemOut]{Name: "item_update", ID: "42", Data: &item})
+//	stream.SendEvent(muzak.SSEEvent[ItemOut]{Name: "item_update", ID: "42", Data: &item})
 //
 // The zero value carries nothing, which is a valid event: a client sees it
 // dispatched with empty data.
@@ -160,7 +160,7 @@ func (s *SSEStream[Out]) SendEvent(event SSEEvent[Out]) error {
 }
 
 // Comment writes a comment, which no client acts on and every client accepts.
-// Badele already sends one every [SSEOptions.KeepAlive] to hold an idle stream
+// Muzak already sends one every [SSEOptions.KeepAlive] to hold an idle stream
 // open, so this is for a stream that wants to say something to whoever is
 // watching it by hand.
 func (s *SSEStream[Out]) Comment(text string) error {
@@ -375,7 +375,7 @@ func (s *sseStream) send(frame sseFrame) error {
 	s.payload = s.payload[:0]
 	if frame.hasData {
 		if err := json.MarshalWrite(sseAppender{buf: &s.payload}, frame.data); err != nil {
-			return fmt.Errorf("badele: encoding an event: %w", err)
+			return fmt.Errorf("muzak: encoding an event: %w", err)
 		}
 	} else if frame.hasText {
 		s.payload = append(s.payload, frame.text...)
@@ -430,13 +430,13 @@ func (f sseFrame) check() error {
 		return err
 	}
 	if f.retry < 0 {
-		return errors.New("badele: the retry delay of an event cannot be negative")
+		return errors.New("muzak: the retry delay of an event cannot be negative")
 	}
 	if !utf8.ValidString(f.comment) {
-		return errors.New("badele: the comment of an event must be valid UTF-8, which is the only encoding an event stream has")
+		return errors.New("muzak: the comment of an event must be valid UTF-8, which is the only encoding an event stream has")
 	}
 	if f.hasText && !utf8.ValidString(f.text) {
-		return errors.New("badele: the text of an event must be valid UTF-8, which is the only encoding an event stream has")
+		return errors.New("muzak: the text of an event must be valid UTF-8, which is the only encoding an event stream has")
 	}
 	return nil
 }
@@ -446,13 +446,13 @@ func sseCheckLine(field, value string) error {
 	for i := range len(value) {
 		switch value[i] {
 		case '\r', '\n':
-			return fmt.Errorf("badele: the %s %q contains a line break, which would let it forge events of its own", field, sseShorten(value))
+			return fmt.Errorf("muzak: the %s %q contains a line break, which would let it forge events of its own", field, sseShorten(value))
 		case 0:
-			return fmt.Errorf("badele: the %s %q contains a null byte, which a client discards the whole field for", field, sseShorten(value))
+			return fmt.Errorf("muzak: the %s %q contains a null byte, which a client discards the whole field for", field, sseShorten(value))
 		}
 	}
 	if !utf8.ValidString(value) {
-		return fmt.Errorf("badele: the %s %q is not valid UTF-8, which is the only encoding an event stream has", field, sseShorten(value))
+		return fmt.Errorf("muzak: the %s %q is not valid UTF-8, which is the only encoding an event stream has", field, sseShorten(value))
 	}
 	return nil
 }

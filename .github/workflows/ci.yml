@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A second push to the same branch cancels the first: the older run's result is
+# about code nobody is looking at any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain line in go.mod is what pins the version; this only has to
+      # be new enough to honour it.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+      # The race detector is the one that matters here: request-scoped state,
+      # the dependency container and the connection registries are all shared
+      # across goroutines by design.
+      - name: Test under the race detector
+        run: go test ./... -race -count=1
+
+      # The README carries a coverage number and a badge. This is what stops
+      # either of them from quietly becoming a lie.
+      - name: Coverage
+        env:
+          MINIMUM: '98.0'
+        run: |
+          go test ./... -coverprofile=coverage.out -covermode=atomic
+          go tool cover -func=coverage.out | tail -1
+          total=$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+          echo "total coverage: ${total}% (minimum ${MINIMUM}%)"
+          echo "### Coverage: ${total}%" >> "$GITHUB_STEP_SUMMARY"
+          awk -v t="$total" -v m="$MINIMUM" 'BEGIN { exit !(t + 0 < m + 0) }' \
+            && { echo "::error::coverage ${total}% is below the ${MINIMUM}% minimum"; exit 1; } \
+            || echo "coverage gate passed"
+
+      - name: Build the example
+        working-directory: example
+        run: |
+          go build ./...
+          go vet ./...
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          args: --timeout=5m

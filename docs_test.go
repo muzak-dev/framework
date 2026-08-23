@@ -1,7 +1,12 @@
 package muzak
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json/v2"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,7 +92,7 @@ func TestDocsPage(t *testing.T) {
 	if !strings.Contains(body, "<!doctype html>") {
 		t.Error("the docs page is not HTML")
 	}
-	if strings.Contains(body, docsNoncePlaceholder) || strings.Contains(body, docsTitlePlaceholder) {
+	if strings.Contains(body, docsTitlePlaceholder) || strings.Contains(body, docsSpecPlaceholder) {
 		t.Error("a placeholder survived into the served page")
 	}
 	if !strings.Contains(body, "Test API") {
@@ -99,15 +104,17 @@ func TestDocsPage(t *testing.T) {
 }
 
 // TestDocsPageIsSelfContained is the property that lets the page run under a
-// strict policy and work without internet access.
+// strict policy and work without internet access: it loads nothing. Every
+// construct a browser would fetch something for is absent, so the only
+// requests the page makes are the ones its own script makes to this origin.
 func TestDocsPageIsSelfContained(t *testing.T) {
 	t.Parallel()
 	app := mustBuild(t, newIntegrationApp())
 	body := do(t, app, "GET", "/docs").Body.String()
 
-	for _, external := range []string{"http://", "https://", "//unpkg", "//cdn"} {
-		if strings.Contains(body, external) {
-			t.Errorf("the docs page references something external (%q), which a strict policy would block", external)
+	for _, loader := range []string{"src=", "<link", "@import", "url(", "//unpkg", "//cdn", "//fonts."} {
+		if strings.Contains(body, loader) {
+			t.Errorf("the docs page loads something (%q), which a strict policy would block", loader)
 		}
 	}
 }
@@ -116,8 +123,8 @@ func TestDocsPageContentSecurityPolicy(t *testing.T) {
 	t.Parallel()
 	app := mustBuild(t, newIntegrationApp())
 
-	first := do(t, app, "GET", "/docs")
-	policy := first.Header().Get("Content-Security-Policy")
+	rec := do(t, app, "GET", "/docs")
+	policy := rec.Header().Get("Content-Security-Policy")
 	if policy == "" {
 		t.Fatal("the docs page carries no content security policy")
 	}
@@ -129,38 +136,208 @@ func TestDocsPageContentSecurityPolicy(t *testing.T) {
 			t.Errorf("the policy is missing %q:\n%s", directive, policy)
 		}
 	}
-	if strings.Contains(policy, "unsafe-inline") {
-		t.Errorf("the policy allows inline script, defeating the nonce:\n%s", policy)
+	for _, escape := range []string{"unsafe-inline", "unsafe-eval", "unsafe-hashes"} {
+		if strings.Contains(policy, escape) {
+			t.Errorf("the policy allows %s, which would defeat the hashes:\n%s", escape, policy)
+		}
 	}
 
-	nonce := nonceFrom(t, policy)
-	if !strings.Contains(first.Body.String(), `nonce="`+nonce+`"`) {
-		t.Error("the page's script is not tagged with the policy nonce")
+	// The page is a constant, so its policy is one too: a client may cache the
+	// page and revalidate it, which a per-response nonce would forbid.
+	if second := do(t, app, "GET", "/docs"); second.Header().Get("Content-Security-Policy") != policy {
+		t.Error("the policy changed between responses, so the page cannot be cached")
 	}
-
-	// A nonce that repeated across responses would be no better than allowing
-	// inline script outright.
-	second := do(t, app, "GET", "/docs")
-	if nonceFrom(t, second.Header().Get("Content-Security-Policy")) == nonce {
-		t.Error("the same nonce was reused across responses")
-	}
-	if got := first.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("Cache-Control = %q, want no-store so a nonce is never cached", got)
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache so the page is revalidated rather than refetched", got)
 	}
 }
 
-// nonceFrom extracts the nonce from a content security policy.
-func nonceFrom(t *testing.T, policy string) string {
+// TestDocsPagePolicyCoversItsOwnScript checks the hashes name what the page
+// actually carries. A policy whose hash did not match would leave the page
+// inert in a browser while every test that only reads headers still passed.
+func TestDocsPagePolicyCoversItsOwnScript(t *testing.T) {
+	t.Parallel()
+	app := mustBuild(t, newIntegrationApp())
+
+	rec := do(t, app, "GET", "/docs")
+	policy := rec.Header().Get("Content-Security-Policy")
+	body := rec.Body.String()
+
+	for _, element := range []string{"script", "style"} {
+		block := inlineBlock(t, body, element)
+		sum := sha256.Sum256([]byte(block))
+		want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+		if !strings.Contains(policy, want) {
+			t.Errorf("the policy does not cover the page's own %s block:\n%s", element, policy)
+		}
+	}
+}
+
+// inlineBlock returns the contents of the first inline block of one kind,
+// which is what the policy hashes.
+func inlineBlock(t *testing.T, page, element string) string {
 	t.Helper()
-	_, after, found := strings.Cut(policy, "script-src 'nonce-")
+	_, after, found := strings.Cut(page, "<"+element)
 	if !found {
-		t.Fatalf("no nonce in policy: %s", policy)
+		t.Fatalf("the page carries no <%s> block", element)
 	}
-	nonce, _, _ := strings.Cut(after, "'")
-	if nonce == "" {
-		t.Fatalf("empty nonce in policy: %s", policy)
+	_, body, found := strings.Cut(after, ">")
+	if !found {
+		t.Fatalf("the <%s> tag is not closed", element)
 	}
-	return nonce
+	block, _, found := strings.Cut(body, "</"+element+">")
+	if !found {
+		t.Fatalf("the <%s> block is not closed", element)
+	}
+	return block
+}
+
+// TestDocsAreServedCompressed covers the compressed representation prepared at
+// start-up: a client that accepts gzip gets fewer bytes, an entity tag of its
+// own, and a Vary header so that a cache never hands one representation to a
+// client that asked for the other.
+func TestDocsAreServedCompressed(t *testing.T) {
+	t.Parallel()
+	app := mustBuild(t, newIntegrationApp())
+
+	for _, path := range []string{"/docs", "/openapi.json"} {
+		plain := do(t, app, "GET", path)
+		assertStatus(t, plain, http.StatusOK)
+
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		packed := doRequest(t, app, req)
+		assertStatus(t, packed, http.StatusOK)
+
+		if got := packed.Header().Get("Content-Encoding"); got != "gzip" {
+			t.Fatalf("%s: Content-Encoding = %q, want gzip", path, got)
+		}
+		if packed.Body.Len() >= plain.Body.Len() {
+			t.Errorf("%s: the compressed body is not smaller: %d >= %d",
+				path, packed.Body.Len(), plain.Body.Len())
+		}
+		if got := packed.Header().Get("Vary"); !strings.Contains(got, "Accept-Encoding") {
+			t.Errorf("%s: Vary = %q, want it to name Accept-Encoding", path, got)
+		}
+		if packed.Header().Get("ETag") == plain.Header().Get("ETag") {
+			t.Errorf("%s: both representations carry the same entity tag", path)
+		}
+
+		reader, err := gzip.NewReader(bytes.NewReader(packed.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("%s: the compressed body is not gzip: %v", path, err)
+		}
+		decoded, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatalf("%s: the compressed body does not decode: %v", path, err)
+		}
+		if !bytes.Equal(decoded, plain.Body.Bytes()) {
+			t.Errorf("%s: the compressed body decodes to something else", path)
+		}
+	}
+}
+
+// TestDocsCompressedRepresentationRevalidates checks the conditional request a
+// browser makes on its second visit, which is the one that has to match the
+// representation it holds rather than the other one.
+func TestDocsCompressedRepresentationRevalidates(t *testing.T) {
+	t.Parallel()
+	app := mustBuild(t, newIntegrationApp())
+
+	first := httptest.NewRequest("GET", "/docs", nil)
+	first.Header.Set("Accept-Encoding", "gzip")
+	rec := doRequest(t, app, first)
+	etag := rec.Header().Get("ETag")
+
+	again := httptest.NewRequest("GET", "/docs", nil)
+	again.Header.Set("Accept-Encoding", "gzip")
+	again.Header.Set("If-None-Match", etag)
+	assertStatus(t, doRequest(t, app, again), http.StatusNotModified)
+
+	// The same tag against the uncompressed representation is a different
+	// document, and has to be answered with one.
+	plain := httptest.NewRequest("GET", "/docs", nil)
+	plain.Header.Set("If-None-Match", etag)
+	assertStatus(t, doRequest(t, app, plain), http.StatusOK)
+}
+
+// TestDocsRefuseGzipWhenTheClientDoes covers a client that names gzip only to
+// reject it.
+func TestDocsRefuseGzipWhenTheClientDoes(t *testing.T) {
+	t.Parallel()
+	app := mustBuild(t, newIntegrationApp())
+
+	req := httptest.NewRequest("GET", "/docs", nil)
+	req.Header.Set("Accept-Encoding", "gzip;q=0")
+	rec := doRequest(t, app, req)
+	if got := rec.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding = %q, want the body sent as it is", got)
+	}
+}
+
+func TestMatchesETag(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		header, etag string
+		want         bool
+	}{
+		{"", `"abc"`, false},
+		{`"abc"`, `"abc"`, true},
+		{`W/"abc"`, `"abc"`, true},
+		{`"other", "abc"`, `"abc"`, true},
+		{"*", `"abc"`, true},
+		{`"abc"`, `"abc-gzip"`, false},
+		{`"nope"`, `"abc"`, false},
+	}
+	for _, tc := range tests {
+		if got := matchesETag(tc.header, tc.etag); got != tc.want {
+			t.Errorf("matchesETag(%q, %q) = %v, want %v", tc.header, tc.etag, got, tc.want)
+		}
+	}
+}
+
+func TestInlineHashes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, page string
+		want       int
+	}{
+		{"every block, attributes and all", "<style media=all>a{}</style><p>x</p><style>b{}</style>", 2},
+		{"no block of that kind", "<p>nothing here</p>", 0},
+		{"an opening tag left unclosed", "<style media=all", 0},
+		{"a block left unclosed", "<style>a{}", 0},
+		{"one block closed, the next not", "<style>a{}</style><style>b{}", 1},
+	}
+	for _, tc := range tests {
+		got := inlineHashes(tc.page, "style")
+		if count := strings.Count(got, "'sha256-"); count != tc.want {
+			t.Errorf("%s: inlineHashes(%q) = %q, want %d hashes", tc.name, tc.page, got, tc.want)
+		}
+		if tc.want == 0 && got != "'none'" {
+			t.Errorf("%s: inlineHashes(%q) = %q, want 'none'", tc.name, tc.page, got)
+		}
+	}
+}
+
+// TestAssetSkipsCompressionThatWouldNotHelp covers the body small or dense
+// enough that gzip makes it longer, which is sent as it is.
+func TestAssetSkipsCompressionThatWouldNotHelp(t *testing.T) {
+	t.Parallel()
+	as := newAsset("text/plain", []byte("no"))
+	if as.gzip != nil {
+		t.Errorf("a two-byte body was kept compressed at %d bytes", len(as.gzip))
+	}
+
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	as.serve(rec, req)
+	if got := rec.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding = %q, want none", got)
+	}
+	if got := rec.Header().Get("Vary"); got != "" {
+		t.Errorf("Vary = %q, want none for a body with one representation", got)
+	}
 }
 
 func TestDocsPageMethods(t *testing.T) {
@@ -260,24 +437,6 @@ func TestIsReadMethod(t *testing.T) {
 		if got := isReadMethod(method); got != want {
 			t.Errorf("isReadMethod(%q) = %v, want %v", method, got, want)
 		}
-	}
-}
-
-func TestNewNonce(t *testing.T) {
-	t.Parallel()
-	seen := map[string]bool{}
-	for range 100 {
-		nonce, err := newNonce()
-		if err != nil {
-			t.Fatalf("newNonce = %v", err)
-		}
-		if len(nonce) < 20 {
-			t.Errorf("nonce %q is too short to be unguessable", nonce)
-		}
-		if seen[nonce] {
-			t.Fatalf("newNonce repeated %q", nonce)
-		}
-		seen[nonce] = true
 	}
 }
 

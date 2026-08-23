@@ -128,8 +128,8 @@ func walkProject(t *testing.T, visit func(name, content string)) {
 	t.Helper()
 	// The module root is this repository's root, so the walk starts here. It
 	// deliberately does not climb any higher: a checkout may sit inside a
-	// wider workspace holding the site and the dashboard, and those are not
-	// this module's to police.
+	// wider workspace holding the site as well, and that is not this module's
+	// to police.
 	root, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)

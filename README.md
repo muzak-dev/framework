@@ -75,7 +75,7 @@ type, and the compiler is what tells you rather than a bug report.
 | **Dependencies** | Guards and typed providers, read with `From[T](ctx)` and no cast anywhere |
 | **Real-time** | RFC 6455 WebSockets and typed server-sent events, implemented here rather than delegated |
 | **Versioning** | Per route or router, read from the path, a header, the `Accept` header or a function of your own |
-| **Documentation** | OpenAPI 3.1 at `/openapi.json` and a self-contained UI at `/docs`, both derived from the code |
+| **Documentation** | OpenAPI 3.1 at `/openapi.json` and a self-contained reference with a request console at `/docs`, both derived from the code |
 | **Defaults** | Conservative everywhere. Relaxing one is a decision you make out loud |
 
 ## A whole application
@@ -108,6 +108,37 @@ will run under. The application decides where things mount and what protects
 them, and that decision lives in one visible place.
 
 Start it and open `/docs`. A runnable version is in [`example/`](example).
+
+## Documentation, in the binary
+
+`/docs` is served from the module itself: one page, embedded at compile time,
+which loads no script, stylesheet or font from anywhere. It reads this
+application's own OpenAPI document and gives you the reference grouped by tag,
+every schema as an outline, and a console that sends the request from the page
+and shows the status, the timing, the headers and the body -- or hands you the
+same request as a `curl` command. An event stream is read as it arrives.
+
+Groups come from the tags a router carries, and are described where the
+application is configured:
+
+```go
+app := muzak.New(muzak.AppOptions{
+    Title:   "Awesome API",
+    Version: "1.0.0",
+    Tags: []muzak.Tag{
+        {Name: "items", Description: "Everything the catalogue holds."},
+        {Name: "admin", Description: "Operations that need a staff token."},
+    },
+})
+
+items := muzak.NewRouter(muzak.WithPrefix("/items"), muzak.WithTags("items"))
+```
+
+Described tags lead, in the order they are declared; a tag only a route names
+follows. The page is a constant once the application is built, so it is
+compressed once, cached by the client and revalidated with an entity tag, and
+it is served under a policy that names its own script by hash and permits no
+network access beyond this origin.
 
 ## Validation
 

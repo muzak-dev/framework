@@ -9,7 +9,36 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- A request console in the documentation page at `/docs`. Every operation can
+  be sent from the page itself, with the parameters, the JSON body and the
+  multipart form filled in beside the schema they come from; the response is
+  shown with its status, timing, size, headers and body, an event stream is
+  read as it arrives, and the same request can be copied as a `curl` command.
+  An **Authorize** panel adds a bearer token, an API key header or basic
+  credentials to what the console sends. They are held in the tab and never
+  stored.
+- The rest of the page grew with it: operations grouped by tag with a
+  description per group, schemas as expandable outlines carrying the
+  constraints the application enforces, generated examples, a filter over every
+  operation, deep links to an operation or a group, and a light, dark or
+  system theme.
+- `OpenAPIOptions.Tags` describes the groups operations are sorted into and
+  decides the order the documentation presents them in. Routes join a group
+  with `WithTags` as before; a described tag no route carries is left out, and
+  a tag nothing describes follows the described ones.
+
+### Changed
+
+- The documentation page and the OpenAPI document are compressed once when the
+  application is built and served with an entity tag per representation, so a
+  client that accepts gzip transfers a fraction of the bytes and a reload
+  transfers none.
+- The page's content security policy now names the page's own script and
+  stylesheet by hash instead of by a nonce issued per response. The page is a
+  constant again, which is what lets it be cached, revalidated and compressed
+  ahead of time; `Cache-Control` is `no-cache` rather than `no-store`.
 
 ## [0.1.0] - 2026-08-23
 

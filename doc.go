@@ -476,6 +476,21 @@
 // type, because the binding plan and the response schema were both compiled at
 // start-up.
 //
+// The page at /docs is embedded in the module and loads nothing from anywhere.
+// It reads this application's own document and renders the reference grouped
+// by tag, every schema as an outline, and a console that sends a request from
+// the page and reports the status, the timing, the headers and the body, or
+// writes that same request out as a curl command. Operations are grouped by
+// the tags [WithTags] puts on a router or a route; [OpenAPIOptions.Tags]
+// describes those groups and decides the order they are presented in.
+//
+// Both documents are rendered, hashed and compressed while the application is
+// built, so a request for either is a few header writes and a copy of bytes
+// that never change: each carries an entity tag the client revalidates
+// against, and the page is served under a content security policy that names
+// the page's own script by hash and permits no network access beyond this
+// origin.
+//
 // # Errors
 //
 // Every failure renders as one envelope, carrying a machine-readable code, a

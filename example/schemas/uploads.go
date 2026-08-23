@@ -20,7 +20,7 @@ type FileOut struct {
 // form with a file input and a text input sends.
 type UploadFileIn struct {
 	File muzak.File `file:"file" doc:"A file read as an upload"`
-	Note string      `form:"note" doc:"An optional note filed with the upload" required:"false"`
+	Note string     `form:"note" doc:"An optional note filed with the upload" required:"false"`
 }
 
 // UploadFileOut reports the metadata the client sent with the file. None of it

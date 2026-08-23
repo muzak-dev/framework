@@ -394,16 +394,16 @@ func TestCompressibleMediaTypes(t *testing.T) {
 	t.Parallel()
 	policy := CompressionOptions{}.withDefaults()
 	cases := map[string]bool{
-		"text/html; charset=utf-8":       true,
-		"application/json":               true,
-		"application/problem+json":       true,
-		"image/svg+xml":                  true,
-		"application/xhtml+xml":          true,
-		"image/png":                      false,
-		"application/octet-stream":       false,
-		"text/event-stream":              false,
-		"":                               false,
-		"not a media type at all; ;; ;":  false,
+		"text/html; charset=utf-8":      true,
+		"application/json":              true,
+		"application/problem+json":      true,
+		"image/svg+xml":                 true,
+		"application/xhtml+xml":         true,
+		"image/png":                     false,
+		"application/octet-stream":      false,
+		"text/event-stream":             false,
+		"":                              false,
+		"not a media type at all; ;; ;": false,
 		"application/vnd.muzak+unknown": false,
 	}
 	for contentType, want := range cases {

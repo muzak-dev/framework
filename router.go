@@ -124,10 +124,19 @@ func WithPrefix(prefix string) RouterOption {
 	return routerOptionFunc(func(c *routerConfig) { c.prefix = prefix })
 }
 
-// WithTags adds OpenAPI tags to a router or a single route. Tags applied to a
-// router are inherited by every route beneath it and are what group operations
-// in the generated documentation. Duplicates are removed while first-seen
-// order is preserved.
+// WithTags adds OpenAPI tags to a router or a single route, which is what
+// groups operations in the generated documentation.
+//
+// A router's tags are inherited by every route beneath it, and a route's own
+// tags add to what it inherited rather than replacing it, so an operation
+// appears under every group it names:
+//
+//	admin := muzak.NewRouter(muzak.WithTags("admin"))
+//	admin.Post("/actions", act, muzak.WithTags("audit"))  // admin and audit
+//
+// A route under a router that declares no tags at all is grouped by its own
+// tags alone. Duplicates are removed while first-seen order is preserved, and
+// the groups themselves are described and ordered by [OpenAPIOptions.Tags].
 func WithTags(tags ...string) SharedOption {
 	return sharedOption{
 		route:  func(c *routeConfig) { c.tags = append(c.tags, tags...) },

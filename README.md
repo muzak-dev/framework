@@ -222,3 +222,7 @@ Dual-licensed under either of
 
 at your option. Unless you state otherwise, any contribution you intentionally
 submit for inclusion shall be dual-licensed as above, with no additional terms.
+
+[`LICENSE`](LICENSE) is a copy of the MIT text, so that tools looking for a file
+by that name find a licence they can classify rather than a pointer they cannot.
+It grants nothing beyond what the two files above already offer.

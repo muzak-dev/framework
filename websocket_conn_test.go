@@ -336,39 +336,53 @@ func TestWSConnTruncatedFrames(t *testing.T) {
 
 func TestWSConnDeadlines(t *testing.T) {
 	t.Parallel()
-	now := time.Now()
+
+	// Each case is judged against a baseline taken inside its own subtest, not
+	// against one captured here. The subtests are parallel, so they do not run
+	// until this function returns, and any wall-clock time at all may pass in
+	// between; a baseline from out here made the comparison a race against the
+	// scheduler rather than a test of which deadline was chosen.
+	//
+	// The boundary is half a minute for the same reason. The question is only
+	// ever whether the connection's minute-long timeout won or the caller's
+	// one-second deadline did, and separating them by thirty seconds answers it
+	// without depending on how promptly the subtest was scheduled.
+	const boundary = 30 * time.Second
+
 	cases := []struct {
 		name         string
 		writeTimeout time.Duration
 		ctxDeadline  time.Duration
-		want         func(chosen time.Time) bool
+		want         func(chosen, base time.Time) bool
 		describe     string
 	}{
 		{
 			name:         "the connection's own timeout",
 			writeTimeout: time.Minute,
-			want:         func(chosen time.Time) bool { return chosen.After(now.Add(30 * time.Second)) },
+			want:         func(chosen, base time.Time) bool { return chosen.After(base.Add(boundary)) },
 			describe:     "a deadline about a minute away",
 		},
 		{
 			name:         "the caller's earlier deadline",
 			writeTimeout: time.Minute,
 			ctxDeadline:  time.Second,
-			want:         func(chosen time.Time) bool { return chosen.Before(now.Add(2 * time.Second)) },
+			want:         func(chosen, base time.Time) bool { return chosen.Before(base.Add(boundary)) },
 			describe:     "the caller's own deadline",
 		},
 		{
 			name:         "no timeout and no deadline",
 			writeTimeout: -1,
-			want:         func(chosen time.Time) bool { return chosen.IsZero() },
+			want:         func(chosen, base time.Time) bool { return chosen.IsZero() },
 			describe:     "no deadline at all",
 		},
 		{
 			name:         "no timeout but a deadline",
 			writeTimeout: -1,
 			ctxDeadline:  time.Second,
-			want:         func(chosen time.Time) bool { return !chosen.IsZero() && chosen.Before(now.Add(2*time.Second)) },
-			describe:     "the caller's own deadline",
+			want: func(chosen, base time.Time) bool {
+				return !chosen.IsZero() && chosen.Before(base.Add(boundary))
+			},
+			describe: "the caller's own deadline",
 		},
 	}
 	for _, tc := range cases {
@@ -376,12 +390,13 @@ func TestWSConnDeadlines(t *testing.T) {
 			t.Parallel()
 			conn, _ := newPipeConns(t, WSOptions{WriteTimeout: tc.writeTimeout})
 			ctx := context.Background()
+			base := time.Now()
 			if tc.ctxDeadline > 0 {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, tc.ctxDeadline)
 				defer cancel()
 			}
-			if chosen := conn.deadline(ctx); !tc.want(chosen) {
+			if chosen := conn.deadline(ctx); !tc.want(chosen, base) {
 				t.Errorf("deadline = %v, want %s", chosen, tc.describe)
 			}
 		})

@@ -663,3 +663,135 @@ func TestValidationResponseIsDocumentedOnlyWhenInputIsBound(t *testing.T) {
 		t.Error("a route that binds input does not describe a validation failure")
 	}
 }
+
+// TestTagsAreDescribedAndOrdered covers what [OpenAPIOptions.Tags] adds to the
+// tags a route names: a sentence of explanation, and the running order the
+// documentation is presented in.
+func TestTagsAreDescribedAndOrdered(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.Tags = []Tag{
+		{Name: "items", Description: "Everything the catalogue holds."},
+		{Name: "admin", Description: "Operations that need a staff token."},
+		{Name: "unused", Description: "Described but carried by no route."},
+	}
+
+	app := New(opts)
+	app.Get("/feed", okHandler, WithTags("feed"))
+	app.Get("/admin", okHandler, WithTags("admin"))
+	app.Get("/items", okHandler, WithTags("items"))
+	mustBuild(t, app)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+
+	// The described tags lead, in the order they were declared rather than the
+	// order the routes were registered; the undescribed one follows.
+	want := []Tag{
+		{Name: "items", Description: "Everything the catalogue holds."},
+		{Name: "admin", Description: "Operations that need a staff token."},
+		{Name: "feed"},
+	}
+	if len(doc.Tags) != len(want) {
+		t.Fatalf("tags = %+v, want %+v", doc.Tags, want)
+	}
+	for i, tag := range want {
+		if doc.Tags[i] != tag {
+			t.Errorf("tag %d = %+v, want %+v", i, doc.Tags[i], tag)
+		}
+	}
+}
+
+// TestTagsAreListedOncePerName checks that a tag several routes carry, or one
+// described twice, is listed once.
+func TestTagsAreListedOncePerName(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.Tags = []Tag{{Name: "items", Description: "First."}, {Name: "items", Description: "Second."}}
+
+	app := New(opts)
+	app.Get("/items", okHandler, WithTags("items"))
+	app.Post("/items", okHandler, WithTags("items"))
+	mustBuild(t, app)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+	if len(doc.Tags) != 1 || doc.Tags[0].Description != "First." {
+		t.Errorf("tags = %+v, want the first description, listed once", doc.Tags)
+	}
+}
+
+// TestHiddenRoutesDoNotContributeTags checks that a tag carried only by a
+// route left out of the document does not appear in it.
+func TestHiddenRoutesDoNotContributeTags(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/open", okHandler, WithTags("open"))
+	app.Get("/secret", okHandler, WithTags("secret"), Hidden())
+	mustBuild(t, app)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+	if len(doc.Tags) != 1 || doc.Tags[0].Name != "open" {
+		t.Errorf("tags = %+v, want only the tag a documented route carries", doc.Tags)
+	}
+}
+
+// TestRouteLevelTagsReachTheDocument checks that a tag declared on one route
+// groups that operation, both where the route is the only thing that names a
+// tag and where it adds one to what its router contributes.
+func TestRouteLevelTagsReachTheDocument(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.Tags = []Tag{{Name: "audit", Description: "Written from the route itself."}}
+
+	app := New(opts)
+	admin := NewRouter(WithPrefix("/admin"), WithTags("admin"))
+	admin.Post("/actions", okHandler, WithTags("audit"))
+	admin.Get("/actions", okHandler)
+
+	loose := NewRouter()
+	loose.Post("/note", okHandler, WithTags("notes"))
+
+	app.Include(admin)
+	app.Include(loose)
+	mustBuild(t, app)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+
+	// The route's own tag adds to the one it inherited, so the operation is
+	// grouped under both.
+	tagged := doc.Paths["/admin/actions"].Post.Tags
+	if len(tagged) != 2 || tagged[0] != "admin" || tagged[1] != "audit" {
+		t.Errorf("the route's tags = %v, want [admin audit]", tagged)
+	}
+	if inherited := doc.Paths["/admin/actions"].Get.Tags; len(inherited) != 1 || inherited[0] != "admin" {
+		t.Errorf("a route that declares none = %v, want [admin]", inherited)
+	}
+	// A router that declares no tags leaves its route grouped by its own.
+	if only := doc.Paths["/note"].Post.Tags; len(only) != 1 || only[0] != "notes" {
+		t.Errorf("a route-only tag = %v, want [notes]", only)
+	}
+
+	// Each of them is listed once in the document, described where the
+	// application described it.
+	var names []string
+	for _, tag := range doc.Tags {
+		names = append(names, tag.Name)
+		if tag.Name == "audit" && tag.Description != "Written from the route itself." {
+			t.Errorf("the route-level tag lost its description: %+v", tag)
+		}
+	}
+	if strings.Join(names, ",") != "audit,admin,notes" {
+		t.Errorf("tags = %v, want the described one first, then first-use order", names)
+	}
+}

@@ -42,6 +42,21 @@ type OpenAPIOptions struct {
 	// Servers lists the base URLs the API is served from. When empty,
 	// documentation tools treat the document's own origin as the server.
 	Servers []Server
+	// Tags describes the groups operations are sorted into, and decides the
+	// order they are presented in. A route joins a group by naming it with
+	// [WithTags]; describing it here is what gives the group a sentence of
+	// explanation and a place in the running order:
+	//
+	//	Tags: []muzak.Tag{
+	//		{Name: "items", Description: "Everything the catalogue holds."},
+	//		{Name: "admin", Description: "Operations that need a staff token."},
+	//	}
+	//
+	// A tag no route carries is left out of the document, since it would
+	// document an empty group, and a tag some route carries but nothing here
+	// describes still appears, after the described ones, in the order the
+	// routes named it.
+	Tags []Tag
 }
 
 // Contact identifies the people responsible for an API.
@@ -320,13 +335,45 @@ func (a *App) buildDocument() *Document {
 		tags = append(tags, rt.Tags...)
 	}
 
-	for _, name := range dedupeStrings(tags) {
-		doc.Tags = append(doc.Tags, Tag{Name: name})
-	}
+	doc.Tags = a.tagList(tags)
 	if len(builder.schemas) > 0 {
 		doc.Components = &Components{Schemas: builder.schemas}
 	}
 	return doc
+}
+
+// tagList describes and orders the groups the routes are sorted into.
+//
+// A tag described in [OpenAPIOptions.Tags] keeps the position it was declared
+// at and the description it was given, which is how an application decides
+// what its documentation leads with; a tag only a route names follows, in the
+// order the routes named it. A described tag no route carries is dropped,
+// because a documentation tool would otherwise render an empty group for it.
+func (a *App) tagList(used []string) []Tag {
+	names := dedupeStrings(used)
+	if len(names) == 0 {
+		return nil
+	}
+	carried := make(map[string]bool, len(names))
+	for _, name := range names {
+		carried[name] = true
+	}
+
+	tags := make([]Tag, 0, len(names))
+	described := make(map[string]bool, len(a.opts.Tags))
+	for _, tag := range a.opts.Tags {
+		if !carried[tag.Name] || described[tag.Name] {
+			continue
+		}
+		described[tag.Name] = true
+		tags = append(tags, tag)
+	}
+	for _, name := range names {
+		if !described[name] {
+			tags = append(tags, Tag{Name: name})
+		}
+	}
+	return tags
 }
 
 // docPath converts a route template into the form OpenAPI expects, where a

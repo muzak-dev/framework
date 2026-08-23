@@ -31,8 +31,7 @@ func Login(ctx *muzak.Context, in schemas.LoginIn) (schemas.LoginOut, error) {
 	// the same thing more quietly.
 	matches := subtle.ConstantTimeCompare([]byte(expected), []byte(in.Password)) == 1
 	if !known || !matches {
-		return schemas.LoginOut{}, muzak.NewHTTPError(
-			http.StatusUnauthorized, "the username or password is incorrect")
+		return schemas.LoginOut{}, muzak.Unauthorized("the username or password is incorrect")
 	}
 
 	session := uuid.NewV4().String()

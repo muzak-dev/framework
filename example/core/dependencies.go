@@ -1,8 +1,6 @@
 package core
 
 import (
-	"net/http"
-
 	"muzak.dev/framework"
 )
 
@@ -24,7 +22,7 @@ type CurrentUser struct {
 // the response.
 func GetQueryToken(ctx *muzak.Context) error {
 	if ctx.Query("token") == "" {
-		return muzak.NewHTTPError(http.StatusBadRequest, "token is required")
+		return muzak.BadRequest("token is required")
 	}
 	return nil
 }
@@ -46,7 +44,7 @@ func GetTokenHeader(settings Settings) muzak.Guard {
 func GetCurrentUser(ctx *muzak.Context) (CurrentUser, error) {
 	token, present := muzak.BearerToken(ctx)
 	if !present {
-		return CurrentUser{}, muzak.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+		return CurrentUser{}, muzak.Unauthorized("")
 	}
 	// A real service would look the token up. This example accepts any bearer
 	// token and reports a fixed user, which is enough to show how a resolved
@@ -81,6 +79,6 @@ func GetSessionOrToken(ctx *muzak.Context) (SessionOrToken, error) {
 	if token := ctx.Query("token"); token != "" {
 		return SessionOrToken{Value: token}, nil
 	}
-	return SessionOrToken{}, muzak.NewHTTPError(http.StatusUnauthorized,
+	return SessionOrToken{}, muzak.Unauthorized(
 		"a session cookie or a token query parameter is required")
 }

@@ -525,6 +525,22 @@
 // logged and never transmitted. Replace the shape entirely with
 // [AppOptions.ErrorRenderer].
 //
+// There is a constructor for each outcome worth a name of its own, so that
+// returning the right response does not mean remembering the right number:
+//
+//	return schemas.UserOut{}, muzak.NotFound("no user goes by that name")
+//	return schemas.UserOut{}, muzak.Forbidden("")          // the standard sentence
+//	return schemas.UserOut{}, muzak.Conflict("that name is taken").Wrap(err)
+//
+// [BadRequest], [Unauthorized], [PaymentRequired], [Forbidden], [NotFound],
+// [MethodNotAllowed], [NotAcceptable], [RequestTimeout], [Conflict], [Gone],
+// [PreconditionFailed], [PayloadTooLarge], [UnsupportedMediaType],
+// [UnprocessableEntity], [TooManyRequests], [InternalServerError],
+// [NotImplemented], [BadGateway], [ServiceUnavailable] and [GatewayTimeout]
+// each return an [*HTTPError] carrying that status and its classifier, so
+// [HTTPError.Wrap], [HTTPError.WithCode] and [HTTPError.WithDetails] chain
+// onto every one of them. Any other status is one [NewHTTPError] can produce.
+//
 // # Defaults worth knowing
 //
 // Muzak starts from settings that are safe rather than permissive. Every

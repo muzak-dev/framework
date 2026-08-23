@@ -79,6 +79,9 @@ const (
 	// CodeUnauthorized classifies a request that carried no usable
 	// credentials.
 	CodeUnauthorized = "unauthorized"
+	// CodePaymentRequired classifies a request refused until an account is in
+	// good standing.
+	CodePaymentRequired = "payment_required"
 	// CodeForbidden classifies a request whose credentials were understood
 	// but insufficient.
 	CodeForbidden = "forbidden"
@@ -88,9 +91,21 @@ const (
 	// CodeMethodNotAllowed classifies a request whose method is not served at
 	// an otherwise valid path.
 	CodeMethodNotAllowed = "method_not_allowed"
+	// CodeNotAcceptable classifies a request whose Accept header rules out
+	// every representation the route can produce.
+	CodeNotAcceptable = "not_acceptable"
+	// CodeRequestTimeout classifies a request that arrived too slowly to be
+	// waited for.
+	CodeRequestTimeout = "request_timeout"
 	// CodeConflict classifies a request that collides with the current state
 	// of the resource.
 	CodeConflict = "conflict"
+	// CodeGone classifies a resource that existed and was deliberately
+	// removed.
+	CodeGone = "gone"
+	// CodePreconditionFailed classifies a conditional request whose
+	// precondition did not hold.
+	CodePreconditionFailed = "precondition_failed"
 	// CodePayloadTooLarge classifies a request body over the route's limit.
 	CodePayloadTooLarge = "payload_too_large"
 	// CodeUnsupportedMediaType classifies a body sent under a media type the
@@ -101,6 +116,16 @@ const (
 	CodeValidationError = "validation_error"
 	// CodeTooManyRequests classifies a rate-limited request.
 	CodeTooManyRequests = "too_many_requests"
+	// CodeNotImplemented classifies a route that exists but does nothing yet.
+	CodeNotImplemented = "not_implemented"
+	// CodeBadGateway classifies a dependency answering with something
+	// unusable.
+	CodeBadGateway = "bad_gateway"
+	// CodeServiceUnavailable classifies a dependency that is down or an
+	// application shedding load.
+	CodeServiceUnavailable = "service_unavailable"
+	// CodeGatewayTimeout classifies a dependency that did not answer in time.
+	CodeGatewayTimeout = "gateway_timeout"
 	// CodeInternalError classifies an unexpected server-side fault. It is the
 	// code used for every error that does not describe itself, and the
 	// response never carries anything derived from the underlying cause.
@@ -121,14 +146,23 @@ const (
 var statusCodes = map[int]string{
 	http.StatusBadRequest:            CodeBadRequest,
 	http.StatusUnauthorized:          CodeUnauthorized,
+	http.StatusPaymentRequired:       CodePaymentRequired,
 	http.StatusForbidden:             CodeForbidden,
 	http.StatusNotFound:              CodeNotFound,
 	http.StatusMethodNotAllowed:      CodeMethodNotAllowed,
+	http.StatusNotAcceptable:         CodeNotAcceptable,
+	http.StatusRequestTimeout:        CodeRequestTimeout,
 	http.StatusConflict:              CodeConflict,
+	http.StatusGone:                  CodeGone,
+	http.StatusPreconditionFailed:    CodePreconditionFailed,
 	http.StatusRequestEntityTooLarge: CodePayloadTooLarge,
 	http.StatusUnsupportedMediaType:  CodeUnsupportedMediaType,
 	http.StatusUnprocessableEntity:   CodeValidationError,
 	http.StatusTooManyRequests:       CodeTooManyRequests,
+	http.StatusNotImplemented:        CodeNotImplemented,
+	http.StatusBadGateway:            CodeBadGateway,
+	http.StatusServiceUnavailable:    CodeServiceUnavailable,
+	http.StatusGatewayTimeout:        CodeGatewayTimeout,
 }
 
 // CodeForStatus returns the default error code for an HTTP status.

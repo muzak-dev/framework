@@ -86,8 +86,19 @@ func TestCodeForStatus(t *testing.T) {
 		{http.StatusUnsupportedMediaType, CodeUnsupportedMediaType},
 		{http.StatusUnprocessableEntity, CodeValidationError},
 		{http.StatusTooManyRequests, CodeTooManyRequests},
+		{http.StatusPaymentRequired, CodePaymentRequired},
+		{http.StatusNotAcceptable, CodeNotAcceptable},
+		{http.StatusRequestTimeout, CodeRequestTimeout},
+		{http.StatusGone, CodeGone},
+		{http.StatusPreconditionFailed, CodePreconditionFailed},
+		{http.StatusNotImplemented, CodeNotImplemented},
+		{http.StatusBadGateway, CodeBadGateway},
+		{http.StatusServiceUnavailable, CodeServiceUnavailable},
+		{http.StatusGatewayTimeout, CodeGatewayTimeout},
+		// A status Muzak has no classifier for falls back by class: a 4xx is
+		// a client error and everything else is an internal one.
 		{http.StatusTeapot, CodeClientError},
-		{http.StatusBadGateway, CodeInternalError},
+		{http.StatusVariantAlsoNegotiates, CodeInternalError},
 		{http.StatusOK, CodeInternalError},
 	}
 	for _, tc := range tests {
@@ -189,7 +200,7 @@ func TestDefaultErrorRenderer(t *testing.T) {
 		{
 			name:   "http error with a wrapped secret",
 			err:    NewHTTPError(http.StatusBadGateway, "upstream unavailable").Wrap(errors.New("dial tcp 10.0.0.5:5432: refused")),
-			status: 502, code: CodeInternalError, message: "upstream unavailable",
+			status: 502, code: CodeBadGateway, message: "upstream unavailable",
 			notInMsg: "10.0.0.5",
 		},
 		{

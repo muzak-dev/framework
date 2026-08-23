@@ -76,4 +76,10 @@ jobs:
           cache: true
       - uses: golangci/golangci-lint-action@v6
         with:
+          # Build the linter from source with the toolchain set up above rather
+          # than downloading a release binary. golangci-lint refuses to analyse
+          # a module whose language version is newer than the Go it was itself
+          # built with, and the published binaries lag well behind 1.27.
+          install-mode: goinstall
+          version: latest
           args: --timeout=5m

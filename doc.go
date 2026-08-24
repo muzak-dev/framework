@@ -241,6 +241,66 @@
 // preference, matched from most to least preferred against whatever a route
 // actually answers.
 //
+// # Internationalization
+//
+// A request's locale is resolved once, before the handler runs, and every
+// message the response carries is written in it. That includes the ones Muzak
+// produces itself: the wording of each validation rule, what the binder says
+// about a value it could not read, and the sentence behind each HTTP status.
+//
+//	//go:embed locales
+//	var locales embed.FS
+//
+//	app := muzak.New(muzak.AppOptions{
+//		I18n: muzak.I18nOptions{Store: i18n.MustLoad(locales, "locales")},
+//	})
+//
+// A handler translates through its context, which already knows the locale:
+//
+//	func greet(ctx *muzak.Context, in Params) (Out, error) {
+//		return Out{
+//			Greeting: ctx.T("greeting.hello", "name", in.Name),
+//			Items:    ctx.T("greeting.items", "count", in.Items),
+//			Today:    ctx.L(time.Now(), "as", "date"),
+//		}, nil
+//	}
+//
+// The count both prints and chooses: "no items", "one item" and "5 items" are
+// three entries in the locale file, and the language decides which of them a
+// number selects. Muzak knows the CLDR arithmetic for around ninety languages,
+// so a locale file supplies only the words.
+//
+// Where the locale comes from is declared rather than written by hand. The
+// Accept-Language header is negotiated by default, honouring the quality values
+// the client sent; [LocaleFromPath], [LocaleFromQuery], [LocaleFromHeader],
+// [LocaleFromCookie] and [LocaleFromCustom] cover the rest, in whatever order
+// [I18nOptions.Sources] lists them. Nothing a request carries is used unless it
+// matches a locale the application declared, so what reaches a filesystem path
+// or a response header is always one of the application's own strings.
+//
+// A locale file names only what a service adds and the rules it wants worded
+// differently. Everything else falls through to the locale Muzak ships, so a
+// translation grows as a service is translated rather than having to be
+// complete before it is useful:
+//
+//	es:
+//	  errors:
+//	    messages:
+//	      blank: "es obligatorio"
+//	    models:
+//	      create_item:
+//	        attributes:
+//	          name:
+//	            blank: "cada articulo necesita un nombre"
+//
+// The four scopes there are tried narrowest first, so one rule on one field of
+// one model can be phrased without restating any other.
+//
+// Leaving [AppOptions.I18n] unset is internationalization turned off. No
+// middleware is installed, every message reads exactly as it does without this
+// feature existing, and nothing in muzak.dev/framework/i18n is linked into the
+// binary at all.
+//
 // # WebSockets
 //
 // [Router.WS] registers a WebSocket route. The handshake is an ordinary GET,

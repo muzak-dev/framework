@@ -244,6 +244,60 @@ server-side.
 }
 ```
 
+## Every language, including the framework's
+
+A locale is resolved once per request, from the Accept-Language header or from
+wherever else you say, and every string in the response is written in it. That
+includes the ones Muzak produces: each validation rule, each binder message, and
+the sentence behind each HTTP status.
+
+```go
+//go:embed locales
+var locales embed.FS
+
+app := muzak.New(muzak.AppOptions{
+    I18n: muzak.I18nOptions{Store: i18n.MustLoad(locales, "locales")},
+})
+```
+
+```go
+func greet(ctx *muzak.Context, in Params) (Out, error) {
+    return Out{
+        Greeting: ctx.T("greeting.hello", "name", in.Name),
+        Items:    ctx.T("greeting.items", "count", in.Items),
+        Today:    ctx.L(time.Now(), "as", "date"),
+    }, nil
+}
+```
+
+A count both prints and chooses which wording prints it, so "no items", "one
+item" and "5 items" are three entries in the file and the language decides
+between them. Muzak carries the CLDR arithmetic for around ninety languages, so
+a locale file supplies only the words.
+
+Locale files are YAML, read by a parser written for this and nothing else, so
+the zero-dependency guarantee holds and a file from the published rails-i18n
+corpus loads unchanged. A file names only what your service adds and the rules
+you want worded differently; everything else falls through to the locale Muzak
+ships:
+
+```yaml
+es:
+  errors:
+    messages:
+      blank: "es obligatorio"
+```
+
+```
+$ curl -H 'Accept-Language: es' localhost:8080/items -d '{"name": ""}'
+{"error":{"message":"La solicitud no pudo ser validada.","status":422,
+  "details":[{"field":"name","location":"body","issue":"es obligatorio"}]}}
+```
+
+Leave the option out and none of this exists: no middleware runs, every message
+reads exactly as it did, and the engine, the YAML parser and the plural rules
+are not linked into the binary at all.
+
 ## Safe defaults
 
 Every default is the conservative one. Listener timeouts are all non-zero,
@@ -310,6 +364,7 @@ in the standard library of Go 1.27, including `encoding/json/v2` and `uuid`.
 | [Request data](https://muzak.dev/docs/getting-started/request-data) | Every place an input field can be read from |
 | [Dependencies](https://muzak.dev/docs/getting-started/dependencies) | Guards, providers, singletons |
 | [Validation](https://muzak.dev/docs/fundamentals/validation) | Rules, transforms, cross-field checks |
+| [Internationalization](https://muzak.dev/docs/fundamentals/internationalization) | Locales, translations, pluralization, localized errors |
 | [Versioning](https://muzak.dev/docs/fundamentals/versioning) | Four schemes, and what each costs |
 | [WebSockets](https://muzak.dev/docs/realtime/websockets) | Handshake, bounds, what a hostile peer cannot do |
 | [Server-sent events](https://muzak.dev/docs/realtime/server-sent-events) | Typed streams, resuming, keepalive |

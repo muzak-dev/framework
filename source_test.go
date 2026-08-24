@@ -48,8 +48,16 @@ func (f finding) String() string {
 	return fmt.Sprintf("line %d contains the non-ASCII rune %q (U+%04X)", f.line, string(f.rune), f.rune)
 }
 
-// findNonASCII returns one finding per non-ASCII rune in content.
-func findNonASCII(content string) []finding {
+// findNonASCII returns one finding per offending rune in content.
+//
+// A locale file is exempt from the plain-ASCII rule, and from that rule alone.
+// Its whole purpose is text in a language other than English, so requiring
+// escapes there would make the one file translators actually edit the one file
+// they cannot read. The confusable punctuation in [disallowedRunes] stays
+// forbidden everywhere, including in locale files: an invisible space or a
+// smart quote is a mistake in any language.
+func findNonASCII(name, content string) []finding {
+	locale := isLocaleFile(name)
 	var found []finding
 	line := 1
 	for _, r := range content {
@@ -60,9 +68,24 @@ func findNonASCII(content string) []finding {
 		if r < utf8.RuneSelf {
 			continue
 		}
-		found = append(found, finding{line: line, rune: r, why: disallowedRunes[r]})
+		why, confusable := disallowedRunes[r]
+		if locale && !confusable {
+			continue
+		}
+		found = append(found, finding{line: line, rune: r, why: why})
 	}
 	return found
+}
+
+// isLocaleFile reports whether a path names a translation file, which is any
+// file inside a directory called "locales".
+func isLocaleFile(name string) bool {
+	for _, segment := range strings.Split(filepath.ToSlash(name), "/") {
+		if segment == "locales" {
+			return true
+		}
+	}
+	return false
 }
 
 // TestSourcesAreASCII walks the whole project and fails on any file carrying a
@@ -74,7 +97,7 @@ func findNonASCII(content string) []finding {
 func TestSourcesAreASCII(t *testing.T) {
 	t.Parallel()
 	walkProject(t, func(name, content string) {
-		for _, f := range findNonASCII(content) {
+		for _, f := range findNonASCII(name, content) {
 			t.Errorf("%s:%s", name, f)
 		}
 	})
@@ -195,23 +218,37 @@ func TestFindNonASCII(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
+		file    string
 		content string
 		want    int
 		message string
 	}{
-		{name: "clean ASCII", content: "package main\n// a plain comment\n", want: 0},
-		{name: "em dash", content: "a \u2014 b\n", want: 1, message: "em dash"},
-		{name: "smart quotes", content: "\u201Cquoted\u201D\n", want: 2, message: "quotation mark"},
-		{name: "unclassified non-ascii", content: "caf\u00E9\n", want: 1, message: "non-ASCII rune"},
-		{name: "counts every occurrence", content: "\u2014\u2014\u2014\n", want: 3, message: "em dash"},
-		{name: "reports the line number", content: "ok\nok\n\u2014\n", want: 1, message: "line 3"},
+		{name: "clean ASCII", file: "main.go", content: "package main\n// a plain comment\n", want: 0},
+		{name: "em dash", file: "main.go", content: "a \u2014 b\n", want: 1, message: "em dash"},
+		{name: "smart quotes", file: "main.go", content: "\u201Cquoted\u201D\n", want: 2, message: "quotation mark"},
+		{name: "unclassified non-ascii", file: "main.go", content: "caf\u00E9\n", want: 1, message: "non-ASCII rune"},
+		{name: "counts every occurrence", file: "main.go", content: "\u2014\u2014\u2014\n", want: 3, message: "em dash"},
+		{name: "reports the line number", file: "main.go", content: "ok\nok\n\u2014\n", want: 1, message: "line 3"},
+
+		// A locale file may hold the language it is written in.
+		{name: "a locale file may be accented", file: "i18n/locales/fr.yml", content: "caf\u00E9\n", want: 0},
+		{name: "a locale file nested deeper", file: "example/locales/es.yml", content: "ma\u00F1ana\n", want: 0},
+		// It may not hold the punctuation that is banned for being invisible or
+		// confusable, which is a mistake in any language.
+		{name: "a locale file may not use an em dash", file: "i18n/locales/fr.yml",
+			content: "a \u2014 b\n", want: 1, message: "em dash"},
+		{name: "a locale file may not use a non-breaking space", file: "i18n/locales/fr.yml",
+			content: "a\u00A0b\n", want: 1, message: "non-breaking space"},
+		// A directory that merely mentions locales is not one.
+		{name: "a file beside the locales", file: "i18n/locales.go", content: "caf\u00E9\n",
+			want: 1, message: "non-ASCII rune"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			found := findNonASCII(tc.content)
+			found := findNonASCII(tc.file, tc.content)
 			if len(found) != tc.want {
-				t.Fatalf("findNonASCII(%q) = %d findings, want %d", tc.content, len(found), tc.want)
+				t.Fatalf("findNonASCII(%q, %q) = %d findings, want %d", tc.file, tc.content, len(found), tc.want)
 			}
 			if tc.message != "" && !strings.Contains(found[0].String(), tc.message) {
 				t.Errorf("message = %q, want it to mention %q", found[0], tc.message)

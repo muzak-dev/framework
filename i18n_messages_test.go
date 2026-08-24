@@ -702,3 +702,156 @@ func TestDetailsWithNothingToTranslate(t *testing.T) {
 		t.Errorf("details = %v, want the one written by hand, untouched", body.Error.Details)
 	}
 }
+
+// everyFormat exercises one rule of each kind added alongside the formats, so
+// that the wording they produce can be compared with the wording the shipped
+// locale carries for them.
+type everyFormat struct {
+	Secure   string    `json:"secure"`
+	Scheme   string    `json:"scheme"`
+	Host     string    `json:"host"`
+	Address  string    `json:"address"`
+	V4       string    `json:"v4"`
+	V6       string    `json:"v6"`
+	Network  string    `json:"network"`
+	Hardware string    `json:"hardware"`
+	Reserved string    `json:"reserved"`
+	Blank    string    `json:"blank"`
+	Control  string    `json:"control"`
+	Letters  string    `json:"letters"`
+	Alnum    string    `json:"alnum"`
+	Digits   string    `json:"digits"`
+	Plain    string    `json:"plain"`
+	Slug     string    `json:"slug"`
+	Hex      string    `json:"hex"`
+	Colour   string    `json:"colour"`
+	Encoded  string    `json:"encoded"`
+	Document string    `json:"document"`
+	Version  string    `json:"version"`
+	Phone    string    `json:"phone"`
+	Language string    `json:"language"`
+	Zone     string    `json:"zone"`
+	Country  string    `json:"country"`
+	Currency string    `json:"currency"`
+	Echo     string    `json:"echo"`
+	Small    string    `json:"small"`
+	Large    string    `json:"large"`
+	Above    int       `json:"above"`
+	Below    int       `json:"below"`
+	NotNeg   int       `json:"not_neg"`
+	NotPos   int       `json:"not_pos"`
+	Whole    float64   `json:"whole"`
+	Port     int       `json:"port"`
+	Choice   int       `json:"choice"`
+	Exactly  []string  `json:"exactly"`
+	Filled   []string  `json:"filled"`
+	Needs    []string  `json:"needs"`
+	Forbids  []string  `json:"forbids"`
+	Gone     time.Time `json:"gone"`
+	Coming   time.Time `json:"coming"`
+	Near     time.Time `json:"near"`
+}
+
+func (in *everyFormat) Validate(v *Validation) {
+	v.String(&in.Secure).HTTPS()
+	v.String(&in.Scheme).URLWithSchemes("s3")
+	v.String(&in.Host).Host()
+	v.String(&in.Address).IP()
+	v.String(&in.V4).IPv4()
+	v.String(&in.V6).IPv6()
+	v.String(&in.Network).CIDR()
+	v.String(&in.Hardware).MAC()
+	v.String(&in.Reserved).MatchesNot(`^tmp-`)
+	v.String(&in.Blank).NotBlank()
+	v.String(&in.Control).NoControl()
+	v.String(&in.Letters).Alpha()
+	v.String(&in.Alnum).Alphanumeric()
+	v.String(&in.Digits).Numeric()
+	v.String(&in.Plain).ASCII()
+	v.String(&in.Slug).Slug()
+	v.String(&in.Hex).Hex()
+	v.String(&in.Colour).HexColour()
+	v.String(&in.Encoded).Base64()
+	v.String(&in.Document).JSON()
+	v.String(&in.Version).Semver()
+	v.String(&in.Phone).E164()
+	v.String(&in.Language).LanguageTag()
+	v.String(&in.Zone).Timezone()
+	v.String(&in.Country).CountryCode()
+	v.String(&in.Currency).CurrencyCode()
+	v.String(&in.Echo).EqualFold("secret")
+	v.String(&in.Small).MinBytes(8)
+	v.String(&in.Large).MaxBytes(2)
+	v.Number(&in.Above).GreaterThan(10)
+	v.Number(&in.Below).LessThan(1)
+	v.Number(&in.NotNeg).NonNegative()
+	v.Number(&in.NotPos).NonPositive()
+	v.Number(&in.Whole).Whole()
+	v.Number(&in.Port).Port()
+	v.Number(&in.Choice).OneOf(1, 2)
+	v.Slice(&in.Exactly).Items(3)
+	v.Slice(&in.Filled).NotEmpty()
+	v.Slice(&in.Needs).Contains("read")
+	v.Slice(&in.Forbids).Excludes("*")
+	v.Time(&in.Gone).Past()
+	v.Time(&in.Coming).Future()
+	v.Time(&in.Near).Within(time.Minute)
+}
+
+// brokenFormats is a body that breaks every rule the model above declares.
+const brokenFormats = `{
+	"secure": "http://x.dev", "scheme": "https://x.dev", "host": "-bad.example",
+	"address": "nope", "v4": "::1", "v6": "127.0.0.1", "network": "10.0.0.0",
+	"hardware": "nope", "reserved": "tmp-1", "blank": "   ", "control": "a\rb",
+	"letters": "a1", "alnum": "a 1", "digits": "12a", "plain": "caf\u00e9",
+	"slug": "Not A Slug", "hex": "ghij", "colour": "fff", "encoded": "***",
+	"document": "{", "version": "1.4", "phone": "0555", "language": "pt_BR",
+	"zone": "Mars/Olympus", "country": "tr", "currency": "try", "echo": "other",
+	"small": "ab", "large": "abcd",
+	"above": 1, "below": 5, "not_neg": -1, "not_pos": 1, "whole": 1.5,
+	"port": 70000, "choice": 5,
+	"exactly": ["a"], "filled": [], "needs": ["write"], "forbids": ["*"],
+	"gone": "2200-01-01T00:00:00Z", "coming": "1971-01-01T00:00:00Z",
+	"near": "1971-01-01T00:00:00Z"
+}`
+
+// TestEnglishIsUnchangedForTheNewRules holds the rules added alongside the
+// formats to the same contract as the ones that came before.
+//
+// Every message exists twice: as the Go wording that produces it, and as a key
+// in the shipped locale. If the two disagree, an application that turns
+// internationalization on has its error responses silently reworded, which is
+// the one thing this feature must never do.
+func TestEnglishIsUnchangedForTheNewRules(t *testing.T) {
+	t.Parallel()
+
+	build := func(store Translator) *App {
+		options := quietOptions()
+		options.I18n = I18nOptions{Store: store}
+		app := New(options)
+		app.Post("/formats", func(*Context, everyFormat) (struct{}, error) {
+			return struct{}{}, nil
+		})
+		return mustBuild(t, app)
+	}
+
+	before := decodeError(t, do(t, build(nil), http.MethodPost, "/formats", brokenFormats))
+	after := decodeError(t, do(t, build(i18n.Builtin()), http.MethodPost, "/formats", brokenFormats))
+
+	// Every rule the model declares has to have produced a failure, or the
+	// comparison below would be comparing nothing.
+	if len(before.Error.Details) < 40 {
+		t.Fatalf("only %d rules failed, want every one of them", len(before.Error.Details))
+	}
+	if len(before.Error.Details) != len(after.Error.Details) {
+		t.Fatalf("the number of details changed: %d without i18n, %d with",
+			len(before.Error.Details), len(after.Error.Details))
+	}
+	for i := range before.Error.Details {
+		was, now := before.Error.Details[i], after.Error.Details[i]
+		if was.Field != now.Field || was.Issue != now.Issue {
+			t.Errorf("the message for %q changed when i18n was turned on:\n without: %q\n    with: %q",
+				was.Field, was.Issue, now.Issue)
+		}
+	}
+}

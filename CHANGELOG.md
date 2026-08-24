@@ -9,6 +9,122 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-24
+
+### Added
+
+- **Internationalization, with the framework's own messages included.** A
+  request's locale is resolved once, before the handler runs, and every string
+  in the response is written in it: the wording of each validation rule, what
+  the request binder says about a value it could not read, and the sentence
+  behind each HTTP status.
+
+  ```go
+  //go:embed locales
+  var locales embed.FS
+
+  app := muzak.New(muzak.AppOptions{
+      I18n: muzak.I18nOptions{Store: i18n.MustLoad(locales, "locales")},
+  })
+  ```
+
+  A handler translates through its context, which already knows the locale:
+
+  ```go
+  func greet(ctx *muzak.Context, in Params) (Out, error) {
+      return Out{
+          Greeting: ctx.T("greeting.hello", "name", in.Name),
+          Items:    ctx.T("greeting.items", "count", in.Items),
+          Today:    ctx.L(time.Now(), "as", "date"),
+      }, nil
+  }
+  ```
+
+  Ruby's i18n keeps the current locale in a thread; Go has no equivalent, and a
+  package-level one shared by every goroutine would leak one request's language
+  into another. A locale is therefore passed rather than set: resolved once per
+  request, carried on the request's context, and named explicitly anywhere else.
+
+  Where it comes from is declared rather than written by hand. `Accept-Language`
+  is negotiated by default, honouring the quality values the client sent, and
+  `LocaleFromPath`, `LocaleFromQuery`, `LocaleFromHeader`, `LocaleFromCookie`
+  and `LocaleFromCustom` cover the rest in whatever order `Sources` lists them.
+  Nothing a request carries is used unless it matches a locale the application
+  declared, so what reaches a filesystem path or a response header is always one
+  of the application's own strings.
+
+  Leaving `AppOptions.I18n` unset is the feature turned off: no middleware is
+  installed, every message reads exactly as it did before, and nothing in
+  `muzak.dev/framework/i18n` is linked into the binary. The framework reaches a
+  translation engine only through the `Translator` interface, which is what
+  keeps a service that answers in one language from carrying the machinery for
+  ninety.
+
+- `muzak.dev/framework/i18n` is the engine: `Store`, `Backend`, `Simple`,
+  `Chain`, YAML and JSON locale files, `%{name}` interpolation, CLDR plural
+  rules for around ninety languages, locale fallbacks, default chains, the
+  exception handlers from the Ruby API, and `Localize` with a strftime formatter
+  and the number helpers.
+
+  Go's own time formatting cannot produce a localized month name, because the
+  reference layout hard-codes `January`. Patterns are therefore strftime, which
+  is also what the published rails-i18n corpus is written in, so a locale file
+  from it loads here unchanged. A pattern beginning `go:` is handed to Go's
+  formatter instead, for the formats meant for machines.
+
+- The locale the framework ships covers every string it produces, and is chained
+  beneath an application's own translations. A locale file names only what a
+  service adds and the rules it wants worded differently; everything else falls
+  through. Failures are looked up under four scopes, narrowest first, so one
+  rule on one field of one model can be phrased without restating any other:
+
+  ```yaml
+  es:
+    errors:
+      messages:
+        blank: "es obligatorio"
+      models:
+        create_item:
+          attributes:
+            name:
+              blank: "cada articulo necesita un nombre"
+  ```
+
+- `Context.T`, `Context.L` and `Context.Locale` translate, localize and report
+  the locale of the request in hand. `LocaleFromContext` reads the same value
+  where there is a `context.Context` but no Muzak one, such as in a repository
+  or a goroutine started from a handler.
+
+- `validate.Kind` names the rule behind a failure, and `Problem` carries it
+  alongside the English it has always produced. `MessageKey` on every rule set,
+  and `Validation.RejectKey`, name a translation for an override rather than
+  fixing its wording in one language. `HTTPError.WithMessageKey` does the same
+  for an error an application raises itself.
+
+- Responses report `Content-Language`, and add `Vary: Accept-Language` when that
+  header took part in choosing the locale, so a cache in front of the service
+  cannot serve one language to a client that asked for another.
+
+### Changed
+
+- `muzak.ErrorDetail`, `muzak.AppOptions`, `muzak.HTTPError`,
+  `muzak.ValidationError` and `validate.Problem` each gained fields. The new
+  members of `ErrorDetail` are tagged `json:"-"`, so neither the error envelope
+  nor the generated OpenAPI document changes.
+
+  Migration: a keyed composite literal is unaffected. An unkeyed one, such as
+  `muzak.ErrorDetail{"limit", "query", "is required"}`, no longer compiles; add
+  the field names.
+
+- The default middleware chain gains one entry, between panic recovery and the
+  access log, when a translation store is configured. It is not installed
+  otherwise. The access log records the resolved locale when there is one.
+
+- `validate.Positive` and `validate.Negative` report their own rules rather than
+  the general numeric bounds, because their wording names zero rather than
+  interpolating it. Their English is unchanged.
+
+
 ## [0.2.0] - 2026-08-24
 
 ### Changed
@@ -165,7 +281,8 @@ example application, but it is not frozen: expect it to move before 1.0.0.
   [Safe Defaults](https://muzak.dev/docs/security/safe-defaults).
 - Dual licence, MIT or Apache-2.0 at your option.
 
-[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/muzak-dev/framework/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/muzak-dev/framework/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/muzak-dev/framework/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/muzak-dev/framework/releases/tag/v0.1.0

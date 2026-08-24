@@ -13,11 +13,23 @@ import (
 // is set only for a failure inside a composite value, such as an element of a
 // slice or a member of a nested model.
 type Problem struct {
-	// Issue explains what was wrong with the value.
+	// Issue explains what was wrong with the value, in English. It is always
+	// populated, so a caller that does nothing further still has a message.
 	Issue string
 	// Path locates the failure inside a composite value, as "[2]" for a slice
 	// element or ".city" for a nested member. It is empty for a plain field.
 	Path string
+	// Kind names the rule that failed, which is what a translation of the
+	// failure is keyed by. It is [KindNone] for a rule of the caller's own and
+	// for one whose wording was overridden with Message, neither of which has a
+	// rule for a translator to have translated.
+	Kind Kind
+	// Key names a translation to render this failure from, set by MessageKey.
+	// It wins over Kind when both are present.
+	Key string
+	// Args carries the values the message interpolates, as alternating names
+	// and values: {"count", 12}.
+	Args []any
 }
 
 // Constraints records what a rule set demands, so that the generated OpenAPI
@@ -177,6 +189,13 @@ const (
 	// kindOneOfValue restricts a field to a set of values of its own type,
 	// which the string list cannot hold.
 	kindOneOfValue
+
+	// Time checks. These carry a closure like a rule of the caller's own does,
+	// because a moment cannot live in the numeric fields of a step, but they
+	// are named so that their wording is the framework's to translate.
+	kindBefore
+	kindAfter
+	kindTimeBetween
 )
 
 // step is one transform or check in a rule set.
@@ -206,6 +225,10 @@ type step[T any] struct {
 	check func(T) error
 	// message overrides the rule's own wording.
 	message string
+	// messageKey overrides the rule's own wording with a translation key, and
+	// messageArgs are the values that key interpolates beyond the rule's own.
+	messageKey  string
+	messageArgs []any
 	// enum carries the permitted values of a rule whose comparands are of the
 	// field's own type, which the string list cannot hold.
 	enum []any
@@ -246,11 +269,7 @@ func run[T any](value *T, steps []step[T], isEmpty func(T) bool, required bool, 
 			continue
 		}
 		if err := apply(s, value); err != nil {
-			issue := err.Error()
-			if s.message != "" {
-				issue = s.message
-			}
-			return []Problem{{Issue: issue}}
+			return []Problem{problemFor(s, err)}
 		}
 	}
 	return nil
@@ -289,7 +308,7 @@ func runString(value *string, steps []step[string], required bool) []Problem {
 			continue
 		}
 		if err := applyStringStep(s, value); err != nil {
-			return []Problem{{Issue: issueFor(s, err)}}
+			return []Problem{problemFor(s, err)}
 		}
 	}
 	return nil
@@ -307,19 +326,74 @@ func runNumber(value *float64, steps []step[float64], required bool) []Problem {
 			continue
 		}
 		if err := applyNumberStep(s, value); err != nil {
-			return []Problem{{Issue: issueFor(s, err)}}
+			return []Problem{problemFor(s, err)}
 		}
 	}
 	return nil
 }
 
-// issueFor picks the wording a failure is reported with, preferring the
-// override a rule set attached over the rule's own message.
-func issueFor[T any](s *step[T], err error) string {
+// problemFor describes one failed step: the wording it is reported with, the
+// rule it came from, and the values that rule's message interpolates.
+//
+// The wording and the structure are produced together rather than separately so
+// that they cannot disagree. An override replaces the words and clears the
+// rule, which is right: a caller who wrote a sentence asked for that sentence,
+// and there is nothing left for a translator to have translated.
+func problemFor[T any](s *step[T], err error) Problem {
 	if s.message != "" {
-		return s.message
+		return Problem{Issue: s.message}
 	}
-	return err.Error()
+
+	kind, args := failureFor(s)
+	if carried, ok := err.(argumented); ok {
+		args = append(args, carried.args()...)
+	}
+	if s.messageKey != "" {
+		return Problem{
+			Issue: err.Error(),
+			Key:   s.messageKey,
+			Kind:  kind,
+			Args:  append(args, s.messageArgs...),
+		}
+	}
+	return Problem{Issue: err.Error(), Kind: kind, Args: args}
+}
+
+// failureFor reports the rule a step came from and the values its message
+// interpolates.
+//
+// It reads the parameters back off the step rather than having the appliers
+// return them, so that the appliers keep their one-word return and the path a
+// passing value takes is exactly what it was: nothing here runs unless a check
+// has already failed.
+func failureFor[T any](s *step[T]) (Kind, []any) {
+	kind, known := kindsOf[s.kind]
+	if !known {
+		return KindNone, nil
+	}
+	switch s.kind {
+	case kindMinLen, kindMaxLen, kindLen, kindMinItems, kindMaxItems:
+		// A count is a number rather than text, because it both prints and
+		// chooses which plural form prints it.
+		return kind, []any{"count", s.n}
+	case kindMin, kindMultipleOf:
+		// A bound is passed as a number rather than as text, because count is
+		// reserved: it is interpolated and it selects a plural form, and a
+		// string can do neither.
+		return kind, []any{"count", s.lo}
+	case kindMax:
+		return kind, []any{"count", s.hi}
+	case kindBetween:
+		return kind, []any{"min", formatNumber(s.lo), "max", formatNumber(s.hi)}
+	case kindOneOfString:
+		return kind, []any{"list", quoteList(s.list)}
+	case kindOneOfValue:
+		return kind, []any{"list", describeList(s.enum)}
+	case kindPrefix, kindSuffix, kindContains:
+		return kind, []any{"value", quoteOne(s.text)}
+	default:
+		return kind, nil
+	}
 }
 
 // describeAll folds every step's contribution into one set of constraints.
@@ -386,6 +460,18 @@ func setMessage[T any](steps []step[T], message string) {
 	for i := len(steps) - 1; i >= 0; i-- {
 		if !steps[i].isTransform() {
 			steps[i].message = message
+			return
+		}
+	}
+}
+
+// setMessageKey attaches a translation key to the most recently added check,
+// skipping transforms for the same reason [setMessage] does.
+func setMessageKey[T any](steps []step[T], key string, args []any) {
+	for i := len(steps) - 1; i >= 0; i-- {
+		if !steps[i].isTransform() {
+			steps[i].messageKey = key
+			steps[i].messageArgs = args
 			return
 		}
 	}

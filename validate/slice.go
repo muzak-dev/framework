@@ -123,6 +123,25 @@ func (r *SliceRules[E]) Message(message string) *SliceRules[E] {
 	return r
 }
 
+// MessageKey overrides the wording of the check written immediately before it
+// with a translation key, so that an override is translated like every built-in
+// rule rather than fixed in one language.
+//
+//	v.String(&in.Password).MinLen(12).MessageKey("errors.password.too_short")
+//
+// Arguments are alternating names and values, and are interpolated alongside
+// the ones the rule supplies itself, so the key may use %{count} exactly as
+// the built-in message does. The rule's English wording still reaches
+// [Problem.Issue], so an application that does not translate reads the same
+// sentence it always did.
+//
+// Use [SliceRules.Message] instead when the wording is fixed in one language on
+// purpose.
+func (r *SliceRules[E]) MessageKey(key string, args ...any) *SliceRules[E] {
+	setMessageKey(r.steps, key, args)
+	return r
+}
+
 // Required rejects an empty or absent collection.
 func (r *SliceRules[E]) Required() *SliceRules[E] {
 	r.required = true
@@ -213,7 +232,10 @@ func applySliceStep[E any](s *step[[]E], values *[]E) error {
 		for i := range list {
 			for j := i + 1; j < len(list); j++ {
 				if reflect.DeepEqual(list[i], list[j]) {
-					return fmt.Errorf("must not repeat %v", list[i])
+					return repeated{
+						text:  fmt.Sprintf("must not repeat %v", list[i]),
+						value: fmt.Sprintf("%v", list[i]),
+					}
 				}
 			}
 		}

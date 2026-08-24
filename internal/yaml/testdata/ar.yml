@@ -1,0 +1,14 @@
+ar:
+  i18n:
+    plural:
+      rule: arabic
+  errors:
+    messages:
+      blank: "لا يمكن أن يترك فارغا"
+      too_short:
+        zero: "قصير جدا"
+        one: "قصير جدا (1)"
+        two: "قصير جدا (2)"
+        few: "قصير جدا (%{count})"
+        many: "قصير جدا (%{count})"
+        other: "قصير جدا (%{count})"

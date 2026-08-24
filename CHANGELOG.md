@@ -95,6 +95,44 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
   where there is a `context.Context` but no Muzak one, such as in a repository
   or a goroutine started from a handler.
 
+- **Forty more validation rules.** URLs narrowed to the schemes a field will
+  accept, the network addresses, the character classes, the formats that parse,
+  the numeric bounds that were missing, and the collection and time checks.
+
+  ```go
+  v.String(&in.Webhook).HTTPS()
+  v.String(&in.Bucket).URLWithSchemes("s3", "gs")
+  v.String(&in.Origin).Host()
+  v.String(&in.Allowed).CIDR()
+  v.String(&in.Name).NotBlank().NoControl()
+  v.String(&in.Slug).Slug()
+  v.String(&in.Zone).Timezone()
+  v.Number(&in.Price).GreaterThan(0)
+  v.Number(&in.Listen).Port()
+  v.Slice(&in.Scopes).NotEmpty().Contains("read")
+  v.Time(&in.Signed).Within(5 * time.Minute)
+  ```
+
+  The full list is in the validation guide. Each carries its rule name, so each
+  is translated like every rule that came before, and each describes itself in
+  the generated document where JSON Schema has a way to say it.
+
+  Three of them are worth calling out because they close holes rather than add
+  conveniences. `GreaterThan` and `LessThan` are the exclusive numeric bounds,
+  which had no equivalent: only the inclusive pair and the comparisons against
+  zero existed. `NotBlank` rejects a field of spaces, which satisfies `Required`
+  while carrying nothing anyone would call a value. `NoControl` rejects a
+  carriage return in a value bound for a header, a log line or a redirect.
+
+  `NotBlank` and `NotEmpty` run even when a field was not supplied, unlike every
+  other rule, because an absent value is blank and an absent collection is
+  empty. That makes each a stronger presence check rather than something to pair
+  `Required` with.
+
+  `CountryCode` and `CurrencyCode` check the shape rather than the register of
+  assigned codes, for the reason given in their documentation: that table
+  changes, and a stale copy of it rejects valid input.
+
 - `validate.Kind` names the rule behind a failure, and `Problem` carries it
   alongside the English it has always produced. `MessageKey` on every rule set,
   and `Validation.RejectKey`, name a translation for an override rather than
@@ -123,6 +161,15 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 - `validate.Positive` and `validate.Negative` report their own rules rather than
   the general numeric bounds, because their wording names zero rather than
   interpolating it. Their English is unchanged.
+
+- **`Positive` and `Negative` now describe an exclusive bound.** Both reject
+  zero, and both were generating `minimum: 0` and `maximum: 0`, which tell a
+  client that zero is allowed. They now generate `exclusiveMinimum` and
+  `exclusiveMaximum`, and `validate.Constraints` and `muzak.Schema` gained the
+  two fields to carry them.
+
+  Migration: none in code. A generated document changes, and it changes to
+  describe what the rules have always enforced.
 
 
 ## [0.2.0] - 2026-08-24

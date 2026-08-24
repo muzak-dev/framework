@@ -1,0 +1,77 @@
+# The service in Spanish.
+#
+# Only the keys this application adds are translated here, plus the framework
+# rules and formats it wants worded differently. Everything else falls back to
+# the English the framework ships, so a locale file grows as a service is
+# translated rather than having to be complete before it is useful.
+es:
+  greeting:
+    price: "Eso cuesta %{amount}"
+    hello: "Hola, %{name}"
+    items:
+      zero: "No tienes artículos"
+      one: "Tienes un artículo"
+      other: "Tienes %{count} artículos"
+
+  # Framework rules, reworded. Anything left out keeps its English.
+  errors:
+    messages:
+      blank: "es obligatorio"
+      email: "debe ser una dirección de correo válida"
+      between: "debe estar entre %{min} y %{max}"
+      too_short:
+        one: "debe tener al menos 1 carácter"
+        other: "debe tener al menos %{count} caracteres"
+      too_long:
+        one: "debe tener como máximo 1 carácter"
+        other: "debe tener como máximo %{count} caracteres"
+    models:
+      create_item:
+        attributes:
+          name:
+            blank: "cada artículo necesita un nombre"
+    item:
+      price_below_cost: "el precio no puede ser inferior al coste"
+
+  muzak:
+    validation:
+      summary: "La solicitud no pudo ser validada."
+    binding:
+      integer: "debe ser un número entero válido"
+      number: "debe ser un número válido"
+
+  # How a date is written, which is a different order and different words.
+  date:
+    formats:
+      default: "%d/%m/%Y"
+      short: "%d %b"
+      long: "%d de %B de %Y"
+    day_names: [domingo, lunes, martes, miércoles, jueves, viernes, sábado]
+    abbr_day_names: [dom, lun, mar, mié, jue, vie, sáb]
+    month_names:
+      - ~
+      - enero
+      - febrero
+      - marzo
+      - abril
+      - mayo
+      - junio
+      - julio
+      - agosto
+      - septiembre
+      - octubre
+      - noviembre
+      - diciembre
+    abbr_month_names: [~, ene, feb, mar, abr, may, jun, jul, ago, sep, oct, nov, dic]
+
+  # And how a number is: the separator and the delimiter change places.
+  number:
+    format:
+      separator: ","
+      delimiter: "."
+      precision: 3
+    currency:
+      format:
+        format: "%n %u"
+        unit: "EUR"
+        precision: 2

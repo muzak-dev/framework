@@ -1,0 +1,23 @@
+# The service's own English.
+#
+# Only the strings this application adds are here. The wording of every
+# validation rule, of every binder message and of every HTTP status comes from
+# the locale the framework ships, so nothing below restates it.
+en:
+  greeting:
+    price: "That costs %{amount}"
+    hello: "Hello, %{name}"
+    items:
+      zero: "You have no items"
+      one: "You have one item"
+      other: "You have %{count} items"
+  errors:
+    # A rule phrased for one field of one model, which wins over the general
+    # wording the framework ships.
+    models:
+      create_item:
+        attributes:
+          name:
+            blank: "every item needs a name"
+    item:
+      price_below_cost: "the price cannot be below the cost"

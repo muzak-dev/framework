@@ -71,6 +71,10 @@ func main() {
 		// Which address a request is attributed to. Nothing is believed from a
 		// header until the proxy that wrote it is named here.
 		ClientIP: muzak.ClientIPOptions{TrustedProxies: settings.TrustedProxies},
+		// The language every response is written in, resolved once per request.
+		// Leaving this out is what a service that answers only in English does,
+		// and it then carries none of the translation machinery at all.
+		I18n: core.LocaleOptions(),
 	},
 		muzak.WithDependencies(core.GetQueryToken),
 		// The application-wide budget, counted before the guard above runs so

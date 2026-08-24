@@ -266,6 +266,247 @@ func (r *StringRules) Contains(substring string) *StringRules {
 	return r.add(step[string]{kind: kindContains, text: substring})
 }
 
+// HTTPS requires an absolute https URL with a host.
+//
+// It is [StringRules.URL] with the one scheme that is encrypted. A field
+// holding a webhook target, a redirect or an avatar source almost always means
+// https specifically, and saying so here is cheaper than discovering later that
+// a client supplied http and the traffic went out in the clear.
+func (r *StringRules) HTTPS() *StringRules {
+	return r.add(step[string]{kind: kindHTTPS})
+}
+
+// URLWithSchemes requires an absolute URL using one of the given schemes.
+//
+//	v.String(&in.Source).URLWithSchemes("s3", "gs")
+//
+// Schemes are matched without regard to case. A scheme that carries an
+// authority must have a host, and one that does not, such as mailto, must have
+// something after the colon, so neither "https://" nor "mailto:" alone passes.
+func (r *StringRules) URLWithSchemes(schemes ...string) *StringRules {
+	return r.add(step[string]{kind: kindURLScheme, list: schemes})
+}
+
+// Host requires a valid DNS hostname.
+//
+// The rules are the ones a resolver enforces: at most 253 characters, labels of
+// 1 to 63 of letters, digits and hyphens, and no label beginning or ending with
+// a hyphen. A single trailing dot is allowed, because that is how a fully
+// qualified name is written.
+func (r *StringRules) Host() *StringRules {
+	return r.add(step[string]{kind: kindHost})
+}
+
+// IP requires an IP address of either family.
+func (r *StringRules) IP() *StringRules {
+	return r.add(step[string]{kind: kindIP})
+}
+
+// IPv4 requires an IPv4 address.
+func (r *StringRules) IPv4() *StringRules {
+	return r.add(step[string]{kind: kindIPv4})
+}
+
+// IPv6 requires an IPv6 address.
+//
+// An IPv4 address written in the mapped form is refused. It is an IPv4 address
+// wearing a costume, and a field asking for IPv6 wants one an IPv6-only network
+// can route.
+func (r *StringRules) IPv6() *StringRules {
+	return r.add(step[string]{kind: kindIPv6})
+}
+
+// CIDR requires a network written in CIDR notation, such as "10.0.0.0/8".
+func (r *StringRules) CIDR() *StringRules {
+	return r.add(step[string]{kind: kindCIDR})
+}
+
+// MAC requires a hardware address in any of its usual spellings.
+func (r *StringRules) MAC() *StringRules {
+	return r.add(step[string]{kind: kindMAC})
+}
+
+// MatchesNot rejects a value matching a regular expression.
+//
+// It is the negative of [StringRules.Matches], for a shape that is easier to
+// describe than the shapes it excludes: a reserved prefix, a path separator in
+// something that must not have one, a word that may not appear in a name.
+//
+// The expression is compiled when the rule is declared, so a malformed pattern
+// is a panic at start-up rather than a failure on the first request that
+// reaches it.
+func (r *StringRules) MatchesNot(pattern string) *StringRules {
+	return r.add(step[string]{
+		kind:    kindNotMatches,
+		text:    pattern,
+		pattern: regexp.MustCompile(pattern),
+	})
+}
+
+// NotBlank rejects a value that is nothing but whitespace.
+//
+// It is the check [StringRules.Required] cannot make. Required rejects the
+// empty string, and a field of three spaces is not empty, so it satisfies
+// Required while carrying nothing anyone would call a value.
+//
+// Unlike almost every other rule, this one runs even when the field was not
+// supplied at all, because an absent value is blank too. That makes it a
+// stronger presence check rather than something to pair Required with. Reach
+// for Trim instead when the spaces should simply be removed.
+func (r *StringRules) NotBlank() *StringRules {
+	return r.add(step[string]{kind: kindNotBlank})
+}
+
+// NoControl rejects a value holding a control character.
+//
+// Tabs and line breaks count. A value that reaches a response header, a log
+// line or a redirect carrying a carriage return is how an injection starts, and
+// a field that legitimately holds one is rare enough to be worth declaring
+// deliberately.
+func (r *StringRules) NoControl() *StringRules {
+	return r.add(step[string]{kind: kindNoControl})
+}
+
+// Alpha requires every character to be a letter.
+//
+// Letters are Unicode letters rather than the twenty-six of English, so a name
+// in any script passes. Add [StringRules.ASCII] to narrow it.
+func (r *StringRules) Alpha() *StringRules {
+	return r.add(step[string]{kind: kindAlpha})
+}
+
+// Alphanumeric requires every character to be a letter or a digit, judged the
+// same way [StringRules.Alpha] judges a letter.
+func (r *StringRules) Alphanumeric() *StringRules {
+	return r.add(step[string]{kind: kindAlphanumeric})
+}
+
+// Numeric requires every character to be a digit.
+//
+// It is a rule about the characters rather than about the value: a field of
+// digits that happens to have a leading zero, or more digits than an integer
+// holds, still passes. Bind a numeric field and use [NumberRules] when the
+// value is a number rather than a string of digits.
+func (r *StringRules) Numeric() *StringRules {
+	return r.add(step[string]{kind: kindNumericString})
+}
+
+// ASCII requires every character to be printable ASCII, which is space through
+// tilde: the set a protocol field or an identifier carries without anyone
+// having to think about encoding.
+func (r *StringRules) ASCII() *StringRules {
+	return r.add(step[string]{kind: kindASCII})
+}
+
+// Slug requires a slug: lower case letters and digits in groups separated by
+// single hyphens, as "a-good-title".
+func (r *StringRules) Slug() *StringRules {
+	return r.add(step[string]{kind: kindSlug})
+}
+
+// Hex requires every character to be a hexadecimal digit, in either case.
+func (r *StringRules) Hex() *StringRules {
+	return r.add(step[string]{kind: kindHex})
+}
+
+// HexColour requires a colour written in hexadecimal, as "#1a2b3c". Three,
+// four, six and eight digits are accepted, the last two being the forms that
+// carry an alpha channel.
+func (r *StringRules) HexColour() *StringRules {
+	return r.add(step[string]{kind: kindHexColour})
+}
+
+// Base64 requires a value that decodes as standard base64.
+func (r *StringRules) Base64() *StringRules {
+	return r.add(step[string]{kind: kindBase64})
+}
+
+// JSON requires a value that is a well-formed JSON document.
+//
+// It is for a field that carries JSON as text, such as a stored configuration
+// blob. A field that is JSON in the request body is decoded into a type of its
+// own instead, which checks far more than this does.
+func (r *StringRules) JSON() *StringRules {
+	return r.add(step[string]{kind: kindJSON})
+}
+
+// Semver requires a semantic version, as "1.4.0" or "2.0.0-rc.1+build.5".
+func (r *StringRules) Semver() *StringRules {
+	return r.add(step[string]{kind: kindSemver})
+}
+
+// E164 requires a telephone number in the international format: a plus, a
+// country code, and up to fifteen digits in all.
+//
+// It checks the shape and nothing more. Whether a number is assigned, reachable
+// or the caller's own is not something a validator can establish, and only
+// sending to it will.
+func (r *StringRules) E164() *StringRules {
+	return r.add(step[string]{kind: kindE164})
+}
+
+// LanguageTag requires a BCP 47 language tag, as "en", "pt-BR" or "zh-Hant-TW".
+//
+// The shape is checked rather than the registry. A well-formed tag naming a
+// language nobody has translated is a missing translation, which the i18n
+// package already reports; a malformed tag is a mistake in the request.
+func (r *StringRules) LanguageTag() *StringRules {
+	return r.add(step[string]{kind: kindLanguageTag})
+}
+
+// Timezone requires the name of a time zone the host knows, as
+// "Europe/Istanbul".
+//
+// The name is resolved against the zone data the host or the binary carries, so
+// what passes here is exactly what time.LoadLocation will later accept. Names
+// that resolve are remembered, and a value that could not be one is rejected on
+// its shape first, so a client sending nonsense pays for a scan of the string
+// rather than for a search of the zone data.
+func (r *StringRules) Timezone() *StringRules {
+	return r.add(step[string]{kind: kindTimezone})
+}
+
+// CountryCode requires two upper case letters, the shape of an ISO 3166-1
+// alpha-2 code.
+//
+// The shape is checked rather than the register of assigned codes. That table
+// is a few hundred entries which change as countries are added and withdrawn,
+// and a stale copy of it rejects valid input, which is worse than admitting a
+// pair of letters nobody has assigned yet. Use [StringRules.OneOf] with your
+// own list when a service trades in a known handful.
+func (r *StringRules) CountryCode() *StringRules {
+	return r.add(step[string]{kind: kindCountryCode})
+}
+
+// CurrencyCode requires three upper case letters, the shape of an ISO 4217
+// code. It checks the shape for the same reason [StringRules.CountryCode] does.
+func (r *StringRules) CurrencyCode() *StringRules {
+	return r.add(step[string]{kind: kindCurrencyCode})
+}
+
+// EqualFold requires the value to equal another, ignoring case.
+//
+// It is [StringRules.Equal] for the comparisons where case is not meaningful,
+// such as a confirmation typed a second time or a token echoed back.
+func (r *StringRules) EqualFold(other string) *StringRules {
+	return r.add(step[string]{kind: kindEqualFold, text: other})
+}
+
+// MinBytes requires the value to occupy at least n bytes when encoded.
+//
+// Lengths elsewhere in this package are counted in characters, which is what a
+// person means by the length of a name. Bytes are what a storage column or a
+// protocol field means, and the two differ for every value outside ASCII.
+func (r *StringRules) MinBytes(n int) *StringRules {
+	return r.add(step[string]{kind: kindMinBytes, n: n})
+}
+
+// MaxBytes requires the value to occupy at most n bytes when encoded, counted
+// the way [StringRules.MinBytes] counts.
+func (r *StringRules) MaxBytes(n int) *StringRules {
+	return r.add(step[string]{kind: kindMaxBytes, n: n})
+}
+
 // Must applies a rule of your own.
 //
 // The function is an ordinary func(string) error, so it needs no registration
@@ -390,6 +631,122 @@ func applyStringStep(s *step[string], value *string) error {
 	case kindContains:
 		if !strings.Contains(*value, s.text) {
 			return fmt.Errorf("must contain %q", s.text)
+		}
+	case kindHTTPS:
+		if !isHTTPSURL(*value) {
+			return errors.New("must be a valid https URL")
+		}
+	case kindURLScheme:
+		if !isURLWithScheme(*value, s.list) {
+			return fmt.Errorf("must be a URL using %s", quoteList(s.list))
+		}
+	case kindHost:
+		if !isHostname(*value) {
+			return errors.New("must be a valid hostname")
+		}
+	case kindIP:
+		if !isIP(*value) {
+			return errors.New("must be a valid IP address")
+		}
+	case kindIPv4:
+		if !isIPv4(*value) {
+			return errors.New("must be a valid IPv4 address")
+		}
+	case kindIPv6:
+		if !isIPv6(*value) {
+			return errors.New("must be a valid IPv6 address")
+		}
+	case kindCIDR:
+		if !isCIDR(*value) {
+			return errors.New("must be a valid network in CIDR notation")
+		}
+	case kindMAC:
+		if !isMAC(*value) {
+			return errors.New("must be a valid MAC address")
+		}
+	case kindNotMatches:
+		if s.pattern.MatchString(*value) {
+			return errors.New("is in a format that is not accepted")
+		}
+	case kindNotBlank:
+		if isBlank(*value) {
+			return errNotBlank
+		}
+	case kindNoControl:
+		if hasControl(*value) {
+			return errors.New("must not contain control characters")
+		}
+	case kindAlpha:
+		if !isAlpha(*value) {
+			return errors.New("must contain only letters")
+		}
+	case kindAlphanumeric:
+		if !isAlphanumeric(*value) {
+			return errors.New("must contain only letters and digits")
+		}
+	case kindNumericString:
+		if !isNumericString(*value) {
+			return errors.New("must contain only digits")
+		}
+	case kindASCII:
+		if !isPrintableASCII(*value) {
+			return errors.New("must contain only printable ASCII characters")
+		}
+	case kindSlug:
+		if !isSlug(*value) {
+			return errors.New("must contain only lower case letters, digits and hyphens")
+		}
+	case kindHex:
+		if !isHex(*value) {
+			return errors.New("must be hexadecimal")
+		}
+	case kindHexColour:
+		if !isHexColour(*value) {
+			return errors.New("must be a hexadecimal colour, such as #1a2b3c")
+		}
+	case kindBase64:
+		if !isBase64(*value) {
+			return errors.New("must be valid base64")
+		}
+	case kindJSON:
+		if !isJSON(*value) {
+			return errors.New("must be valid JSON")
+		}
+	case kindSemver:
+		if !isSemver(*value) {
+			return errors.New("must be a semantic version, such as 1.4.0")
+		}
+	case kindE164:
+		if !isE164(*value) {
+			return errors.New("must be a telephone number in international format")
+		}
+	case kindLanguageTag:
+		if !isLanguageTag(*value) {
+			return errors.New("must be a valid language tag, such as pt-BR")
+		}
+	case kindTimezone:
+		if !isTimezone(*value) {
+			return errors.New("must be a known time zone, such as Europe/Istanbul")
+		}
+	case kindCountryCode:
+		if !isCountryCode(*value) {
+			return errors.New("must be a two letter country code")
+		}
+	case kindCurrencyCode:
+		if !isCurrencyCode(*value) {
+			return errors.New("must be a three letter currency code")
+		}
+	case kindEqualFold:
+		if !strings.EqualFold(*value, s.text) {
+			return errNoMatch
+		}
+	case kindMinBytes:
+		if len(*value) < s.n {
+			return fmt.Errorf("must be at least %d %s", s.n, plural(s.n, "byte"))
+		}
+	case kindMaxBytes:
+		if len(*value) > s.n {
+			return fmt.Errorf("must be at most %d %s", s.n, plural(s.n, "byte"))
 		}
 	default:
 		return s.check(*value)

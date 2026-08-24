@@ -78,6 +78,73 @@ const (
 	KindBefore      Kind = "before"
 	KindAfter       Kind = "after"
 	KindTimeBetween Kind = "time_between"
+
+	// KindPast and KindFuture are the bounds against now, and KindWithin is a
+	// window around it, which it interpolates as duration.
+	KindPast   Kind = "past"
+	KindFuture Kind = "future"
+	KindWithin Kind = "within"
+
+	// KindHTTPS and KindURLScheme narrow a URL to the schemes a field will
+	// accept. KindURLScheme interpolates the permitted set as list.
+	KindHTTPS     Kind = "https"
+	KindURLScheme Kind = "url_scheme"
+
+	// The network addresses.
+	KindHost Kind = "host"
+	KindIP   Kind = "ip"
+	KindIPv4 Kind = "ipv4"
+	KindIPv6 Kind = "ipv6"
+	KindCIDR Kind = "cidr"
+	KindMAC  Kind = "mac"
+
+	// KindNotMatches is a shape a value must not have.
+	KindNotMatches Kind = "not_matches"
+
+	// KindNotBlank is a value that is nothing but whitespace, and KindNoControl
+	// one holding a character that should never reach a header or a log.
+	KindNotBlank  Kind = "not_blank"
+	KindNoControl Kind = "no_control"
+
+	// The character classes.
+	KindAlpha        Kind = "alpha"
+	KindAlphanumeric Kind = "alphanumeric"
+	KindNumeric      Kind = "numeric"
+	KindASCII        Kind = "ascii"
+
+	// The formats that parse rather than merely match.
+	KindSlug         Kind = "slug"
+	KindHex          Kind = "hex"
+	KindHexColour    Kind = "hex_colour"
+	KindBase64       Kind = "base64"
+	KindJSON         Kind = "json"
+	KindSemver       Kind = "semver"
+	KindE164         Kind = "e164"
+	KindLanguageTag  Kind = "language_tag"
+	KindTimezone     Kind = "timezone"
+	KindCountryCode  Kind = "country_code"
+	KindCurrencyCode Kind = "currency_code"
+
+	// KindMinBytes and KindMaxBytes bound a value in bytes rather than in
+	// characters, which is what a storage column or a protocol field means.
+	KindMinBytes Kind = "min_bytes"
+	KindMaxBytes Kind = "max_bytes"
+
+	// The exclusive numeric bounds, each interpolating its limit as count, and
+	// the two against zero that admit it.
+	KindGreaterThan Kind = "greater_than"
+	KindLessThan    Kind = "less_than"
+	KindNonNegative Kind = "non_negative"
+	KindNonPositive Kind = "non_positive"
+	KindWhole       Kind = "whole"
+	KindPort        Kind = "port"
+
+	// The collection checks. KindWrongItems interpolates count; the membership
+	// pair interpolates value.
+	KindWrongItems   Kind = "wrong_items"
+	KindNotEmpty     Kind = "not_empty"
+	KindContainsItem Kind = "contains_item"
+	KindExcludesItem Kind = "excludes_item"
 )
 
 // kindsOf maps each built-in rule onto the name its message is keyed by.
@@ -113,6 +180,59 @@ var kindsOf = map[ruleKind]Kind{
 	kindBefore:         KindBefore,
 	kindAfter:          KindAfter,
 	kindTimeBetween:    KindTimeBetween,
+	kindPast:           KindPast,
+	kindFuture:         KindFuture,
+	kindWithin:         KindWithin,
+
+	kindHTTPS:     KindHTTPS,
+	kindURLScheme: KindURLScheme,
+
+	kindHost: KindHost,
+	kindIP:   KindIP,
+	kindIPv4: KindIPv4,
+	kindIPv6: KindIPv6,
+	kindCIDR: KindCIDR,
+	kindMAC:  KindMAC,
+
+	kindNotMatches: KindNotMatches,
+	kindNotBlank:   KindNotBlank,
+	kindNoControl:  KindNoControl,
+
+	kindAlpha:         KindAlpha,
+	kindAlphanumeric:  KindAlphanumeric,
+	kindNumericString: KindNumeric,
+	kindASCII:         KindASCII,
+
+	kindSlug:         KindSlug,
+	kindHex:          KindHex,
+	kindHexColour:    KindHexColour,
+	kindBase64:       KindBase64,
+	kindJSON:         KindJSON,
+	kindSemver:       KindSemver,
+	kindE164:         KindE164,
+	kindLanguageTag:  KindLanguageTag,
+	kindTimezone:     KindTimezone,
+	kindCountryCode:  KindCountryCode,
+	kindCurrencyCode: KindCurrencyCode,
+
+	// The same failure as Equal: a value that had to match another and did not.
+	kindEqualFold: KindConfirmation,
+	kindMinBytes:  KindMinBytes,
+	kindMaxBytes:  KindMaxBytes,
+
+	kindGreaterThan: KindGreaterThan,
+	kindLessThan:    KindLessThan,
+	kindNonNegative: KindNonNegative,
+	kindNonPositive: KindNonPositive,
+	kindWhole:       KindWhole,
+	kindPort:        KindPort,
+	// The same failure as a string outside its permitted set.
+	kindOneOfNumber: KindInclusion,
+
+	kindItems:        KindWrongItems,
+	kindNotEmpty:     KindNotEmpty,
+	kindContainsItem: KindContainsItem,
+	kindExcludesItem: KindExcludesItem,
 }
 
 // argumented is implemented by an error a rule returns when its message
@@ -127,9 +247,10 @@ type argumented interface {
 	args() []any
 }
 
-// repeated is the failure a uniqueness check reports, carrying the element it
-// found more than once.
-type repeated struct {
+// element is the failure a collection check reports, carrying the element it
+// found or failed to find. Uniqueness names the one that repeated, and a
+// membership check names the one that was wanted or forbidden.
+type element struct {
 	// text is the English message, which the error interface has to produce.
 	text string
 	// value is the element that repeated.
@@ -137,10 +258,10 @@ type repeated struct {
 }
 
 // Error renders the English wording.
-func (e repeated) Error() string { return e.text }
+func (e element) Error() string { return e.text }
 
-// args reports the repeated element for interpolation.
-func (e repeated) args() []any { return []any{"value", e.value} }
+// args reports the element for interpolation.
+func (e element) args() []any { return []any{"value", e.value} }
 
 // bounded is the failure a time bound reports, carrying the limits it was held
 // to. They live in the closure rather than on the step, because a moment does

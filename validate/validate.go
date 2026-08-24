@@ -48,9 +48,16 @@ type Constraints struct {
 	// MinLength and MaxLength bound a string's length in characters.
 	MinLength *int
 	MaxLength *int
-	// Minimum and Maximum bound a number's value.
+	// Minimum and Maximum bound a number's value inclusively.
 	Minimum *float64
 	Maximum *float64
+	// ExclusiveMinimum and ExclusiveMaximum bound it exclusively.
+	//
+	// They are separate from the inclusive pair because the difference is not
+	// cosmetic: a rule that rejects zero described as "minimum: 0" tells a
+	// client that zero is allowed, which is the opposite of what it enforces.
+	ExclusiveMinimum *float64
+	ExclusiveMaximum *float64
 	// MultipleOf requires a number to be a multiple of this value.
 	MultipleOf *float64
 	// MinItems and MaxItems bound a collection's length.
@@ -71,7 +78,9 @@ type Constraints struct {
 func (c Constraints) IsZero() bool {
 	return !c.Required && c.Format == "" && c.Pattern == "" &&
 		c.MinLength == nil && c.MaxLength == nil &&
-		c.Minimum == nil && c.Maximum == nil && c.MultipleOf == nil &&
+		c.Minimum == nil && c.Maximum == nil &&
+		c.ExclusiveMinimum == nil && c.ExclusiveMaximum == nil &&
+		c.MultipleOf == nil &&
 		c.MinItems == nil && c.MaxItems == nil &&
 		!c.UniqueItems && len(c.Enum) == 0
 }
@@ -196,6 +205,74 @@ const (
 	kindBefore
 	kindAfter
 	kindTimeBetween
+	kindPast
+	kindFuture
+	kindWithin
+
+	// URLs, narrower than kindURL. A field that names somewhere a client can
+	// go usually means a narrower set of schemes than "any absolute URL".
+	kindHTTPS
+	kindURLScheme
+
+	// Network addresses.
+	kindHost
+	kindIP
+	kindIPv4
+	kindIPv6
+	kindCIDR
+	kindMAC
+
+	// The negative of kindMatches, for a shape a value must not have.
+	kindNotMatches
+
+	// Emptiness and the characters a value may hold. These two are the ones
+	// that catch real mistakes: a field of spaces satisfies a presence check,
+	// and a control character in a value that reaches a header or a log is how
+	// an injection starts.
+	kindNotBlank
+	kindNoControl
+
+	// Character classes.
+	kindAlpha
+	kindAlphanumeric
+	kindNumericString
+	kindASCII
+
+	// Formats that parse rather than merely match.
+	kindSlug
+	kindHex
+	kindHexColour
+	kindBase64
+	kindJSON
+	kindSemver
+	kindE164
+	kindLanguageTag
+	kindTimezone
+	kindCountryCode
+	kindCurrencyCode
+
+	// Comparisons that count bytes rather than characters, and one that
+	// ignores case.
+	kindEqualFold
+	kindMinBytes
+	kindMaxBytes
+
+	// Numeric bounds that reject the bound itself, and the two against zero
+	// that admit it. Between them these complete a set that had only the
+	// inclusive bounds and the strict comparisons against nought.
+	kindGreaterThan
+	kindLessThan
+	kindNonNegative
+	kindNonPositive
+	kindWhole
+	kindPort
+	kindOneOfNumber
+
+	// Collection checks.
+	kindItems
+	kindNotEmpty
+	kindContainsItem
+	kindExcludesItem
 )
 
 // step is one transform or check in a rule set.
@@ -263,7 +340,7 @@ type applier[T any] func(s *step[T], value *T) error
 func run[T any](value *T, steps []step[T], isEmpty func(T) bool, required bool, apply applier[T]) []Problem {
 	for i := range steps {
 		s := &steps[i]
-		if s.kind != kindRequired && isEmpty(*value) {
+		if !runsOnEmpty(s.kind) && isEmpty(*value) {
 			// An optional field that was not supplied has nothing to check,
 			// and a required one has already been reported by kindRequired.
 			continue
@@ -275,12 +352,30 @@ func run[T any](value *T, steps []step[T], isEmpty func(T) bool, required bool, 
 	return nil
 }
 
+// runsOnEmpty reports whether a rule still applies to a value that was not
+// supplied.
+//
+// Almost every rule is skipped for an empty value, because an optional field
+// nobody sent has nothing to check and reporting a format failure for it would
+// bury the one message that matters. The exceptions are the rules that are
+// about emptiness itself: they exist precisely to say that nothing is not
+// acceptable here.
+func runsOnEmpty(kind ruleKind) bool {
+	switch kind {
+	case kindRequired, kindNotBlank, kindNotEmpty:
+		return true
+	default:
+		return false
+	}
+}
+
 // Errors the built-in rules report. They are package-level values because the
 // same wording is produced on every failure, and building the error once keeps
 // a rejected request from allocating one.
 var (
 	errRequired = errors.New("is required")
 	errNoMatch  = errors.New("does not match")
+	errNotBlank = errors.New("must not be blank")
 )
 
 // customApplier is the applier for a rule set whose rules are all functions,
@@ -304,7 +399,7 @@ func runString(value *string, steps []step[string], required bool) []Problem {
 			_ = applyStringStep(s, value)
 			continue
 		}
-		if s.kind != kindRequired && *value == "" {
+		if !runsOnEmpty(s.kind) && *value == "" {
 			continue
 		}
 		if err := applyStringStep(s, value); err != nil {
@@ -372,21 +467,24 @@ func failureFor[T any](s *step[T]) (Kind, []any) {
 		return KindNone, nil
 	}
 	switch s.kind {
-	case kindMinLen, kindMaxLen, kindLen, kindMinItems, kindMaxItems:
+	case kindMinLen, kindMaxLen, kindLen, kindMinItems, kindMaxItems,
+		kindItems, kindMinBytes, kindMaxBytes:
 		// A count is a number rather than text, because it both prints and
 		// chooses which plural form prints it.
 		return kind, []any{"count", s.n}
-	case kindMin, kindMultipleOf:
+	case kindMin, kindMultipleOf, kindGreaterThan:
 		// A bound is passed as a number rather than as text, because count is
 		// reserved: it is interpolated and it selects a plural form, and a
 		// string can do neither.
 		return kind, []any{"count", s.lo}
-	case kindMax:
+	case kindMax, kindLessThan:
 		return kind, []any{"count", s.hi}
 	case kindBetween:
 		return kind, []any{"min", formatNumber(s.lo), "max", formatNumber(s.hi)}
-	case kindOneOfString:
+	case kindOneOfString, kindURLScheme:
 		return kind, []any{"list", quoteList(s.list)}
+	case kindOneOfNumber:
+		return kind, []any{"list", numberList(s.enum)}
 	case kindOneOfValue:
 		return kind, []any{"list", describeList(s.enum)}
 	case kindPrefix, kindSuffix, kindContains:
@@ -429,9 +527,9 @@ func describeAll[T any](steps []step[T]) Constraints {
 		case kindBetween, kindClamp:
 			c.Minimum, c.Maximum = floatPtr(s.lo), floatPtr(s.hi)
 		case kindPositive:
-			c.Minimum = floatPtr(0)
+			c.ExclusiveMinimum = floatPtr(0)
 		case kindNegative:
-			c.Maximum = floatPtr(0)
+			c.ExclusiveMaximum = floatPtr(0)
 		case kindMultipleOf:
 			c.MultipleOf = floatPtr(s.lo)
 		case kindMinItems:
@@ -444,8 +542,65 @@ func describeAll[T any](steps []step[T]) Constraints {
 			for _, value := range s.list {
 				c.Enum = append(c.Enum, value)
 			}
-		case kindOneOfValue:
+		case kindOneOfValue, kindOneOfNumber:
 			c.Enum = append(c.Enum, s.enum...)
+
+		case kindHTTPS, kindURLScheme:
+			c.Format = "uri"
+		case kindHost:
+			c.Format = "hostname"
+		case kindIP:
+			c.Format = "ip"
+		case kindIPv4:
+			c.Format = "ipv4"
+		case kindIPv6:
+			c.Format = "ipv6"
+		case kindCIDR:
+			c.Format = "cidr"
+		case kindMAC:
+			c.Format = "mac"
+		case kindBase64:
+			// The name OpenAPI gives base64, rather than one of its own.
+			c.Format = "byte"
+
+		case kindAlpha:
+			c.Pattern = patternAlpha
+		case kindAlphanumeric:
+			c.Pattern = patternAlphanumeric
+		case kindNumericString:
+			c.Pattern = patternNumeric
+		case kindASCII:
+			c.Pattern = patternASCII
+		case kindSlug:
+			c.Pattern = patternSlug
+		case kindHex:
+			c.Pattern = patternHex
+		case kindHexColour:
+			c.Pattern = patternHexColour
+		case kindE164:
+			c.Pattern = patternE164
+		case kindCountryCode:
+			c.Pattern = patternCountryCode
+		case kindCurrencyCode:
+			c.Pattern = patternCurrencyCode
+
+		case kindGreaterThan:
+			c.ExclusiveMinimum = floatPtr(s.lo)
+		case kindLessThan:
+			c.ExclusiveMaximum = floatPtr(s.hi)
+		case kindNonNegative:
+			c.Minimum = floatPtr(0)
+		case kindNonPositive:
+			c.Maximum = floatPtr(0)
+		case kindWhole:
+			c.MultipleOf = floatPtr(1)
+		case kindPort:
+			c.Minimum, c.Maximum = floatPtr(1), floatPtr(65535)
+
+		case kindItems:
+			c.MinItems, c.MaxItems = intPtr(s.n), intPtr(s.n)
+		case kindNotEmpty:
+			c.MinItems = intPtr(1)
 		}
 	}
 	return c

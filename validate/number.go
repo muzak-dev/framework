@@ -233,6 +233,59 @@ func (r *NumberRules) MultipleOf(factor float64) *NumberRules {
 	})
 }
 
+// GreaterThan requires a value strictly above a bound.
+//
+// It is [NumberRules.Min] with the bound itself excluded. The pair matters more
+// than it looks: a price that must be above zero and a quantity that may be
+// zero are different rules, and describing one as the other in the generated
+// document tells a client the wrong thing.
+func (r *NumberRules) GreaterThan(bound float64) *NumberRules {
+	return r.add(step[float64]{kind: kindGreaterThan, lo: bound})
+}
+
+// LessThan requires a value strictly below a bound, as [NumberRules.Max] with
+// the bound excluded.
+func (r *NumberRules) LessThan(bound float64) *NumberRules {
+	return r.add(step[float64]{kind: kindLessThan, hi: bound})
+}
+
+// NonNegative requires zero or more, which is [NumberRules.Positive] with zero
+// admitted: a count, a balance or an offset that may legitimately be nothing.
+func (r *NumberRules) NonNegative() *NumberRules {
+	return r.add(step[float64]{kind: kindNonNegative})
+}
+
+// NonPositive requires zero or less.
+func (r *NumberRules) NonPositive() *NumberRules {
+	return r.add(step[float64]{kind: kindNonPositive})
+}
+
+// Whole requires a value with nothing after the decimal point.
+//
+// An integer field is already whole by its type, so this is for a float that
+// carries a count: a number of pages or of items that arrived as JSON, where
+// every number is a float until something says otherwise.
+func (r *NumberRules) Whole() *NumberRules {
+	return r.add(step[float64]{kind: kindWhole})
+}
+
+// Port requires a whole number that could be a TCP or UDP port, which is 1 to
+// 65535. Nought is excluded because it means "any free port" to the operating
+// system rather than a port a client can be told to reach.
+func (r *NumberRules) Port() *NumberRules {
+	return r.add(step[float64]{kind: kindPort})
+}
+
+// OneOf restricts the value to a fixed set, which also becomes the enum in the
+// generated documentation.
+func (r *NumberRules) OneOf(allowed ...float64) *NumberRules {
+	enum := make([]any, len(allowed))
+	for i, value := range allowed {
+		enum[i] = value
+	}
+	return r.add(step[float64]{kind: kindOneOfNumber, enum: enum})
+}
+
 // Must applies a rule of your own, receiving the value as a float64 whatever
 // the field's own numeric type.
 func (r *NumberRules) Must(check func(float64) error) *NumberRules {
@@ -292,8 +345,57 @@ func applyNumberStep(s *step[float64], value *float64) error {
 		if s.lo == 0 || math.Abs(math.Mod(*value, s.lo)) > 1e-9 {
 			return fmt.Errorf("must be a multiple of %s", formatNumber(s.lo))
 		}
+	case kindGreaterThan:
+		if *value <= s.lo {
+			return fmt.Errorf("must be greater than %s", formatNumber(s.lo))
+		}
+	case kindLessThan:
+		if *value >= s.hi {
+			return fmt.Errorf("must be less than %s", formatNumber(s.hi))
+		}
+	case kindNonNegative:
+		if *value < 0 {
+			return errors.New("must not be negative")
+		}
+	case kindNonPositive:
+		if *value > 0 {
+			return errors.New("must not be positive")
+		}
+	case kindWhole:
+		if *value != math.Trunc(*value) {
+			return errors.New("must be a whole number")
+		}
+	case kindPort:
+		if *value != math.Trunc(*value) || *value < 1 || *value > 65535 {
+			return errors.New("must be a port number between 1 and 65535")
+		}
+	case kindOneOfNumber:
+		if !containsNumber(s.enum, *value) {
+			return fmt.Errorf("must be one of %s", numberList(s.enum))
+		}
 	default:
 		return s.check(*value)
 	}
 	return nil
+}
+
+// containsNumber reports whether a value appears in a permitted set.
+func containsNumber(allowed []any, value float64) bool {
+	for _, item := range allowed {
+		if number, ok := item.(float64); ok && number == value {
+			return true
+		}
+	}
+	return false
+}
+
+// numberList renders a permitted set for an error message.
+func numberList(allowed []any) string {
+	rendered := make([]string, 0, len(allowed))
+	for _, item := range allowed {
+		if number, ok := item.(float64); ok {
+			rendered = append(rendered, formatNumber(number))
+		}
+	}
+	return joinWithOr(rendered)
 }

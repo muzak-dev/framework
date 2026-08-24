@@ -204,3 +204,317 @@ func mustNaN() float64 {
 	var zero float64
 	return zero / zero
 }
+
+// TestFormatFailuresCarryTheirRule is [TestFailuresCarryTheirRule] for the
+// rules added alongside the formats, held to the same contract: English that is
+// always there, the rule it came from, and the values that rule's message
+// interpolates.
+func TestFormatFailuresCarryTheirRule(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		got  []Problem
+		kind Kind
+		args []any
+	}{
+		{name: "https", got: String().HTTPS().For(ptr("http://x.dev")).Evaluate(), kind: KindHTTPS},
+		{name: "url scheme", got: String().URLWithSchemes("s3").For(ptr("https://x.dev")).Evaluate(),
+			kind: KindURLScheme, args: []any{"list", `"s3"`}},
+		{name: "host", got: String().Host().For(ptr("-bad.example")).Evaluate(), kind: KindHost},
+		{name: "ip", got: String().IP().For(ptr("nope")).Evaluate(), kind: KindIP},
+		{name: "ipv4", got: String().IPv4().For(ptr("::1")).Evaluate(), kind: KindIPv4},
+		{name: "ipv6", got: String().IPv6().For(ptr("127.0.0.1")).Evaluate(), kind: KindIPv6},
+		{name: "cidr", got: String().CIDR().For(ptr("10.0.0.0")).Evaluate(), kind: KindCIDR},
+		{name: "mac", got: String().MAC().For(ptr("nope")).Evaluate(), kind: KindMAC},
+		{name: "not matches", got: String().MatchesNot(`^tmp-`).For(ptr("tmp-1")).Evaluate(),
+			kind: KindNotMatches},
+		{name: "not blank", got: String().NotBlank().For(ptr("   ")).Evaluate(), kind: KindNotBlank},
+		{name: "no control", got: String().NoControl().For(ptr("a\rb")).Evaluate(), kind: KindNoControl},
+		{name: "alpha", got: String().Alpha().For(ptr("a1")).Evaluate(), kind: KindAlpha},
+		{name: "alphanumeric", got: String().Alphanumeric().For(ptr("a 1")).Evaluate(),
+			kind: KindAlphanumeric},
+		{name: "numeric", got: String().Numeric().For(ptr("12a")).Evaluate(), kind: KindNumeric},
+		{name: "ascii", got: String().ASCII().For(ptr("caf\u00e9")).Evaluate(), kind: KindASCII},
+		{name: "slug", got: String().Slug().For(ptr("Not A Slug")).Evaluate(), kind: KindSlug},
+		{name: "hex", got: String().Hex().For(ptr("ghij")).Evaluate(), kind: KindHex},
+		{name: "hex colour", got: String().HexColour().For(ptr("fff")).Evaluate(), kind: KindHexColour},
+		{name: "base64", got: String().Base64().For(ptr("***")).Evaluate(), kind: KindBase64},
+		{name: "json", got: String().JSON().For(ptr("{")).Evaluate(), kind: KindJSON},
+		{name: "semver", got: String().Semver().For(ptr("1.4")).Evaluate(), kind: KindSemver},
+		{name: "e164", got: String().E164().For(ptr("0555")).Evaluate(), kind: KindE164},
+		{name: "language tag", got: String().LanguageTag().For(ptr("pt_BR")).Evaluate(),
+			kind: KindLanguageTag},
+		{name: "timezone", got: String().Timezone().For(ptr("Mars/Olympus")).Evaluate(),
+			kind: KindTimezone},
+		{name: "country code", got: String().CountryCode().For(ptr("tr")).Evaluate(),
+			kind: KindCountryCode},
+		{name: "currency code", got: String().CurrencyCode().For(ptr("try")).Evaluate(),
+			kind: KindCurrencyCode},
+		{name: "equal fold", got: String().EqualFold("secret").For(ptr("other")).Evaluate(),
+			kind: KindConfirmation},
+		{name: "min bytes", got: String().MinBytes(5).For(ptr("ab")).Evaluate(),
+			kind: KindMinBytes, args: []any{"count", 5}},
+		{name: "max bytes", got: String().MaxBytes(2).For(ptr("abcd")).Evaluate(),
+			kind: KindMaxBytes, args: []any{"count", 2}},
+
+		{name: "greater than", got: Number().GreaterThan(10).For(ptr(1)).Evaluate(),
+			kind: KindGreaterThan, args: []any{"count", float64(10)}},
+		{name: "less than", got: Number().LessThan(1).For(ptr(5)).Evaluate(),
+			kind: KindLessThan, args: []any{"count", float64(1)}},
+		{name: "non negative", got: Number().NonNegative().For(ptr(-1)).Evaluate(),
+			kind: KindNonNegative},
+		{name: "non positive", got: Number().NonPositive().For(ptr(1)).Evaluate(),
+			kind: KindNonPositive},
+		{name: "whole", got: Number().Whole().For(ptr(1.5)).Evaluate(), kind: KindWhole},
+		{name: "port", got: Number().Port().For(ptr(70000)).Evaluate(), kind: KindPort},
+		{name: "one of", got: Number().OneOf(1, 2).For(ptr(5)).Evaluate(),
+			kind: KindInclusion, args: []any{"list", "1 or 2"}},
+
+		{name: "items", got: Slice[string]().Items(3).For(&[]string{"a"}).Evaluate(),
+			kind: KindWrongItems, args: []any{"count", 3}},
+		{name: "not empty", got: Slice[string]().NotEmpty().For(&[]string{}).Evaluate(),
+			kind: KindNotEmpty},
+		{name: "contains", got: Slice[string]().Contains("read").For(&[]string{"write"}).Evaluate(),
+			kind: KindContainsItem, args: []any{"value", "read"}},
+		{name: "excludes", got: Slice[string]().Excludes("*").For(&[]string{"*"}).Evaluate(),
+			kind: KindExcludesItem, args: []any{"value", "*"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if len(tc.got) != 1 {
+				t.Fatalf("the rule reported %d problems, want exactly one", len(tc.got))
+			}
+			problem := tc.got[0]
+			if problem.Issue == "" {
+				t.Error("the problem carries no English, which every caller relies on")
+			}
+			if problem.Kind != tc.kind {
+				t.Errorf("Kind = %q, want %q", problem.Kind, tc.kind)
+			}
+			if !sameArgs(problem.Args, tc.args) {
+				t.Errorf("Args = %v, want %v", problem.Args, tc.args)
+			}
+		})
+	}
+}
+
+// TestTimeFailuresCarryTheirRule covers the bounds against now, which need a
+// moment set up relative to the clock rather than a literal.
+func TestTimeFailuresCarryTheirRule(t *testing.T) {
+	t.Parallel()
+	past := time.Now().Add(-2 * time.Hour)
+	future := time.Now().Add(2 * time.Hour)
+
+	cases := []struct {
+		name string
+		got  []Problem
+		kind Kind
+		args []any
+	}{
+		{name: "past", got: Time().Past().For(&future).Evaluate(), kind: KindPast},
+		{name: "future", got: Time().Future().For(&past).Evaluate(), kind: KindFuture},
+		{name: "within", got: Time().Within(time.Minute).For(&past).Evaluate(),
+			kind: KindWithin, args: []any{"duration", "1m0s"}},
+	}
+	for _, tc := range cases {
+		if len(tc.got) != 1 {
+			t.Errorf("%s reported %d problems, want one", tc.name, len(tc.got))
+			continue
+		}
+		if tc.got[0].Kind != tc.kind {
+			t.Errorf("%s: Kind = %q, want %q", tc.name, tc.got[0].Kind, tc.kind)
+		}
+		if !sameArgs(tc.got[0].Args, tc.args) {
+			t.Errorf("%s: Args = %v, want %v", tc.name, tc.got[0].Args, tc.args)
+		}
+	}
+
+	// And the values each of them accepts, so that a rule which rejected
+	// everything would fail here rather than look correct.
+	if got := Time().Past().For(&past).Evaluate(); len(got) != 0 {
+		t.Errorf("Past rejected a moment already gone: %v", got)
+	}
+	if got := Time().Future().For(&future).Evaluate(); len(got) != 0 {
+		t.Errorf("Future rejected a moment still to come: %v", got)
+	}
+	near := time.Now().Add(-time.Second)
+	if got := Time().Within(time.Minute).For(&near).Evaluate(); len(got) != 0 {
+		t.Errorf("Within rejected a moment inside the window: %v", got)
+	}
+	if got := Time().Within(time.Minute).For(&future).Evaluate(); len(got) != 1 {
+		t.Errorf("Within accepted a moment ahead of the window: %v", got)
+	}
+}
+
+// TestNewRulesDescribeThemselves checks what the added rules contribute to the
+// generated document.
+//
+// A rule that enforces something and describes nothing leaves a client guessing;
+// one that describes something it does not enforce is worse. Both are easy to
+// get wrong when the mapping is a switch arm written apart from the check.
+func TestNewRulesDescribeThemselves(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		got   Constraints
+		check func(*testing.T, Constraints)
+	}{
+		{name: "https", got: String().HTTPS().Describe(), check: wantFormat("uri")},
+		{name: "url scheme", got: String().URLWithSchemes("s3").Describe(), check: wantFormat("uri")},
+		{name: "host", got: String().Host().Describe(), check: wantFormat("hostname")},
+		{name: "ip", got: String().IP().Describe(), check: wantFormat("ip")},
+		{name: "ipv4", got: String().IPv4().Describe(), check: wantFormat("ipv4")},
+		{name: "ipv6", got: String().IPv6().Describe(), check: wantFormat("ipv6")},
+		{name: "cidr", got: String().CIDR().Describe(), check: wantFormat("cidr")},
+		{name: "mac", got: String().MAC().Describe(), check: wantFormat("mac")},
+		{name: "base64", got: String().Base64().Describe(), check: wantFormat("byte")},
+
+		{name: "alpha", got: String().Alpha().Describe(), check: wantPattern(patternAlpha)},
+		{name: "alphanumeric", got: String().Alphanumeric().Describe(), check: wantPattern(patternAlphanumeric)},
+		{name: "numeric", got: String().Numeric().Describe(), check: wantPattern(patternNumeric)},
+		{name: "ascii", got: String().ASCII().Describe(), check: wantPattern(patternASCII)},
+		{name: "slug", got: String().Slug().Describe(), check: wantPattern(patternSlug)},
+		{name: "hex", got: String().Hex().Describe(), check: wantPattern(patternHex)},
+		{name: "hex colour", got: String().HexColour().Describe(), check: wantPattern(patternHexColour)},
+		{name: "e164", got: String().E164().Describe(), check: wantPattern(patternE164)},
+		{name: "country code", got: String().CountryCode().Describe(), check: wantPattern(patternCountryCode)},
+		{name: "currency code", got: String().CurrencyCode().Describe(), check: wantPattern(patternCurrencyCode)},
+
+		{
+			name: "greater than is exclusive",
+			got:  Number().GreaterThan(10).Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if c.ExclusiveMinimum == nil || *c.ExclusiveMinimum != 10 {
+					t.Errorf("ExclusiveMinimum = %v, want 10", c.ExclusiveMinimum)
+				}
+				if c.Minimum != nil {
+					t.Errorf("Minimum = %v, want nothing: the bound itself is refused", c.Minimum)
+				}
+			},
+		},
+		{
+			name: "less than is exclusive",
+			got:  Number().LessThan(10).Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if c.ExclusiveMaximum == nil || *c.ExclusiveMaximum != 10 {
+					t.Errorf("ExclusiveMaximum = %v, want 10", c.ExclusiveMaximum)
+				}
+				if c.Maximum != nil {
+					t.Errorf("Maximum = %v, want nothing", c.Maximum)
+				}
+			},
+		},
+		{
+			name: "non negative admits its bound",
+			got:  Number().NonNegative().Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if c.Minimum == nil || *c.Minimum != 0 {
+					t.Errorf("Minimum = %v, want 0", c.Minimum)
+				}
+				if c.ExclusiveMinimum != nil {
+					t.Errorf("ExclusiveMinimum = %v, want nothing: zero is allowed", c.ExclusiveMinimum)
+				}
+			},
+		},
+		{
+			name: "non positive admits its bound",
+			got:  Number().NonPositive().Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if c.Maximum == nil || *c.Maximum != 0 {
+					t.Errorf("Maximum = %v, want 0", c.Maximum)
+				}
+			},
+		},
+		{
+			name: "whole",
+			got:  Number().Whole().Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if c.MultipleOf == nil || *c.MultipleOf != 1 {
+					t.Errorf("MultipleOf = %v, want 1", c.MultipleOf)
+				}
+			},
+		},
+		{
+			name: "port",
+			got:  Number().Port().Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if c.Minimum == nil || *c.Minimum != 1 || c.Maximum == nil || *c.Maximum != 65535 {
+					t.Errorf("bounds = %v to %v, want 1 to 65535", c.Minimum, c.Maximum)
+				}
+			},
+		},
+		{
+			name: "numeric enum",
+			got:  Number().OneOf(1, 2).Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if len(c.Enum) != 2 || c.Enum[0] != float64(1) || c.Enum[1] != float64(2) {
+					t.Errorf("Enum = %v, want the permitted numbers", c.Enum)
+				}
+			},
+		},
+		{
+			name: "exact item count",
+			got:  Slice[string]().Items(3).Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if c.MinItems == nil || *c.MinItems != 3 || c.MaxItems == nil || *c.MaxItems != 3 {
+					t.Errorf("items = %v to %v, want exactly 3", c.MinItems, c.MaxItems)
+				}
+			},
+		},
+		{
+			name: "not empty",
+			got:  Slice[string]().NotEmpty().Describe(),
+			check: func(t *testing.T, c Constraints) {
+				if c.MinItems == nil || *c.MinItems != 1 {
+					t.Errorf("MinItems = %v, want 1", c.MinItems)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.check(t, tc.got)
+		})
+	}
+
+	// The rules that deliberately describe nothing, because JSON Schema has no
+	// way to say what they enforce.
+	for name, got := range map[string]Constraints{
+		"not blank":   String().NotBlank().Describe(),
+		"no control":  String().NoControl().Describe(),
+		"not matches": String().MatchesNot(`^a`).Describe(),
+		"json":        String().JSON().Describe(),
+		"timezone":    String().Timezone().Describe(),
+		"min bytes":   String().MinBytes(4).Describe(),
+		"max bytes":   String().MaxBytes(4).Describe(),
+		"equal fold":  String().EqualFold("a").Describe(),
+	} {
+		if !got.IsZero() {
+			t.Errorf("%s described %+v, want nothing: JSON Schema cannot state it", name, got)
+		}
+	}
+}
+
+// wantFormat builds a check for a rule that contributes a format.
+func wantFormat(format string) func(*testing.T, Constraints) {
+	return func(t *testing.T, c Constraints) {
+		if c.Format != format {
+			t.Errorf("Format = %q, want %q", c.Format, format)
+		}
+	}
+}
+
+// wantPattern builds a check for a rule that contributes an expression.
+func wantPattern(pattern string) func(*testing.T, Constraints) {
+	return func(t *testing.T, c Constraints) {
+		if c.Pattern != pattern {
+			t.Errorf("Pattern = %q, want %q", c.Pattern, pattern)
+		}
+	}
+}

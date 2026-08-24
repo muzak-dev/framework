@@ -48,9 +48,9 @@ func translateDetails(c *Context, model string, details []ErrorDetail) []ErrorDe
 // translateDetail renders one failure, and reports whether anything translated
 // it.
 //
-// The keys are tried from the narrowest scope to the widest, which is the order
-// Rails looks an error message up in. It is what lets an application phrase one
-// rule on one field of one model differently without restating every other.
+// The keys are tried from the narrowest scope to the widest. That is what lets
+// an application phrase one rule on one field of one model differently without
+// restating every other.
 func (c *Context) translateDetail(model string, detail ErrorDetail) (string, bool) {
 	args := detail.Args
 	if detail.Field != "" {
@@ -80,9 +80,9 @@ func (c *Context) translateDetail(model string, detail ErrorDetail) (string, boo
 //	errors.attributes.<field>.<kind>
 //	errors.messages.<kind>
 //
-// Rails has a fifth level above these, because it distinguishes a record from a
-// plain model. Muzak does not: an input model is an ordinary struct with a
-// Validate method, so there is only one kind of model to scope by.
+// A framework that distinguishes a persisted record from a plain model needs a
+// fifth level above these. Muzak does not: an input model is an ordinary struct
+// with a Validate method, so there is only one kind of model to scope by.
 func detailKeys(model, field, kind string) []string {
 	keys := make([]string, 0, 4)
 	if model != "" {

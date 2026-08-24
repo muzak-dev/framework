@@ -358,9 +358,9 @@ var pluralLanguages = map[string]string{
 // PluralRuleNamed returns a rule by the name a locale file declares it under at
 // "i18n.plural.rule", and reports whether that name is one this package knows.
 //
-// Rails writes that entry as a Ruby lambda, which a YAML file in Go cannot
-// hold. A locale file therefore names a rule rather than defining one, and a
-// language whose arithmetic is genuinely its own supplies a function through
+// That entry is conventionally a function, which a YAML file in Go cannot hold.
+// A locale file therefore names a rule rather than defining one, and a language
+// whose arithmetic is genuinely its own supplies a function through
 // [StoreOptions.PluralRules] instead.
 func PluralRuleNamed(name string) (PluralRule, bool) {
 	rule, known := pluralRules[name]

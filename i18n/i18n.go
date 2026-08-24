@@ -15,12 +15,12 @@ const DefaultLocale = "en"
 // Store holds the loaded translations and the settings a lookup resolves
 // against.
 //
-// It is the Go counterpart of Ruby's I18n module, with one deliberate
-// difference: it holds no current locale of its own. Ruby keeps one per thread,
-// which Go has no equivalent of, and a package-level locale shared by every
-// goroutine would leak one request's language into another. Every lookup names
-// the locale it wants instead, and the framework resolves that once per request
-// and carries it on the request's context.
+// It holds no current locale of its own, which is the one deliberate departure
+// from how this is usually done. Go has no per-goroutine storage, and a
+// package-level locale shared by every goroutine would leak one request's
+// language into another. Every lookup names the locale it wants instead, and
+// the framework resolves that once per request and carries it on the request's
+// context.
 //
 // A Store is safe for concurrent lookup once loading has returned. It does not
 // support loading concurrently with lookup: an application loads its locales at
@@ -212,8 +212,8 @@ func (s *Store) T(locale, key string, args ...any) string {
 
 // Get returns the translation for a lookup, together with whatever went wrong.
 //
-// It is the form that reports rather than renders, which is Ruby's translate!
-// to [Store.Translate]'s translate. A test suite wants this one.
+// It is the form that reports rather than renders, where [Store.Translate]
+// renders and swallows. A test suite wants this one.
 func (s *Store) Get(locale string, l Lookup) (string, error) {
 	if locale == "" {
 		locale = s.def
@@ -267,8 +267,8 @@ func (s *Store) Exists(locale, key string) bool {
 // Namespace returns every translation under a key, each under its path relative
 // to that key.
 //
-// It is the bulk lookup Rails performs when a key names a namespace rather than
-// a leaf: one call for a whole group of related strings, such as the error
+// It is the bulk lookup a key names when it points at a namespace rather than a
+// leaf: one call for a whole group of related strings, such as the error
 // messages, rather than one call per string.
 func (s *Store) Namespace(locale, key string) (Group, bool) {
 	if locale == "" {
@@ -382,9 +382,9 @@ func (s *Store) renderEntry(found *entry, locale, key string, l Lookup) (string,
 // pluralize chooses the form a count selects.
 //
 // A zero form wins for a count of nothing whenever one is written, which is
-// Rails' rule rather than CLDR's: English has no zero category, but "no
-// messages" reads better than "0 messages" and a translator who wrote one meant
-// it to be used.
+// a departure from CLDR: English has no zero category, but "no messages" reads
+// better than "0 messages", and a translator who wrote one meant it to be
+// used.
 func (s *Store) pluralize(found *entry, locale, key string, count int) (*entry, error) {
 	if found.plural == nil {
 		if found.text != "" || found.parts != nil {
@@ -462,13 +462,12 @@ func (s *Store) refreshRules() {
 
 // applyDefaults tries what a lookup said to fall back to, in order.
 //
-// A [Key] is looked up as another translation in the same scope, which is how
-// Rails' symbol default behaves; anything else is used as it stands, after
-// being interpolated like a translation of its own.
+// A [Key] is looked up as another translation in the same scope; anything else
+// is used as it stands, after being interpolated like a translation of its own.
 //
-// The lookup a Key performs carries no defaults of its own, which is both what
-// Rails does and what keeps this from recursing: a chain is one level deep
-// however the locale files are written.
+// The lookup a Key performs carries no defaults of its own, which is what keeps
+// this from recursing: a chain is one level deep however the locale files are
+// written.
 func (s *Store) applyDefaults(locale string, l Lookup) (string, bool, error) {
 	for _, fallback := range l.Default {
 		switch value := fallback.(type) {

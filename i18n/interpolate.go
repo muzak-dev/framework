@@ -10,8 +10,8 @@ import (
 // reservedNames are the words the argument list spends on options rather than
 // on values, and which a translation therefore cannot interpolate.
 //
-// Rails reserves the same two, and for the same reason: a translation that
-// could name them would be able to change how it was looked up.
+// They are reserved because a translation that could name them would be able to
+// change how it was looked up.
 var reservedNames = map[string]bool{"scope": true, "default": true}
 
 // part is one piece of a compiled translation.

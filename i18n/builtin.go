@@ -7,11 +7,10 @@ import (
 
 // builtinLocales holds the locale this package ships.
 //
-// Only English is here, which is what Rails core does too: the framework
-// translates its own strings into the language it was written in, and the other
-// hundred locales are a corpus an application brings. Shipping more would mean
-// carrying translations of every message in every binary, and re-translating
-// them before every release.
+// Only English is here. The framework translates its own strings into the
+// language it was written in, and the other hundred locales are a corpus an
+// application brings. Shipping more would mean carrying translations of every
+// message in every binary, and re-translating them before every release.
 //
 //go:embed locales/en.yml
 var builtinLocales embed.FS

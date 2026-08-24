@@ -13,8 +13,8 @@ import (
 // after it. Returning a non-nil error aborts the request, and the error is
 // mapped to a response exactly as one returned from a handler would be, so
 // returning [NewHTTPError](401, "unauthorized") is the idiomatic way to reject.
-// Guards are attached to an application or a router with [WithDependencies],
-// mirroring router-level dependencies in FastAPI.
+// Guards are attached to an application or a router with [WithDependencies], so
+// that one written once covers every route mounted beneath it.
 type Guard func(ctx *Context) error
 
 // provider is a type-erased value dependency. The generic constructor [Needs]

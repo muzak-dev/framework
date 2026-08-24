@@ -79,8 +79,8 @@ var pluralCategories = map[string]PluralCategory{
 // start-up becomes.
 //
 // It is the backend a [Store] builds when it is given none, and it is named for
-// the Ruby backend it corresponds to: it does the simplest thing that works,
-// and it is swapped out rather than extended when that is not enough.
+// what it does: the simplest thing that works, swapped out rather than extended
+// when that is not enough.
 //
 // Entries are flattened to dotted keys as they are stored, so a lookup is one
 // map access rather than a walk of one map per dot.

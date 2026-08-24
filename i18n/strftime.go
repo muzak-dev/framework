@@ -265,8 +265,8 @@ func (s *Store) dayName(locale string, t time.Time, short bool) string {
 // monthName returns the locale's name for a month.
 //
 // The arrays are one-based, with a nil first entry, so that the number of a
-// month indexes it directly. That is how Rails writes them and how the corpus
-// this package reads is written.
+// month indexes it directly, which is how the locale corpora this package reads
+// are written.
 func (s *Store) monthName(locale string, t time.Time, short bool) string {
 	key := "date.month_names"
 	if short {

@@ -10,8 +10,8 @@ import "sort"
 // always there, so nothing has to be translated for a message to exist; the
 // Kind is what lets the framework render the same failure in another language.
 //
-// The names match Rails wherever the rules mean the same thing, so a locale
-// file written for a Rails application already translates most of them.
+// The names are the ones the published locale files use wherever the rules mean
+// the same thing, so one of those already translates most of them.
 type Kind string
 
 // The rules a failure can come from. Each is the last segment of the key its
@@ -65,9 +65,9 @@ const (
 	KindMultipleOf           Kind = "multiple_of"
 
 	// KindPositive and KindNegative are the bounds against zero, which name it
-	// in words rather than interpolating it. Rails writes these as greater_than
-	// and less_than with a count of nought; they are separate here because the
-	// wording differs, and wording is what a rule name selects.
+	// in words rather than interpolating it. They are separate from the bounds
+	// above because the wording differs, and wording is what a rule name
+	// selects.
 	KindPositive Kind = "positive"
 	KindNegative Kind = "negative"
 	// KindBetween bounds a value on both sides, interpolating min and max.

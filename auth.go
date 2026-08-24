@@ -72,7 +72,7 @@ func RequireBearerToken(expected string) Guard {
 // header does not carry the expected value, compared in constant time.
 //
 // It covers the shared-secret headers that are not bearer credentials, such as
-// the X-Token header in the FastAPI tutorial or a webhook signing key:
+// an internal service token or a webhook signing key:
 //
 //	muzak.WithDependencies(muzak.RequireHeaderToken("X-Token", "coneofsilence"))
 func RequireHeaderToken(header, expected string) Guard {

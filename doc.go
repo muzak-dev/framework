@@ -1,5 +1,7 @@
-// Package muzak is a type-safe web framework for Go that brings FastAPI's
-// developer experience to the language without giving up the compiler.
+// Package muzak is a type-safe web framework for Go. A route is declared once
+// and the compiler checks it: what a handler accepts, what it returns and what
+// the documentation says are the same thing rather than three that have to be
+// kept in step.
 //
 // A handler is an ordinary typed function. Its input type is the request, its
 // return type is the response body, and both are checked when the program is
@@ -25,8 +27,7 @@
 // # Composing an application
 //
 // Routers are built independently and mounted where the application decides,
-// which is the Go counterpart of FastAPI's APIRouter and include_router. A
-// package exports its own routes and stays unaware of the prefix, tags and
+// so a package exports its own routes and stays unaware of the prefix, tags and
 // guards under which it will eventually run:
 //
 //	app := muzak.New(muzak.AppOptions{

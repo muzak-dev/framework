@@ -9,8 +9,8 @@ import (
 
 // TestCorpus parses the locale files in testdata and checks what came out.
 //
-// These are written in the shape rails-i18n publishes, with the constructs that
-// corpus actually uses: a one-based month array beginning with a null, an
+// These are written in the shape the published locale corpora use, with the
+// constructs those files actually contain: a one-based month array beginning with a null, an
 // anchor on the number format merged into the currency format below it, plural
 // forms in six categories, and text in four scripts. This test is the only real
 // evidence that the subset chosen here is the right one, which is why the scope

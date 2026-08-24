@@ -75,7 +75,7 @@ type, and the compiler is what tells you rather than a bug report.
 | **Dependencies** | Guards and typed providers, read with `From[T](ctx)` and no cast anywhere |
 | **Real-time** | RFC 6455 WebSockets and typed server-sent events, implemented here rather than delegated |
 | **Versioning** | Per route or router, read from the path, a header, the `Accept` header or a function of your own |
-| **Documentation** | OpenAPI 3.1 at `/openapi.json` and a self-contained reference with a request console at `/docs`, both derived from the code |
+| **Documentation** | OpenAPI 3.1 at `/openapi.json`, derived from the code, and an optional dashboard with a request console at `/docs` |
 | **Errors** | One envelope for every failure, a constructor per status, and causes that stay server-side |
 | **Defaults** | Conservative everywhere. Relaxing one is a decision you make out loud |
 
@@ -110,14 +110,35 @@ them, and that decision lives in one visible place.
 
 Start it and open `/docs`. A runnable version is in [`example/`](example).
 
-## Documentation, in the binary
+## Documentation, when you want it
 
-`/docs` is served from the module itself: one page, embedded at compile time,
-which loads no script, stylesheet or font from anywhere. It reads this
-application's own OpenAPI document and gives you the reference grouped by tag,
-every schema as an outline, and a console that sends the request from the page
-and shows the status, the timing, the headers and the body -- or hands you the
-same request as a `curl` command. An event stream is read as it arrives.
+Every application publishes an OpenAPI 3.1 document at `/openapi.json`,
+generated from the routes and the types. Rendering it is a separate module, so
+a service that wants no documentation UI carries none: Go downloads and links a
+module only when something imports it.
+
+```go
+import (
+    "muzak.dev/framework"
+    "muzak.dev/openapi/ui"
+)
+
+app := muzak.New(muzak.AppOptions{
+    Title:   "Awesome API",
+    Version: "1.0.0",
+    DocsUI:  ui.Files(), // /docs, or nothing at all if you leave it out
+})
+```
+
+That is the [OpenAPI dashboard](https://github.com/muzak-dev/openapi): it reads
+this application's own document and gives you the reference grouped by tag,
+every schema as an outline, request snippets in thirteen languages, and a
+console that sends the request from the page and shows the status, the timing,
+the headers and the body -- or hands you the same request as a `curl` command.
+An event stream is read as it arrives.
+
+Nothing is fetched at run time. The dashboard is embedded in the binary that
+imports it, so it works air-gapped and behind a proxy that allows nothing out.
 
 Groups come from the tags a router carries, and are described where the
 application is configured:
@@ -136,15 +157,16 @@ items := muzak.NewRouter(muzak.WithPrefix("/items"), muzak.WithTags("items"))
 ```
 
 Described tags lead, in the order they are declared; a tag only a route names
-follows. The page is a constant once the application is built, so it is
-compressed once, cached by the client and revalidated with an entity tag, and
-it is served under a policy that names its own script by hash and permits no
-network access beyond this origin.
+follows. The page and its assets are constants once the application is built,
+so each is compressed once, cached by the client and revalidated with an entity
+tag, and the page is served under a policy that hashes its own inline script
+and permits no network access beyond this origin.
 
 Where it is served, and whether it is served at all, is configuration:
 
 ```go
 muzak.AppOptions{
+    DocsUI:      ui.Files(),                // nil (the default) serves no page
     DocsPath:    "/reference",              // default "/docs"
     OpenAPIPath: "/reference/openapi.json", // default "/openapi.json"
     DisableDocs: false,                     // true serves neither

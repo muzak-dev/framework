@@ -31,6 +31,7 @@ import (
 	"muzak.dev/framework"
 	"muzak.dev/framework/example/core"
 	"muzak.dev/framework/example/routers"
+	"muzak.dev/openapi/ui"
 )
 
 func main() {
@@ -48,6 +49,9 @@ func main() {
 		Version:     "1.0.0",
 		Description: "The Bigger Applications example, rebuilt on Muzak.",
 		Contact:     &muzak.Contact{Email: settings.AdminEmail},
+		// The documentation dashboard, which is a module of its own: a service
+		// that wants no UI imports nothing and carries nothing.
+		DocsUI: ui.Files(),
 		// The groups the reference is presented in. A router or a single route
 		// joins one by naming it with WithTags; describing it here is what
 		// gives the group a sentence and decides the order the documentation

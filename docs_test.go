@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -91,17 +92,70 @@ func TestDocsPage(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "<!doctype html>") {
+	if !strings.Contains(strings.ToLower(body), "<!doctype html>") {
 		t.Error("the docs page is not HTML")
 	}
-	if strings.Contains(body, docsTitlePlaceholder) || strings.Contains(body, docsSpecPlaceholder) {
+	if strings.Contains(body, docsUIBasePlaceholder) || strings.Contains(body, docsUISpecPlaceholder) {
 		t.Error("a placeholder survived into the served page")
 	}
-	if !strings.Contains(body, "Test API") {
-		t.Error("the page does not carry the API title")
-	}
-	if !strings.Contains(body, `href="/openapi.json"`) {
+	// The dashboard reads the document at the configured path, and loads its
+	// own scripts from beneath the configured docs path. Both are written into
+	// the shell when the application is built, so both have to be there.
+	if !strings.Contains(body, "/openapi.json") {
 		t.Error("the page does not point at the OpenAPI document")
+	}
+	if !strings.Contains(body, `"/docs/_nuxt/`) {
+		t.Errorf("the page does not load its assets from beneath /docs")
+	}
+}
+
+// TestDocsAssetsAreServed covers the files the shell then asks for: they are
+// served from beneath the documentation path, with the media type that makes a
+// browser run them rather than download them.
+func TestDocsAssetsAreServed(t *testing.T) {
+	t.Parallel()
+	app := mustBuild(t, newIntegrationApp())
+
+	body := do(t, app, "GET", "/docs").Body.String()
+	for _, want := range []struct{ ext, mediaType string }{
+		{".js", "text/javascript; charset=utf-8"},
+		{".css", "text/css; charset=utf-8"},
+	} {
+		asset := assetReferencedBy(t, body, want.ext)
+		rec := do(t, app, "GET", asset)
+		assertStatus(t, rec, http.StatusOK)
+		if got := rec.Header().Get("Content-Type"); got != want.mediaType {
+			t.Errorf("%s: Content-Type = %q, want %q", asset, got, want.mediaType)
+		}
+		if rec.Body.Len() == 0 {
+			t.Errorf("%s: served an empty body", asset)
+		}
+	}
+
+	// A path under the docs tree that names no asset is not the dashboard's,
+	// so it falls through to the application and its 404.
+	assertStatus(t, do(t, app, "GET", "/docs/_nuxt/nothing-here.js"), http.StatusNotFound)
+}
+
+// assetReferencedBy returns the first asset path of one kind the shell names,
+// so the tests follow what the page actually asks for rather than a file name
+// that changes with every build.
+func assetReferencedBy(t *testing.T, page, ext string) string {
+	t.Helper()
+	rest := page
+	for {
+		_, after, found := strings.Cut(rest, `"/docs/_nuxt/`)
+		if !found {
+			t.Fatalf("the page references no %s asset", ext)
+		}
+		name, remainder, closed := strings.Cut(after, `"`)
+		if !closed {
+			t.Fatalf("an asset reference is not closed: %q", after)
+		}
+		if strings.HasSuffix(name, ext) {
+			return "/docs/_nuxt/" + name
+		}
+		rest = remainder
 	}
 }
 
@@ -114,9 +168,24 @@ func TestDocsPageIsSelfContained(t *testing.T) {
 	app := mustBuild(t, newIntegrationApp())
 	body := do(t, app, "GET", "/docs").Body.String()
 
-	for _, loader := range []string{"src=", "<link", "@import", "url(", "//unpkg", "//cdn", "//fonts."} {
-		if strings.Contains(body, loader) {
-			t.Errorf("the docs page loads something (%q), which a strict policy would block", loader)
+	for _, third := range []string{"//unpkg", "//cdn", "//fonts.", "http://", "https://"} {
+		if strings.Contains(body, third) {
+			t.Errorf("the docs page loads something from %q, which a strict policy would block", third)
+		}
+	}
+	// Everything it does load is its own, served from beneath the docs path.
+	for _, attribute := range []string{`src="`, `href="`} {
+		rest := body
+		for {
+			_, after, found := strings.Cut(rest, attribute)
+			if !found {
+				break
+			}
+			value, remainder, _ := strings.Cut(after, `"`)
+			if !strings.HasPrefix(value, "/docs/") {
+				t.Errorf("the page loads %q, which is not one of its own assets", value)
+			}
+			rest = remainder
 		}
 	}
 }
@@ -132,16 +201,22 @@ func TestDocsPageContentSecurityPolicy(t *testing.T) {
 	}
 	for _, directive := range []string{
 		"default-src 'none'", "connect-src 'self'", "frame-ancestors 'none'",
-		"base-uri 'none'", "form-action 'none'",
+		"base-uri 'none'", "form-action 'none'", "script-src 'self'", "font-src 'self'",
 	} {
 		if !strings.Contains(policy, directive) {
 			t.Errorf("the policy is missing %q:\n%s", directive, policy)
 		}
 	}
+	// Scripts stay locked down: this origin plus the hashes of the shell's own
+	// inline blocks, and nothing that would let injected markup run.
+	scriptSrc, _, _ := strings.Cut(policyDirective(t, policy, "script-src"), ";")
 	for _, escape := range []string{"unsafe-inline", "unsafe-eval", "unsafe-hashes"} {
-		if strings.Contains(policy, escape) {
-			t.Errorf("the policy allows %s, which would defeat the hashes:\n%s", escape, policy)
+		if strings.Contains(scriptSrc, escape) {
+			t.Errorf("script-src allows %s, which would defeat the hashes:\n%s", escape, policy)
 		}
+	}
+	if !strings.Contains(scriptSrc, "'sha256-") {
+		t.Errorf("script-src carries no hash for the shell's inline script:\n%s", policy)
 	}
 
 	// The page is a constant, so its policy is one too: a client may cache the
@@ -165,14 +240,26 @@ func TestDocsPagePolicyCoversItsOwnScript(t *testing.T) {
 	policy := rec.Header().Get("Content-Security-Policy")
 	body := rec.Body.String()
 
-	for _, element := range []string{"script", "style"} {
-		block := inlineBlock(t, body, element)
-		sum := sha256.Sum256([]byte(block))
-		want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
-		if !strings.Contains(policy, want) {
-			t.Errorf("the policy does not cover the page's own %s block:\n%s", element, policy)
+	block := inlineBlock(t, body, "script")
+	sum := sha256.Sum256([]byte(block))
+	want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	if !strings.Contains(policy, want) {
+		t.Errorf("the policy does not cover the page's own script block:\n%s", policy)
+	}
+}
+
+// policyDirective returns one directive of a policy, so a test can assert on
+// what a single one permits rather than on the whole string.
+func policyDirective(t *testing.T, policy, name string) string {
+	t.Helper()
+	for directive := range strings.SplitSeq(policy, ";") {
+		directive = strings.TrimSpace(directive)
+		if after, found := strings.CutPrefix(directive, name+" "); found {
+			return after
 		}
 	}
+	t.Fatalf("the policy has no %s directive:\n%s", name, policy)
+	return ""
 }
 
 // inlineBlock returns the contents of the first inline block of one kind,
@@ -356,6 +443,59 @@ func TestDocsPageMethods(t *testing.T) {
 	assertStatus(t, post, http.StatusMethodNotAllowed)
 }
 
+// TestDocsUIIsOptional covers the default: no dashboard is configured, so none
+// is served and none is in the binary. The document itself is still published,
+// because describing the API is the framework's job and rendering it is not.
+func TestDocsUIIsOptional(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.DocsUI = nil
+	app := New(opts)
+	app.Get("/x", okHandler)
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, "GET", "/openapi.json"), http.StatusOK)
+	assertStatus(t, do(t, app, "GET", "/docs"), http.StatusNotFound)
+	assertStatus(t, do(t, app, "GET", "/docs/_nuxt/app.js"), http.StatusNotFound)
+	assertStatus(t, do(t, app, "GET", "/x"), http.StatusOK)
+}
+
+// TestDocsPathIsFreeWithoutAUI checks that an application serving no dashboard
+// may use the documentation path for a route of its own, rather than having
+// "/docs" reserved by a page it never asked for.
+func TestDocsPathIsFreeWithoutAUI(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.DocsUI = nil
+	app := New(opts)
+	app.Get("/docs", okHandler)
+	mustBuild(t, app)
+
+	rec := do(t, app, "GET", "/docs")
+	assertStatus(t, rec, http.StatusOK)
+	assertJSON(t, rec, `{"ok":true}`)
+}
+
+// TestDocsUIWithoutAnIndexIsReported covers a UI that does not meet the
+// contract: it is reported and skipped, rather than serving a blank page or
+// taking down start-up.
+func TestDocsUIWithoutAnIndexIsReported(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger(t)
+	opts := quietOptions()
+	opts.Logger = logger
+	opts.DocsUI = fstest.MapFS{"styles.css": &fstest.MapFile{Data: []byte("body{}")}}
+	app := New(opts)
+	app.Get("/x", okHandler)
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, "GET", "/docs"), http.StatusNotFound)
+	assertStatus(t, do(t, app, "GET", "/openapi.json"), http.StatusOK)
+	if !strings.Contains(logs.String(), "carries no index.html") {
+		t.Errorf("the missing page was not reported: %s", logs.String())
+	}
+}
+
 func TestDocsCanBeDisabled(t *testing.T) {
 	t.Parallel()
 	opts := quietOptions()
@@ -379,10 +519,26 @@ func TestDocsPathsAreConfigurable(t *testing.T) {
 	app.Get("/x", okHandler)
 	mustBuild(t, app)
 
-	assertStatus(t, do(t, app, "GET", "/reference"), http.StatusOK)
+	rec := do(t, app, "GET", "/reference")
+	assertStatus(t, rec, http.StatusOK)
 	assertStatus(t, do(t, app, "GET", "/schema.json"), http.StatusOK)
 	assertStatus(t, do(t, app, "GET", "/docs"), http.StatusNotFound)
 	assertStatus(t, do(t, app, "GET", "/openapi.json"), http.StatusNotFound)
+
+	// The dashboard moves whole: its assets are served beneath the configured
+	// path, and it reads the document from the configured one.
+	body := rec.Body.String()
+	if !strings.Contains(body, `"/reference/_nuxt/`) {
+		t.Error("the assets were not rebased onto the configured docs path")
+	}
+	if strings.Contains(body, "/docs/_nuxt/") {
+		t.Error("the page still points at the default docs path")
+	}
+	if !strings.Contains(body, "/schema.json") {
+		t.Error("the page does not read the document from the configured path")
+	}
+	asset := strings.SplitN(strings.SplitN(body, `"/reference/_nuxt/`, 2)[1], `"`, 2)[0]
+	assertStatus(t, do(t, app, "GET", "/reference/_nuxt/"+asset), http.StatusOK)
 }
 
 // TestDocsRoutesDoNotShadowApplicationRoutes checks that a route registered at
@@ -396,38 +552,41 @@ func TestDocsPathsPassThroughToOtherRoutes(t *testing.T) {
 	assertStatus(t, do(t, app, "GET", "/other"), http.StatusOK)
 }
 
-func TestEscapeHTML(t *testing.T) {
+func TestURLPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ in, want string }{
-		{"plain", "plain"},
-		{"<script>", "&lt;script&gt;"},
-		{`a"b`, "a&quot;b"},
-		{"a'b", "a&#39;b"},
-		{"a&b", "a&amp;b"},
+		{"/docs", "/docs"},
+		{"/reference/api", "/reference/api"},
+		{"/openapi.json", "/openapi.json"},
+		{`/a"b`, "/a%22b"},
+		{"/a<b>", "/a%3Cb%3E"},
+		{"/a b", "/a%20b"},
 	}
 	for _, tc := range tests {
-		if got := escapeHTML(tc.in); got != tc.want {
-			t.Errorf("escapeHTML(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := urlPath(tc.in); got != tc.want {
+			t.Errorf("urlPath(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
 
-// TestDocsTitleIsEscaped checks that a configured title cannot break out of the
-// markup it is substituted into.
-func TestDocsTitleIsEscaped(t *testing.T) {
+// TestDocsPathsCannotBreakOutOfTheShell checks that a configured path cannot
+// end the attribute or the string literal it is substituted into. The paths
+// come from the application rather than from a request, so this is a guard
+// against a typo becoming an injection, not against an attacker.
+func TestDocsPathsCannotBreakOutOfTheShell(t *testing.T) {
 	t.Parallel()
 	opts := quietOptions()
-	opts.Title = `</title><script>alert(1)</script>`
+	opts.DocsPath = `/docs"><script>alert(1)</script>`
 	app := New(opts)
 	app.Get("/x", okHandler)
 	mustBuild(t, app)
 
-	body := do(t, app, "GET", "/docs").Body.String()
+	body := do(t, app, "GET", opts.DocsPath).Body.String()
 	if strings.Contains(body, "<script>alert(1)</script>") {
-		t.Errorf("the title escaped its context:\n%s", body)
+		t.Errorf("the docs path escaped its context:\n%s", body)
 	}
-	if !strings.Contains(body, "&lt;script&gt;") {
-		t.Error("the title was not escaped")
+	if !strings.Contains(body, "%3Cscript%3E") {
+		t.Error("the docs path was not encoded")
 	}
 }
 

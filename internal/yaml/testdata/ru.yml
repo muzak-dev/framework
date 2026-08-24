@@ -1,0 +1,27 @@
+ru:
+  i18n:
+    plural:
+      rule: slavic
+  date:
+    day_names:
+      - "воскресенье"
+      - "понедельник"
+      - "вторник"
+    formats:
+      default: "%d.%m.%Y"
+      short: "%d %b"
+  datetime:
+    distance_in_words:
+      x_days:
+        one: "%{count} день"
+        few: "%{count} дня"
+        many: "%{count} дней"
+        other: "%{count} дня"
+  errors:
+    messages:
+      blank: "не может быть пустым"
+      too_short:
+        one: "короткое (не менее 1 символа)"
+        few: "короткое (не менее %{count} символов)"
+        many: "короткое (не менее %{count} символов)"
+        other: "короткое (не менее %{count} символа)"

@@ -1,0 +1,16 @@
+ja:
+  i18n:
+    plural:
+      rule: other
+  date:
+    formats:
+      default: "%Y/%m/%d"
+      long: "%Y年%m月%d日"
+    month_names: [~, 1月, 2月, 3月]
+  errors:
+    messages:
+      blank: "を入力してください"
+      too_long: "は%{count}文字以内で入力してください"
+  note: |
+    複数行の
+    テキスト

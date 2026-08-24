@@ -198,6 +198,12 @@ type AppOptions struct {
 	// route gets unless this is set; see [VersioningOptions] and
 	// [WithVersion].
 	Versioning VersioningOptions
+
+	// I18n configures how a request's locale is decided and where the
+	// translations come from. The zero value leaves internationalization off:
+	// no middleware is installed and every message the framework produces reads
+	// exactly as it does without this feature existing. See [I18nOptions].
+	I18n I18nOptions
 }
 
 // App is a Muzak application: a root router plus the server, middleware,
@@ -334,6 +340,7 @@ func (o AppOptions) withDefaults() AppOptions {
 	if o.OpenAPIPath == "" {
 		o.OpenAPIPath = "/openapi.json"
 	}
+	o.I18n = o.I18n.withDefaults()
 	o.ServerOptions = o.ServerOptions.withDefaults()
 	return o
 }
@@ -351,6 +358,9 @@ func (a *App) installDefaultMiddleware() {
 		a.middleware = append(a.middleware, SecurityHeaders())
 	}
 	a.middleware = append(a.middleware, Recovery(Scoped(a.logger, ScopeServer)))
+	if a.opts.I18n.enabled() {
+		a.middleware = append(a.middleware, Locale(a.opts.I18n))
+	}
 	if !a.opts.DisableAccessLog {
 		a.middleware = append(a.middleware, AccessLog(a.logger, a.opts.AccessLogOptions))
 	}
@@ -446,6 +456,9 @@ func (a *App) build() {
 		return nil
 	}
 
+	if err := a.opts.I18n.validate(); err != nil {
+		state.errs = append(state.errs, err)
+	}
 	if err := a.opts.Versioning.validate(); err != nil {
 		state.errs = append(state.errs, err)
 	}
@@ -819,6 +832,8 @@ func (a *App) acquire(w *responseWriter, r *http.Request) *Context {
 	c.logger = a.logger
 	c.status = http.StatusOK
 	c.requestID, _ = RequestIDFromContext(r.Context())
+	c.locale, _ = LocaleFromContext(r.Context())
+	c.i18n = a.opts.I18n.Store
 	return c
 }
 

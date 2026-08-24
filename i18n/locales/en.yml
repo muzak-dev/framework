@@ -52,6 +52,70 @@ en:
       after: "must be after %{time}"
       time_between: "must be between %{earliest} and %{latest}"
 
+      # URLs narrower than a plain absolute one, and the network addresses.
+      https: "must be a valid https URL"
+      url_scheme: "must be a URL using %{list}"
+      host: "must be a valid hostname"
+      ip: "must be a valid IP address"
+      ipv4: "must be a valid IPv4 address"
+      ipv6: "must be a valid IPv6 address"
+      cidr: "must be a valid network in CIDR notation"
+      mac: "must be a valid MAC address"
+
+      # A shape a value must not have, and the two checks about what a value
+      # may hold at all.
+      not_matches: "is in a format that is not accepted"
+      not_blank: "must not be blank"
+      no_control: "must not contain control characters"
+
+      # The character classes.
+      alpha: "must contain only letters"
+      alphanumeric: "must contain only letters and digits"
+      numeric: "must contain only digits"
+      ascii: "must contain only printable ASCII characters"
+
+      # The formats that parse rather than merely match.
+      slug: "must contain only lower case letters, digits and hyphens"
+      hex: "must be hexadecimal"
+      hex_colour: "must be a hexadecimal colour, such as #1a2b3c"
+      base64: "must be valid base64"
+      json: "must be valid JSON"
+      semver: "must be a semantic version, such as 1.4.0"
+      e164: "must be a telephone number in international format"
+      language_tag: "must be a valid language tag, such as pt-BR"
+      timezone: "must be a known time zone, such as Europe/Istanbul"
+      country_code: "must be a two letter country code"
+      currency_code: "must be a three letter currency code"
+
+      # Lengths counted in bytes rather than in characters.
+      min_bytes:
+        one: "must be at least 1 byte"
+        other: "must be at least %{count} bytes"
+      max_bytes:
+        one: "must be at most 1 byte"
+        other: "must be at most %{count} bytes"
+
+      # The numeric bounds that reject the bound itself, and the rest.
+      greater_than: "must be greater than %{count}"
+      less_than: "must be less than %{count}"
+      non_negative: "must not be negative"
+      non_positive: "must not be positive"
+      whole: "must be a whole number"
+      port: "must be a port number between 1 and 65535"
+
+      # The collection checks.
+      wrong_items:
+        one: "must have exactly 1 item"
+        other: "must have exactly %{count} items"
+      not_empty: "must not be empty"
+      contains_item: "must contain %{value}"
+      excludes_item: "must not contain %{value}"
+
+      # The bounds against now.
+      past: "must be in the past"
+      future: "must be in the future"
+      within: "must be within %{duration} of now"
+
     # Wording for one named field, whatever model it belongs to. A key written
     # here wins over the rule's own wording above.
     attributes: {}

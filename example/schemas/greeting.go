@@ -43,9 +43,12 @@ type GreetingOut struct {
 // scoped to one field of one model, which the framework finds without being
 // told, and a key named outright for a check that is an ordinary condition.
 type CreateItem struct {
-	Name  string  `json:"name"`
-	Cost  float64 `json:"cost"`
-	Price float64 `json:"price"`
+	Name     string   `json:"name"`
+	Slug     string   `json:"slug"`
+	Currency string   `json:"currency"`
+	Tags     []string `json:"tags"`
+	Cost     float64  `json:"cost"`
+	Price    float64  `json:"price"`
 }
 
 // Validate declares the rules for a new item.
@@ -53,8 +56,17 @@ func (in *CreateItem) Validate(v *muzak.Validation) {
 	// The message for this one is written in the locale files under
 	// errors.models.create_item.attributes.name.blank, which the framework
 	// looks for before the general wording for a blank field.
-	v.String(&in.Name).Required().MaxLen(80)
-	v.Number(&in.Cost).Min(0)
+	// NotBlank rather than Required: a name of three spaces satisfies a
+	// presence check while carrying nothing anyone would call a name.
+	v.String(&in.Name).Trim().NotBlank().MaxLen(80).NoControl()
+	v.String(&in.Slug).Slug()
+	v.String(&in.Currency).CurrencyCode()
+
+	// A price above zero rather than at least zero, which the generated
+	// document now states as an exclusive bound.
+	v.Number(&in.Cost).NonNegative()
+	v.Number(&in.Price).GreaterThan(0)
+	v.Slice(&in.Tags).NotEmpty().Excludes("*")
 
 	// A cross-field check, named so that it is translated like every rule.
 	v.When(in.Price < in.Cost).

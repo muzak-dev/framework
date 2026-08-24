@@ -160,12 +160,16 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
   `Required` with. The skip every other rule follows is now a named predicate,
   so the exception is stated in one place rather than implied by a comparison.
 
-  `CountryCode` and `CurrencyCode` check the shape, which is two and three upper
-  case letters, rather than the register of assigned codes. That register is a
-  few hundred entries which change as countries are added and currencies
-  redenominated, and a stale copy of it rejects valid input, which is worse than
-  admitting a pair of letters nobody has assigned yet. Use `OneOf` with your own
-  list when a service trades in a known handful.
+  `CountryCode` and `CurrencyCode` look the value up in the assigned registers
+  rather than merely counting letters, so `XQ` is refused although it is two
+  upper case letters. Both tables carry the date they were taken, and both need
+  regenerating when the standards change: countries are added and withdrawn, and
+  currencies are redenominated.
+
+  The generated document describes the shape rather than the table. Two hundred
+  values in every schema that names a country would be noise rather than
+  documentation. Use `OneOf` with your own list when a service trades in a known
+  handful, which is narrower and self-documenting.
 
   `Alpha` and `Alphanumeric` judge letters as Unicode letters rather than as the
   twenty six of English, so a name in any script passes. Narrow it by composing:

@@ -161,13 +161,22 @@ func TestParsedFormats(t *testing.T) {
 		[]string{"UTC", "Europe/Istanbul", "America/New_York"},
 		[]string{"", "Mars/Olympus", "Europe/Nowhere", "not a zone", "Europe/Istanbul\x00"})
 
+	// The unassigned pairs are the cases that tell a table apart from a shape
+	// check. "XQ" and "QQQ" are well formed and mean nothing, so a rule that
+	// only counted letters would let them through.
 	accepts(t, "isCountryCode", isCountryCode,
-		[]string{"TR", "GB", "US"},
-		[]string{"", "T", "TUR", "tr", "T1", "Tr"})
+		[]string{"TR", "GB", "US", "NZ", "ZW"},
+		[]string{"", "T", "TUR", "tr", "T1", "Tr", "XQ", "ZZ", "OO"})
 
 	accepts(t, "isCurrencyCode", isCurrencyCode,
-		[]string{"TRY", "GBP", "USD"},
-		[]string{"", "TR", "TRYX", "try", "TR1"})
+		[]string{"TRY", "GBP", "USD", "JPY", "XOF"},
+		[]string{"", "TR", "TRYX", "try", "TR1", "QQQ", "ZZZ"})
+
+	// Codes withdrawn from the standard are gone, and their replacements are
+	// present, which is the property a dated table is kept for.
+	accepts(t, "isCurrencyCode retired", isCurrencyCode,
+		[]string{"SLE", "VES", "ZWG", "MRU", "STN"},
+		[]string{"SLL", "VEF", "ZWL", "MRO", "STD", "ANG", "CUC", "BYR"})
 }
 
 // TestZoneShapeGuardsTheLookup checks the cheap refusal that runs before the
@@ -213,8 +222,6 @@ func TestDescribedPatternsMatchTheChecks(t *testing.T) {
 		{name: "hex", pattern: patternHex, check: isHex},
 		{name: "hex colour", pattern: patternHexColour, check: isHexColour},
 		{name: "e164", pattern: patternE164, check: isE164},
-		{name: "country code", pattern: patternCountryCode, check: isCountryCode},
-		{name: "currency code", pattern: patternCurrencyCode, check: isCurrencyCode},
 	}
 
 	for _, tc := range cases {

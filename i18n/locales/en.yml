@@ -84,8 +84,8 @@ en:
       e164: "must be a telephone number in international format"
       language_tag: "must be a valid language tag, such as pt-BR"
       timezone: "must be a known time zone, such as Europe/Istanbul"
-      country_code: "must be a two letter country code"
-      currency_code: "must be a three letter currency code"
+      country_code: "must be a known country code"
+      currency_code: "must be a known currency code"
 
       # Lengths counted in bytes rather than in characters.
       min_bytes:

@@ -328,13 +328,22 @@ func (r *StringRules) MAC() *StringRules {
 
 // MatchesNot rejects a value matching a regular expression.
 //
-// It is the negative of [StringRules.Matches], for a shape that is easier to
-// describe than the shapes it excludes: a reserved prefix, a path separator in
-// something that must not have one, a word that may not appear in a name.
+// It exists because Go's expressions cannot state it. The regexp package is
+// RE2, which has no lookaround, so there is no pattern for "does not begin with
+// tmp-" or "does not contain admin": (?!...) does not compile. A character class
+// can be negated, as "^[^-]+$", but a sequence cannot, so the negation has to
+// move outside the expression.
+//
+// That omission in RE2 is deliberate rather than an oversight. Dropping
+// lookaround and backreferences is what buys the linear-time guarantee, and it
+// is why a pattern from a locale file or a configuration can be run against a
+// request at all without a way to make it take forever.
 //
 // The expression is compiled when the rule is declared, so a malformed pattern
 // is a panic at start-up rather than a failure on the first request that
-// reaches it.
+// reaches it. Nothing is contributed to the generated document: a JSON Schema
+// pattern means the value must match, so describing a negative one with it
+// would tell a client the opposite of what is enforced.
 func (r *StringRules) MatchesNot(pattern string) *StringRules {
 	return r.add(step[string]{
 		kind:    kindNotMatches,

@@ -11,6 +11,23 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ### Added
 
+- `WithResponseModel[T](code, description)` documents a status code and the
+  model its body carries, so one operation can describe a different schema per
+  status code rather than the error envelope everywhere: a `400` and a `500`
+  carrying the service's own error type, a `409` carrying a conflict report, a
+  `304` carrying nothing. The type argument is written exactly as a handler's
+  `Out` type is, and is described once in the components section. Like
+  `WithResponseDoc` it is a router option as well as a route option, and the
+  last declaration of a status code wins, so a route replaces what it
+  inherited.
+- An empty description passed to `WithResponseDoc` or `WithResponseModel` now
+  falls back to the status code's standard reason phrase, so
+  `WithResponseDoc(404, "")` is documented as "Not Found" rather than as a
+  response with no description at all.
+- A documented response status outside 100-599 is a build error naming the
+  route and the code, rather than a response key in the document that no client
+  could ever receive.
+
 - A request console in the documentation page at `/docs`. Every operation can
   be sent from the page itself, with the parameters, the JSON body and the
   multipart form filled in beside the schema they come from; the response is

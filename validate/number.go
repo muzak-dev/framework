@@ -78,7 +78,7 @@ func (r *NumberRules) Evaluate() []Problem {
 	// them is a value a numeric field ever legitimately holds, so they are
 	// rejected before a single rule runs.
 	if math.IsNaN(number) || math.IsInf(number, 0) {
-		return []Problem{{Issue: "must be a finite number"}}
+		return []Problem{{Issue: "must be a finite number", Kind: KindNotANumber}}
 	}
 	original := number
 	problems := runNumber(&number, r.steps, r.required)
@@ -140,6 +140,25 @@ func (r *NumberRules) As(name string) *NumberRules {
 // Message overrides the wording of the check written immediately before it.
 func (r *NumberRules) Message(message string) *NumberRules {
 	setMessage(r.steps, message)
+	return r
+}
+
+// MessageKey overrides the wording of the check written immediately before it
+// with a translation key, so that an override is translated like every built-in
+// rule rather than fixed in one language.
+//
+//	v.String(&in.Password).MinLen(12).MessageKey("errors.password.too_short")
+//
+// Arguments are alternating names and values, and are interpolated alongside
+// the ones the rule supplies itself, so the key may use %{count} exactly as
+// the built-in message does. The rule's English wording still reaches
+// [Problem.Issue], so an application that does not translate reads the same
+// sentence it always did.
+//
+// Use [NumberRules.Message] instead when the wording is fixed in one language on
+// purpose.
+func (r *NumberRules) MessageKey(key string, args ...any) *NumberRules {
+	setMessageKey(r.steps, key, args)
 	return r
 }
 

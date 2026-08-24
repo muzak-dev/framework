@@ -117,6 +117,25 @@ func (r *StringRules) Message(message string) *StringRules {
 	return r
 }
 
+// MessageKey overrides the wording of the check written immediately before it
+// with a translation key, so that an override is translated like every built-in
+// rule rather than fixed in one language.
+//
+//	v.String(&in.Password).MinLen(12).MessageKey("errors.password.too_short")
+//
+// Arguments are alternating names and values, and are interpolated alongside
+// the ones the rule supplies itself, so the key may use %{count} exactly as
+// the built-in message does. The rule's English wording still reaches
+// [Problem.Issue], so an application that does not translate reads the same
+// sentence it always did.
+//
+// Use [StringRules.Message] instead when the wording is fixed in one language on
+// purpose.
+func (r *StringRules) MessageKey(key string, args ...any) *StringRules {
+	setMessageKey(r.steps, key, args)
+	return r
+}
+
 // Trim removes leading and trailing whitespace from the value.
 //
 // It is a transform: the handler receives the trimmed string. Writing it before
@@ -283,6 +302,12 @@ func plural(n int, word string) string {
 		return word
 	}
 	return word + "s"
+}
+
+// quoteOne renders a single comparand the way the built-in messages do, so that
+// a translated message interpolates exactly what the English one prints.
+func quoteOne(text string) string {
+	return fmt.Sprintf("%q", text)
 }
 
 // quoteList renders a set of allowed values for an error message.

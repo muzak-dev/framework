@@ -96,6 +96,25 @@ func (r *ValueRules[T]) Message(message string) *ValueRules[T] {
 	return r
 }
 
+// MessageKey overrides the wording of the check written immediately before it
+// with a translation key, so that an override is translated like every built-in
+// rule rather than fixed in one language.
+//
+//	v.String(&in.Password).MinLen(12).MessageKey("errors.password.too_short")
+//
+// Arguments are alternating names and values, and are interpolated alongside
+// the ones the rule supplies itself, so the key may use %{count} exactly as
+// the built-in message does. The rule's English wording still reaches
+// [Problem.Issue], so an application that does not translate reads the same
+// sentence it always did.
+//
+// Use [ValueRules.Message] instead when the wording is fixed in one language on
+// purpose.
+func (r *ValueRules[T]) MessageKey(key string, args ...any) *ValueRules[T] {
+	setMessageKey(r.steps, key, args)
+	return r
+}
+
 // Required rejects the zero value of the field's type.
 func (r *ValueRules[T]) Required() *ValueRules[T] {
 	r.required = true
@@ -251,6 +270,25 @@ func (r *TimeRules) Message(message string) *TimeRules {
 	return r
 }
 
+// MessageKey overrides the wording of the check written immediately before it
+// with a translation key, so that an override is translated like every built-in
+// rule rather than fixed in one language.
+//
+//	v.String(&in.Password).MinLen(12).MessageKey("errors.password.too_short")
+//
+// Arguments are alternating names and values, and are interpolated alongside
+// the ones the rule supplies itself, so the key may use %{count} exactly as
+// the built-in message does. The rule's English wording still reaches
+// [Problem.Issue], so an application that does not translate reads the same
+// sentence it always did.
+//
+// Use [TimeRules.Message] instead when the wording is fixed in one language on
+// purpose.
+func (r *TimeRules) MessageKey(key string, args ...any) *TimeRules {
+	setMessageKey(r.steps, key, args)
+	return r
+}
+
 // Required rejects the zero time.
 func (r *TimeRules) Required() *TimeRules {
 	r.required = true
@@ -268,10 +306,13 @@ func (r *TimeRules) Required() *TimeRules {
 // Before requires a moment strictly earlier than the limit.
 func (r *TimeRules) Before(limit time.Time) *TimeRules {
 	return r.add(step[time.Time]{
-		kind: kindCustom,
+		kind: kindBefore,
 		check: func(t time.Time) error {
 			if !t.Before(limit) {
-				return fmt.Errorf("must be before %s", limit.Format(time.RFC3339))
+				return bounded{
+					text: "must be before " + limit.Format(time.RFC3339),
+					by:   []any{"time", limit.Format(time.RFC3339)},
+				}
 			}
 			return nil
 		},
@@ -281,10 +322,13 @@ func (r *TimeRules) Before(limit time.Time) *TimeRules {
 // After requires a moment strictly later than the limit.
 func (r *TimeRules) After(limit time.Time) *TimeRules {
 	return r.add(step[time.Time]{
-		kind: kindCustom,
+		kind: kindAfter,
 		check: func(t time.Time) error {
 			if !t.After(limit) {
-				return fmt.Errorf("must be after %s", limit.Format(time.RFC3339))
+				return bounded{
+					text: "must be after " + limit.Format(time.RFC3339),
+					by:   []any{"time", limit.Format(time.RFC3339)},
+				}
 			}
 			return nil
 		},
@@ -294,11 +338,17 @@ func (r *TimeRules) After(limit time.Time) *TimeRules {
 // Between requires a moment within an inclusive range.
 func (r *TimeRules) Between(earliest, latest time.Time) *TimeRules {
 	return r.add(step[time.Time]{
-		kind: kindCustom,
+		kind: kindTimeBetween,
 		check: func(t time.Time) error {
 			if t.Before(earliest) || t.After(latest) {
-				return fmt.Errorf("must be between %s and %s",
-					earliest.Format(time.RFC3339), latest.Format(time.RFC3339))
+				return bounded{
+					text: "must be between " + earliest.Format(time.RFC3339) +
+						" and " + latest.Format(time.RFC3339),
+					by: []any{
+						"earliest", earliest.Format(time.RFC3339),
+						"latest", latest.Format(time.RFC3339),
+					},
+				}
 			}
 			return nil
 		},

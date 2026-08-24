@@ -475,20 +475,25 @@ func (r *StringRules) Timezone() *StringRules {
 	return r.add(step[string]{kind: kindTimezone})
 }
 
-// CountryCode requires two upper case letters, the shape of an ISO 3166-1
-// alpha-2 code.
+// CountryCode requires an assigned ISO 3166-1 alpha-2 country code.
 //
-// The shape is checked rather than the register of assigned codes. That table
-// is a few hundred entries which change as countries are added and withdrawn,
-// and a stale copy of it rejects valid input, which is worse than admitting a
-// pair of letters nobody has assigned yet. Use [StringRules.OneOf] with your
-// own list when a service trades in a known handful.
+// The code is looked up in a table rather than merely checked for its shape, so
+// "XQ" is refused although it is two upper case letters. That table has a date
+// on it where it is declared, and it needs regenerating when the standard
+// changes: countries are added and withdrawn, and a stale copy rejects input
+// that has become valid.
+//
+// The generated document describes the shape rather than the table, because two
+// hundred values in every schema that names a country would be noise rather than
+// documentation. Use [StringRules.OneOf] with your own list when a service
+// trades in a known handful, which is both narrower and self-documenting.
 func (r *StringRules) CountryCode() *StringRules {
 	return r.add(step[string]{kind: kindCountryCode})
 }
 
-// CurrencyCode requires three upper case letters, the shape of an ISO 4217
-// code. It checks the shape for the same reason [StringRules.CountryCode] does.
+// CurrencyCode requires an assigned ISO 4217 alphabetic currency code, looked up
+// the way [StringRules.CountryCode] looks one up and carrying the same caveat
+// about the table going out of date.
 func (r *StringRules) CurrencyCode() *StringRules {
 	return r.add(step[string]{kind: kindCurrencyCode})
 }
@@ -739,11 +744,11 @@ func applyStringStep(s *step[string], value *string) error {
 		}
 	case kindCountryCode:
 		if !isCountryCode(*value) {
-			return errors.New("must be a two letter country code")
+			return errors.New("must be a known country code")
 		}
 	case kindCurrencyCode:
 		if !isCurrencyCode(*value) {
-			return errors.New("must be a three letter currency code")
+			return errors.New("must be a known currency code")
 		}
 	case kindEqualFold:
 		if !strings.EqualFold(*value, s.text) {

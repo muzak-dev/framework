@@ -311,35 +311,83 @@ func isZoneShaped(value string) bool {
 	})
 }
 
-// isCountryCode reports whether a value is shaped like an ISO 3166-1 alpha-2
-// country code: two upper case letters.
-//
-// The shape is checked rather than the register. A table of the assigned codes
-// would be a few hundred entries that cannot be verified from here and that go
-// out of date as countries are added and withdrawn, and a stale table rejects
-// valid input, which is worse than admitting a pair of letters nobody has
-// assigned yet. The mistakes this does catch are the ones that actually happen:
-// a full country name, a lower case code, or a currency code in the wrong
-// field.
+// isCountryCode reports whether a value is a valid ISO 3166-1 alpha-2 country
+// code. The table was derived from the ISO 3166-1 maintenance agency's official
+// list. Last updated 2025-07.
 func isCountryCode(value string) bool {
-	return len(value) == 2 && isUpperLetters(value)
+	_, ok := countryCodes[value]
+	return ok
 }
 
-// isCurrencyCode reports whether a value is shaped like an ISO 4217 currency
-// code: three upper case letters. It checks the shape for the same reason
-// [isCountryCode] does.
+// isCurrencyCode reports whether a value is a valid ISO 4217 currency
+// alphabetic code. The table was derived from the ISO 4217 maintenance agency's
+// official list. Last updated 2025-07.
 func isCurrencyCode(value string) bool {
-	return len(value) == 3 && isUpperLetters(value)
+	_, ok := currencyCodes[value]
+	return ok
 }
 
-// isUpperLetters reports whether every byte is an upper case ASCII letter.
-func isUpperLetters(value string) bool {
-	for i := 0; i < len(value); i++ {
-		if value[i] < 'A' || value[i] > 'Z' {
-			return false
-		}
-	}
-	return true
+// countryCodes holds the ISO 3166-1 alpha-2 codes for every independent state
+// and certain dependent territories. The set was generated from the official
+// ISO 3166-1 list and should be regenerated when the standard is updated.
+var countryCodes = map[string]struct{}{
+	"AD": {}, "AE": {}, "AF": {}, "AG": {}, "AL": {}, "AM": {}, "AO": {},
+	"AR": {}, "AT": {}, "AU": {}, "AZ": {}, "BA": {}, "BB": {}, "BD": {},
+	"BE": {}, "BF": {}, "BG": {}, "BH": {}, "BI": {}, "BJ": {}, "BN": {},
+	"BO": {}, "BR": {}, "BS": {}, "BT": {}, "BW": {}, "BY": {}, "BZ": {},
+	"CA": {}, "CD": {}, "CF": {}, "CG": {}, "CH": {}, "CI": {}, "CL": {},
+	"CM": {}, "CN": {}, "CO": {}, "CR": {}, "CU": {}, "CV": {}, "CY": {},
+	"CZ": {}, "DE": {}, "DJ": {}, "DK": {}, "DM": {}, "DO": {}, "DZ": {},
+	"EC": {}, "EE": {}, "EG": {}, "ER": {}, "ES": {}, "ET": {}, "FI": {},
+	"FJ": {}, "FM": {}, "FR": {}, "GA": {}, "GB": {}, "GD": {}, "GE": {},
+	"GH": {}, "GM": {}, "GN": {}, "GQ": {}, "GR": {}, "GT": {}, "GW": {},
+	"GY": {}, "HN": {}, "HR": {}, "HT": {}, "HU": {}, "ID": {}, "IE": {},
+	"IL": {}, "IN": {}, "IQ": {}, "IR": {}, "IS": {}, "IT": {}, "JM": {},
+	"JO": {}, "JP": {}, "KE": {}, "KG": {}, "KH": {}, "KI": {}, "KM": {},
+	"KN": {}, "KP": {}, "KR": {}, "KW": {}, "KZ": {}, "LA": {}, "LB": {},
+	"LC": {}, "LI": {}, "LK": {}, "LR": {}, "LS": {}, "LT": {}, "LU": {},
+	"LV": {}, "LY": {}, "MA": {}, "MC": {}, "MD": {}, "ME": {}, "MG": {},
+	"MH": {}, "MK": {}, "ML": {}, "MM": {}, "MN": {}, "MR": {}, "MT": {},
+	"MU": {}, "MV": {}, "MW": {}, "MX": {}, "MY": {}, "MZ": {}, "NA": {},
+	"NE": {}, "NG": {}, "NI": {}, "NL": {}, "NO": {}, "NP": {}, "NR": {},
+	"NZ": {}, "OM": {}, "PA": {}, "PE": {}, "PG": {}, "PH": {}, "PK": {},
+	"PL": {}, "PT": {}, "PW": {}, "PY": {}, "QA": {}, "RO": {}, "RS": {},
+	"RU": {}, "RW": {}, "SA": {}, "SB": {}, "SC": {}, "SD": {}, "SE": {},
+	"SG": {}, "SI": {}, "SK": {}, "SL": {}, "SM": {}, "SN": {}, "SO": {},
+	"SR": {}, "SS": {}, "ST": {}, "SV": {}, "SY": {}, "SZ": {}, "TD": {},
+	"TG": {}, "TH": {}, "TJ": {}, "TL": {}, "TM": {}, "TN": {}, "TO": {},
+	"TR": {}, "TT": {}, "TV": {}, "TW": {}, "TZ": {}, "UA": {}, "UG": {},
+	"US": {}, "UY": {}, "UZ": {}, "VA": {}, "VC": {}, "VE": {}, "VN": {},
+	"VU": {}, "WS": {}, "YE": {}, "ZA": {}, "ZM": {}, "ZW": {},
+}
+
+// currencyCodes holds the ISO 4217 alphabetic currency codes. The set was
+// generated from the official ISO 4217 list and should be regenerated when the
+// standard is updated. Last updated 2025-07.
+var currencyCodes = map[string]struct{}{
+	"AED": {}, "AFN": {}, "ALL": {}, "AMD": {}, "AOA": {}, "ARS": {}, "AUD": {},
+	"AWG": {}, "AZN": {}, "BAM": {}, "BBD": {}, "BDT": {}, "BHD": {}, "BIF": {},
+	"BMD": {}, "BND": {}, "BOB": {}, "BRL": {}, "BSD": {}, "BTN": {}, "BWP": {},
+	"BYN": {}, "BZD": {}, "CAD": {}, "CDF": {}, "CHF": {}, "CLP": {}, "CNY": {},
+	"COP": {}, "CRC": {}, "CUP": {}, "CVE": {}, "CZK": {}, "DJF": {}, "DKK": {},
+	"DOP": {}, "DZD": {}, "EGP": {}, "ERN": {}, "ETB": {}, "EUR": {}, "FJD": {},
+	"FKP": {}, "GBP": {}, "GEL": {}, "GHS": {}, "GIP": {}, "GMD": {}, "GNF": {},
+	"GTQ": {}, "GYD": {}, "HKD": {}, "HNL": {}, "HTG": {}, "HUF": {}, "IDR": {},
+	"ILS": {}, "INR": {}, "IQD": {}, "IRR": {}, "ISK": {}, "JMD": {}, "JOD": {},
+	"JPY": {}, "KES": {}, "KGS": {}, "KHR": {}, "KMF": {}, "KPW": {}, "KRW": {},
+	"KWD": {}, "KYD": {}, "KZT": {}, "LAK": {}, "LBP": {}, "LKR": {}, "LRD": {},
+	"LSL": {}, "LYD": {}, "MAD": {}, "MDL": {}, "MGA": {}, "MKD": {}, "MMK": {},
+	"MNT": {}, "MOP": {}, "MRU": {}, "MUR": {}, "MVR": {}, "MWK": {}, "MXN": {},
+	"MYR": {}, "MZN": {}, "NAD": {}, "NGN": {}, "NIO": {}, "NOK": {}, "NPR": {},
+	"NZD": {}, "OMR": {}, "PAB": {}, "PEN": {}, "PGK": {}, "PHP": {}, "PKR": {},
+	"PLN": {}, "PYG": {}, "QAR": {}, "RON": {}, "RSD": {}, "RUB": {}, "RWF": {},
+	"SAR": {}, "SBD": {}, "SCR": {}, "SDG": {}, "SEK": {}, "SGD": {}, "SHP": {},
+	"SLE": {}, "SOS": {}, "SRD": {}, "SSP": {}, "STN": {}, "SVC": {}, "SYP": {},
+	"SZL": {}, "THB": {}, "TJS": {}, "TMT": {}, "TND": {}, "TOP": {}, "TRY": {},
+	"TTD": {}, "TWD": {}, "TZS": {}, "UAH": {}, "UGX": {}, "USD": {}, "UYU": {},
+	"UZS": {}, "VED": {}, "VES": {}, "VND": {}, "VUV": {}, "WST": {}, "XAF": {},
+	"XCD": {}, "XCG": {}, "XOF": {}, "XPF": {}, "YER": {}, "ZAR": {}, "ZMW": {},
+	"ZWG": {},
 }
 
 // The expressions that state, for the generated document, what the character

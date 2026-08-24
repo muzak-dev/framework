@@ -16,6 +16,17 @@ func Meta() *muzak.Router {
 	r.Get("/predict", handlers.Predict,
 		muzak.Summary("Run the loaded model"))
 
+	r.Get("/greeting", handlers.Greeting,
+		muzak.Summary("Greet the caller in their own language"),
+		muzak.Description(
+			"Every string in the answer is translated, including the ones the framework "+
+				"produces when the request is rejected. Add ?locale=es, or send an "+
+				"Accept-Language header, to see it in Spanish."))
+
+	r.Post("/items/translated", handlers.AddCatalogueItem,
+		muzak.Summary("Add an item, refusing in the caller's language"),
+		muzak.Status(201))
+
 	r.Get("/healthz", handlers.Health,
 		muzak.Summary("Liveness probe"),
 		// Routable, but left out of the documentation.

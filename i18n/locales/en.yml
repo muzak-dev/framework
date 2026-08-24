@@ -1,0 +1,223 @@
+# The locale Muzak ships.
+#
+# It holds every static string the framework itself produces: the wording of
+# each validation rule, what the request binder says about a value it could not
+# read, and the sentence behind each HTTP status. An application overrides any
+# of these by writing the same key in a locale file of its own, and translates
+# them by writing the same key under another locale.
+#
+# The English here is the same text the framework produces with no i18n
+# configured at all, and a test asserts that it stays that way.
+en:
+  errors:
+    # The wording of each validation rule, keyed by the rule that failed. The
+    # names match Rails wherever the rules mean the same thing, so a locale file
+    # written for a Rails application already covers most of this.
+    messages:
+      blank: "is required"
+      confirmation: "does not match"
+      invalid: "is not in the expected format"
+      inclusion: "must be one of %{list}"
+      exclusion: "is not available"
+      taken: "must not repeat %{value}"
+      not_a_number: "must be a finite number"
+      email: "must be a valid email address"
+      url: "must be a valid absolute http or https URL"
+      uuid: "must be a valid UUID"
+      too_short:
+        one: "must be at least 1 character"
+        other: "must be at least %{count} characters"
+      too_long:
+        one: "must be at most 1 character"
+        other: "must be at most %{count} characters"
+      wrong_length:
+        one: "must be exactly 1 character"
+        other: "must be exactly %{count} characters"
+      too_few_items:
+        one: "must have at least 1 item"
+        other: "must have at least %{count} items"
+      too_many_items:
+        one: "must have at most 1 item"
+        other: "must have at most %{count} items"
+      prefix: "must begin with %{value}"
+      suffix: "must end with %{value}"
+      contains: "must contain %{value}"
+      greater_than_or_equal_to: "must be at least %{count}"
+      less_than_or_equal_to: "must be at most %{count}"
+      positive: "must be greater than zero"
+      negative: "must be less than zero"
+      between: "must be between %{min} and %{max}"
+      multiple_of: "must be a multiple of %{count}"
+      before: "must be before %{time}"
+      after: "must be after %{time}"
+      time_between: "must be between %{earliest} and %{latest}"
+
+    # Wording for one named field, whatever model it belongs to. A key written
+    # here wins over the rule's own wording above.
+    attributes: {}
+
+    # Wording for one field of one model, which is the narrowest of the four
+    # levels a failure is looked up under.
+    models: {}
+
+  muzak:
+    # What the request binder says about a value it could not read. These are
+    # phrased to follow the field name, exactly as the rule messages are.
+    binding:
+      duration: "must be a valid duration, such as 1500ms"
+      boolean: "must be true or false"
+      integer: "must be a valid integer"
+      unsigned: "must be a valid non-negative integer"
+      number: "must be a valid number"
+      unknown_field: "is not a field this endpoint accepts"
+      invalid_json: "is not valid JSON: %{reason}"
+
+    # The sentence behind each HTTP status, keyed by the status itself. These
+    # are the keys that make a locale file's keys stay strings: read as numbers
+    # they would be a different key from the one looked up.
+    http:
+      400: "The request could not be understood."
+      401: "Authentication is required."
+      402: "Payment is required."
+      403: "You do not have access to this resource."
+      404: "The requested resource was not found."
+      405: "That method is not allowed here."
+      406: "No representation acceptable to this client is available."
+      408: "The request took too long to arrive."
+      409: "The request conflicts with the current state of the resource."
+      410: "The requested resource is no longer available."
+      412: "A precondition given in the request failed."
+      413: "The request body is larger than this route accepts."
+      415: "The request body is in a media type this route cannot read."
+      422: "The request was understood but could not be processed."
+      429: "Too many requests have been sent."
+      500: "The server could not complete the request."
+      501: "That is not implemented."
+      502: "A service this request depends on answered with something unusable."
+      503: "The service is temporarily unavailable."
+      504: "A service this request depends on did not answer in time."
+
+    # The summary line of the error envelope.
+    validation:
+      summary: "The request could not be validated."
+      internal: "The server could not complete the request."
+
+  date:
+    formats:
+      default: "%Y-%m-%d"
+      short: "%b %d"
+      long: "%B %d, %Y"
+    day_names: [Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]
+    abbr_day_names: [Sun, Mon, Tue, Wed, Thu, Fri, Sat]
+    # The month arrays are one-based, so that the number of a month indexes it
+    # directly. The leading null is the entry no month has.
+    month_names:
+      - ~
+      - January
+      - February
+      - March
+      - April
+      - May
+      - June
+      - July
+      - August
+      - September
+      - October
+      - November
+      - December
+    abbr_month_names:
+      - ~
+      - Jan
+      - Feb
+      - Mar
+      - Apr
+      - May
+      - Jun
+      - Jul
+      - Aug
+      - Sep
+      - Oct
+      - Nov
+      - Dec
+    order: [year, month, day]
+
+  time:
+    formats:
+      default: "%a, %d %b %Y %H:%M:%S %z"
+      short: "%d %b %H:%M"
+      long: "%B %d, %Y %H:%M"
+    am: "am"
+    pm: "pm"
+
+  datetime:
+    distance_in_words:
+      half_a_minute: "half a minute"
+      less_than_x_seconds:
+        one: "less than 1 second"
+        other: "less than %{count} seconds"
+      x_seconds:
+        one: "1 second"
+        other: "%{count} seconds"
+      less_than_x_minutes:
+        one: "less than a minute"
+        other: "less than %{count} minutes"
+      x_minutes:
+        one: "1 minute"
+        other: "%{count} minutes"
+      about_x_hours:
+        one: "about 1 hour"
+        other: "about %{count} hours"
+      x_days:
+        one: "1 day"
+        other: "%{count} days"
+      about_x_months:
+        one: "about 1 month"
+        other: "about %{count} months"
+      x_months:
+        one: "1 month"
+        other: "%{count} months"
+      about_x_years:
+        one: "about 1 year"
+        other: "about %{count} years"
+      over_x_years:
+        one: "over 1 year"
+        other: "over %{count} years"
+      almost_x_years:
+        one: "almost 1 year"
+        other: "almost %{count} years"
+
+  number:
+    format:
+      separator: "."
+      delimiter: ","
+      precision: 3
+      significant: false
+      strip_insignificant_zeros: false
+    currency:
+      format:
+        format: "%u%n"
+        unit: "$"
+        separator: "."
+        delimiter: ","
+        precision: 2
+    percentage:
+      format:
+        format: "%n%"
+        delimiter: ""
+    human:
+      storage_units:
+        format: "%n %u"
+        units:
+          byte:
+            one: "Byte"
+            other: "Bytes"
+          kb: "KB"
+          mb: "MB"
+          gb: "GB"
+          tb: "TB"
+
+  support:
+    array:
+      words_connector: ", "
+      two_words_connector: " and "
+      last_word_connector: ", and "

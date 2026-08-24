@@ -50,10 +50,10 @@ type Translator interface {
 
 // LocaleSource is one place a request's locale can be read from.
 //
-// Rails builds this chain by hand in an around_action, choosing between a
-// domain, a path segment, a parameter, a user's stored preference and the
-// Accept-Language header. Here it is declared instead, so that the choice is
-// visible in the application's options rather than buried in a filter.
+// The choice is usually written by hand in a filter, picking between a domain,
+// a path segment, a parameter, a user's stored preference and the
+// Accept-Language header. Here it is declared instead, so that it is visible in
+// the application's options rather than buried in code that runs per request.
 type LocaleSource uint8
 
 const (

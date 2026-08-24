@@ -59,8 +59,8 @@ func (s *Store) Load(files fs.FS, dir string) error {
 
 // LoadPath reads locale files from directories on disk.
 //
-// It is the counterpart of Ruby's I18n.load_path, for translations that are
-// deployed alongside a binary rather than built into it.
+// It is for translations deployed alongside a binary rather than built into
+// it.
 func (s *Store) LoadPath(paths ...string) error {
 	var problems []error
 	for _, dir := range paths {

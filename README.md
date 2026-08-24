@@ -276,8 +276,8 @@ between them. Muzak carries the CLDR arithmetic for around ninety languages, so
 a locale file supplies only the words.
 
 Locale files are YAML, read by a parser written for this and nothing else, so
-the zero-dependency guarantee holds and a file from the published rails-i18n
-corpus loads unchanged. A file names only what your service adds and the rules
+the zero-dependency guarantee holds and a file from the published locale corpora
+loads unchanged. A file names only what your service adds and the rules
 you want worded differently; everything else falls through to the locale Muzak
 ships:
 

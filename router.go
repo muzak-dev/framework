@@ -436,10 +436,9 @@ type include struct {
 // Router groups related routes under a shared prefix, tag set and dependency
 // chain.
 //
-// Routers are built independently and composed with [Router.Include], which
-// mirrors FastAPI's APIRouter and include_router: a package exports a
-// NewRouter function returning its own routes, and the application decides
-// where to mount them and what guards apply.
+// Routers are built independently and composed with [Router.Include]: a package
+// exports a NewRouter function returning its own routes, and the application
+// decides where to mount them and what guards apply.
 //
 //	func NewRouter() *muzak.Router {
 //		r := muzak.NewRouter(muzak.WithTags("users"))

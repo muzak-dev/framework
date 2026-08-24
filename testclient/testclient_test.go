@@ -12,8 +12,8 @@ import (
 	"muzak.dev/framework/testclient"
 )
 
-// The application below mirrors the FastAPI testing tutorial, so the tests read
-// the way the Python ones do.
+// The application below is deliberately small: enough surface to exercise the
+// client against, and nothing that needs explaining before the tests do.
 
 type Item struct {
 	ID          string `json:"id"`

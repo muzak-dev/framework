@@ -1,11 +1,13 @@
 // Package i18n translates and localizes the strings an application shows.
 //
-// It is modelled on Ruby's i18n gem, which is the design Rails exposes: a
-// public API over a swappable backend, translations kept in YAML files, and a
-// key hierarchy that an application extends by writing the same keys under
-// another locale. What that design assumes and Go does not provide is a
-// per-thread current locale, so the one difference here is deliberate and runs
-// through everything: a locale is passed, never set.
+// The shape is the one the wider ecosystem settled on: a public API over a
+// swappable backend, translations kept in YAML files, and a key hierarchy an
+// application extends by writing the same keys under another locale. Following
+// it means the locale files published for that ecosystem load here unchanged.
+//
+// One thing it assumes and Go does not provide is a per-goroutine current
+// locale, so the one difference here is deliberate and runs through everything:
+// a locale is passed, never set.
 //
 // # Translating
 //
@@ -49,9 +51,8 @@
 //
 // Muzak has no third-party dependencies, so the YAML is read by a parser of its
 // own in internal/yaml. It reads the subset locale files are written in, which
-// is deliberately the subset the published rails-i18n corpus uses: a locale
-// file from that corpus loads here unchanged, formats and plural forms
-// included.
+// is deliberately the subset the published locale corpora use, so a file taken
+// from one loads here unchanged, formats and plural forms included.
 //
 // # Pluralization
 //
@@ -60,7 +61,7 @@
 // six, and Japanese one. This package knows the CLDR arithmetic for about
 // ninety languages, so a locale file has only to supply the words.
 //
-// Rails writes a bespoke rule as a Ruby lambda inside the locale data, which a
+// A bespoke rule is often written as a function inside the locale data, which a
 // YAML file in Go cannot hold. A locale file here names a rule instead:
 //
 //	ru:
@@ -83,6 +84,6 @@
 // This package ships an English locale covering every string Muzak itself
 // produces: the wording of each validation rule, what the binder says about a
 // value it could not read, and the sentence behind each HTTP status. They are
-// keyed the way Rails keys them, under errors.messages, so a locale file
-// written for a Rails application already translates most of them.
+// keyed under errors.messages, which is where the published locale files put
+// them, so one of those already translates most of them.
 package i18n

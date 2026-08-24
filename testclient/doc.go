@@ -1,10 +1,9 @@
 // Package testclient exercises a Muzak application over a real HTTP
 // connection from inside a Go test.
 //
-// It plays the role FastAPI's TestClient plays in Python: the application is
-// served in-process, requests go through the whole stack (middleware, routing,
-// binding, dependencies, error rendering), and the test reads back a response
-// it can assert on directly.
+// The application is served in-process, requests go through the whole stack
+// (middleware, routing, binding, dependencies, error rendering), and the test
+// reads back a response it can assert on directly.
 //
 //	func TestReadItem(t *testing.T) {
 //		client := testclient.New(t, buildApp())

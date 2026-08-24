@@ -11,9 +11,9 @@
 // hostile in a file loaded from disk at start-up: arbitrary type tags, multiple
 // documents per stream, and recursive aliases among them. None of them appear
 // in a translation file. The scope of this parser was therefore not chosen by
-// judgement but by evidence: it is whatever the real rails-i18n locale corpus
-// in testdata needs, and every construct outside that set is refused with a
-// located error rather than guessed at.
+// judgement but by evidence: it is whatever the real locale files in testdata
+// need, and every construct outside that set is refused with a located error
+// rather than guessed at.
 //
 // # Supported
 //
@@ -42,7 +42,7 @@
 // construct, so that a file which will not load says why:
 //
 //	tabs used for indentation
-//	explicit tags, such as "!!str" or "!ruby/symbol"
+//	explicit tags, such as "!!str" or "!!binary"
 //	explicit key syntax, "? key"
 //	more than one document in a file
 //	non-scalar keys

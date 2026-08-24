@@ -8,8 +8,8 @@ import (
 // Key marks a value in a [Lookup.Default] chain as another translation key
 // rather than as literal text.
 //
-// It is how Ruby's symbol default is written in Go. Rails distinguishes
-// :also_missing from "Not here" by type, and so does this:
+// A default chain mixes keys with literal text, and the two are told apart by
+// type rather than by convention:
 //
 //	Default: []any{i18n.Key("errors.messages.blank"), "is required"}
 type Key string
@@ -17,9 +17,9 @@ type Key string
 // Group is a namespace of translations: every leaf under one key, each under
 // its path relative to that key.
 //
-// Rails returns a nested Hash from a bulk lookup. A flat map is returned here
-// because that is what Go code does something with: splitting a dotted path is
-// a line, and rebuilding a tree from one is a walk.
+// A flat map is returned rather than a nested one because that is what Go code
+// does something with: splitting a dotted path is a line, and rebuilding a tree
+// from one is a walk.
 type Group map[string]string
 
 // Lookup is one translation request written out, for the calls that need more
@@ -79,9 +79,8 @@ func normalizeKey(key, separator string) string {
 // optionNames are the words the argument list spends on how a lookup is
 // performed rather than on what it interpolates.
 //
-// Rails reserves the same words. Count is the interesting one: it is both an
-// option and a value, because a plural form both selects on the number and
-// prints it.
+// Count is the interesting one: it is both an option and a value, because a
+// plural form both selects on the number and prints it.
 var optionNames = map[string]bool{
 	"scope": true, "default": true, "count": true,
 	"locale": true, "deep": true, "raise": true,

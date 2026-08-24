@@ -16,7 +16,7 @@ import (
 //
 // A time is formatted with the pattern at time.formats, or at date.formats when
 // the call passes "as", "date". Go has no Date type distinct from Time, so the
-// split Ruby makes between them has to be asked for rather than inferred. A
+// distinction between them has to be asked for rather than inferred. A
 // duration becomes the phrase at datetime.distance_in_words, and a number is
 // grouped and separated the way number.format says.
 //
@@ -385,8 +385,8 @@ func (s *Store) ToSentence(locale string, items []string) string {
 	}
 }
 
-// distanceThresholds is Rails' table for turning an elapsed time into a phrase,
-// in the order it is walked.
+// distancePhrase turns an elapsed time into the key of a phrase, walking the
+// thresholds in order.
 //
 // The phrases are deliberately vague, because that is what makes them readable:
 // "about 2 hours" is what a person says, and the exact figure is what a

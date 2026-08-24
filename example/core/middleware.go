@@ -11,22 +11,18 @@ import (
 // ProcessTime reports how long the service spent on a request in an
 // X-Process-Time header, in seconds.
 //
-// It is the Go counterpart of FastAPI's middleware example, and it is written
-// differently for a reason worth knowing. FastAPI can set a header after
-// call_next returns:
+// It is written the way it is for a reason worth knowing. The obvious shape is
+// to time the handler and set the header afterwards:
 //
-//	@app.middleware("http")
-//	async def add_process_time_header(request, call_next):
-//	    start = time.perf_counter()
-//	    response = await call_next(request)
-//	    response.headers["X-Process-Time"] = str(time.perf_counter() - start)
-//	    return response
+//	start := time.Now()
+//	next.ServeHTTP(w, r)
+//	w.Header().Set("X-Process-Time", elapsed(start)) // too late
 //
-// That works because the response is an object in memory until it is handed
-// back. In Go the header block goes out the moment WriteHeader is called, so
-// the same shape here would set a header nobody ever receives, and it would do
-// it silently. The duration is therefore filled in by a wrapper, at the last
-// moment before the status leaves.
+// That reads correctly and does nothing. A header block goes out the moment
+// WriteHeader is called, which the handler has already done by the time control
+// comes back, so the header is set on a map nobody will read again and no error
+// is reported. The duration is therefore filled in by a wrapper around the
+// ResponseWriter, at the last moment before the status leaves.
 //
 // The framework's own access log already records a duration. This exists to
 // report it to the client rather than to the operator.

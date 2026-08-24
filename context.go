@@ -2,6 +2,7 @@ package muzak
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -37,6 +38,16 @@ type Context struct {
 	// acquired, so that error rendering and logging can reach it without
 	// walking the context chain on every use.
 	requestID string
+
+	// locale is copied from the request context when the Context is acquired,
+	// for the same reason requestID is: translating a message should not walk
+	// the context chain on every use. It is empty when the application has no
+	// translation store configured.
+	locale string
+
+	// i18n is the application's translation store, copied so that a handler
+	// can translate without reaching back through the App.
+	i18n Translator
 
 	// deps holds the value dependencies resolved for this request. It is a
 	// slice rather than a map because routes declare a handful of
@@ -84,6 +95,47 @@ func (c *Context) Logger() *slog.Logger { return c.logger }
 // response, and in every log line the request produces. It is empty only when
 // the [RequestID] middleware was removed from the chain.
 func (c *Context) RequestID() string { return c.requestID }
+
+// Locale returns the locale resolved for this request, which is what
+// [Context.T] and [Context.L] answer in.
+//
+// It is empty when the application has no translation store configured, and is
+// otherwise always one of the locales the application declared: nothing a
+// client sends is used unless it matches one, so this value is safe to write
+// into a response or a query.
+func (c *Context) Locale() string { return c.locale }
+
+// T translates a key in the request's locale.
+//
+//	func handler(ctx *muzak.Context, in Params) (Out, error) {
+//		return Out{Title: ctx.T("store.title")}, nil
+//	}
+//
+// Arguments are alternating names and values. Most are interpolated into the
+// result; a few say how the lookup is performed, and the i18n package documents
+// which. With no translation store configured the key is returned as it stands,
+// so a handler written to translate still says something recognisable in an
+// application that has not been localized yet.
+func (c *Context) T(key string, args ...any) string {
+	if c.i18n == nil {
+		return key
+	}
+	return c.i18n.Translate(c.locale, key, args...)
+}
+
+// L renders a value the way the request's locale writes it, such as a time or
+// an amount of money.
+//
+//	ctx.L(time.Now(), "format", "short")
+//
+// With no translation store configured the value is formatted the way Go
+// prints it.
+func (c *Context) L(value any, args ...any) string {
+	if c.i18n == nil {
+		return fmt.Sprint(value)
+	}
+	return c.i18n.Localize(c.locale, value, args...)
+}
 
 // Route returns the route being executed, exposing its method, path template,
 // tags and declared documentation. It is never nil inside a handler.
@@ -199,6 +251,8 @@ func (c *Context) reset() {
 	c.app = nil
 	c.status = 0
 	c.requestID = ""
+	c.locale = ""
+	c.i18n = nil
 	c.params.Reset()
 	for i := range c.deps {
 		c.deps[i] = depValue{}

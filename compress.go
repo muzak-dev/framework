@@ -211,16 +211,12 @@ func negotiateEncoding(header string) string {
 
 // refused reports whether an Accept-Encoding parameter list rejects the
 // encoding it belongs to with a quality of zero.
+//
+// It is the yes-or-no form of [quality], which locale negotiation needs graded.
+// Both read the same header syntax, so they share one parser rather than
+// growing two that drift apart.
 func refused(parameters string) bool {
-	for parameter := range strings.SplitSeq(parameters, ";") {
-		key, value, found := strings.Cut(parameter, "=")
-		if !found || strings.ToLower(strings.TrimSpace(key)) != "q" {
-			continue
-		}
-		quality, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		return err == nil && quality == 0
-	}
-	return false
+	return quality(parameters) == 0
 }
 
 // compressorPool recycles the compressors for one policy, which each hold a

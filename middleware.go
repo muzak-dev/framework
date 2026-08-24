@@ -211,11 +211,18 @@ func AccessLog(logger *slog.Logger, opts AccessLogOptions) Middleware {
 			case status >= 400:
 				level = slog.LevelWarn
 			}
-			scoped.LogAttrs(r.Context(), level, r.Method+" "+r.URL.Path,
+			attrs := []slog.Attr{
 				slog.Int("status", status),
 				slog.Duration("duration", time.Since(start)),
 				slog.Int64("bytes", rw.bytes),
-				slog.String(RequestIDKey, id))
+				slog.String(RequestIDKey, id),
+			}
+			// The locale is recorded only when one was resolved, so a service
+			// that does not translate logs exactly what it logged before.
+			if locale, ok := LocaleFromContext(r.Context()); ok && locale != "" {
+				attrs = append(attrs, slog.String(LocaleKey, locale))
+			}
+			scoped.LogAttrs(r.Context(), level, r.Method+" "+r.URL.Path, attrs...)
 		})
 	}
 }

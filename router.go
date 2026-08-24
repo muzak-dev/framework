@@ -60,9 +60,14 @@ func (o sharedOption) applyRoute(c *routeConfig)   { o.route(c) }
 func (o sharedOption) applyRouter(c *routerConfig) { o.router(c) }
 
 // responseDoc is one documented response outcome.
+//
+// model is the type the body carries, and is nil for an outcome declared with
+// [WithResponseDoc], which is documented as the standard error envelope
+// because that is what an error returned from a handler actually produces.
 type responseDoc struct {
 	code        int
 	description string
+	model       reflect.Type
 }
 
 // routerConfig accumulates the settings a router contributes to every route
@@ -182,8 +187,46 @@ func WithVersion(versions ...Version) SharedOption {
 // it for outcomes a handler produces through an error rather than through its
 // return type, as in WithResponseDoc(418, "I'm a teapot"). Applying it to a
 // router documents the response for every route beneath it.
+//
+// The body is described as the standard error envelope, [ErrorResponse], since
+// that is what an error returned from a handler produces. A route that answers
+// some status with a body of its own describes it with [WithResponseModel]
+// instead. An empty description falls back to the status code's standard
+// reason phrase, so WithResponseDoc(404, "") reads as "Not Found".
 func WithResponseDoc(code int, description string) SharedOption {
 	doc := responseDoc{code: code, description: description}
+	return sharedOption{
+		route:  func(c *routeConfig) { c.responses = append(c.responses, doc) },
+		router: func(c *routerConfig) { c.responses = append(c.responses, doc) },
+	}
+}
+
+// WithResponseModel documents an additional response and the model its body
+// carries, so that one operation can describe a different schema per status
+// code. Like [WithResponseDoc] it is recorded in the OpenAPI document and has
+// no effect at runtime.
+//
+// The handler's return type describes the success response and nothing else,
+// which leaves every other outcome undescribed unless it is declared here. The
+// type argument is the response model, written exactly as the handler's own Out
+// type would be:
+//
+//	r.Get("/items/{item_id}", handlers.ReadItem,
+//		muzak.WithResponseModel[schemas.ItemError](http.StatusNotFound, "The item does not exist"),
+//		muzak.WithResponseModel[schemas.ItemError](http.StatusGone, "The item was deleted"))
+//
+// The rules that apply to a handler's Out type apply here too: a named struct
+// is referenced from the components section and described once however many
+// operations mention it, [Empty] describes a response with no body at all, and
+// [HTML] describes one carrying text/html.
+//
+// An empty description falls back to the status code's standard reason phrase.
+// Applying it to a router documents the response for every route beneath it,
+// and the last declaration of a status code wins, so a route may replace what
+// it inherited, including the response derived from its own return type when it
+// names the status the route succeeds with.
+func WithResponseModel[T any](code int, description string) SharedOption {
+	doc := responseDoc{code: code, description: description, model: reflect.TypeFor[T]()}
 	return sharedOption{
 		route:  func(c *routeConfig) { c.responses = append(c.responses, doc) },
 		router: func(c *routerConfig) { c.responses = append(c.responses, doc) },
@@ -419,8 +462,9 @@ type Router struct {
 // NewRouter returns a router configured by the given options.
 //
 // Options that apply to a whole subtree, namely [WithTags],
-// [WithDependencies], [Needs] and [WithResponseDoc], take effect for every route registered on this
-// router and on any router included into it.
+// [WithDependencies], [Needs], [WithResponseDoc] and [WithResponseModel], take
+// effect for every route registered on this router and on any router included
+// into it.
 func NewRouter(opts ...RouterOption) *Router {
 	r := &Router{}
 	for _, opt := range opts {
@@ -742,6 +786,14 @@ func (rt *Route) resolve(in inherited) error {
 	}
 	if rt.Status != clampStatus(rt.Status) {
 		return fmt.Errorf("muzak: %s %s: declared status %d is not a valid HTTP status code", rt.Method, rt.Path, cfg.status)
+	}
+	for _, doc := range rt.responses {
+		// A documented outcome becomes a key in the OpenAPI document, so a
+		// code outside the range is caught here rather than emitted as a
+		// response no client could ever receive.
+		if doc.code != clampStatus(doc.code) {
+			return fmt.Errorf("muzak: %s %s: documented response status %d is not a valid HTTP status code", rt.Method, rt.Path, doc.code)
+		}
 	}
 
 	rt.maxBodySize = in.maxBodySize

@@ -155,6 +155,10 @@ func (v *Validation) nextTime() *validate.TimeRules {
 type rejection struct {
 	target any
 	issue  string
+	// key names a translation to render the failure from, set by RejectKey.
+	key string
+	// args are the values that translation interpolates.
+	args []any
 }
 
 // String binds rules to a string field.
@@ -219,6 +223,21 @@ func (v *Validation) Reject(target any, issue string) {
 	v.rejected = append(v.rejected, rejection{target: target, issue: issue})
 }
 
+// RejectKey records a failure against a field and names a translation to render
+// it from, so that a cross-field check reads in the caller's language the way
+// every built-in rule does:
+//
+//	if in.Start.After(in.End) {
+//		v.RejectKey(&in.End, "errors.booking.ends_before_it_starts")
+//	}
+//
+// Arguments are alternating names and values, interpolated into the
+// translation. When nothing translates the key, the key itself is reported,
+// which names what has to be added and where.
+func (v *Validation) RejectKey(target any, key string, args ...any) {
+	v.rejected = append(v.rejected, rejection{target: target, issue: key, key: key, args: args})
+}
+
 // Condition is a pending cross-field check produced by [Validation.When].
 type Condition struct {
 	validation *Validation
@@ -242,6 +261,16 @@ func (v *Validation) When(condition bool) *Condition {
 func (c *Condition) Reject(target any, issue string) *Condition {
 	if c.holds {
 		c.validation.Reject(target, issue)
+	}
+	return c
+}
+
+// RejectKey records a translated failure when the condition held, and does
+// nothing otherwise. It is [Validation.RejectKey] hung off a condition, as
+// [Condition.Reject] is [Validation.Reject].
+func (c *Condition) RejectKey(target any, key string, args ...any) *Condition {
+	if c.holds {
+		c.validation.RejectKey(target, key, args...)
 	}
 	return c
 }
@@ -313,6 +342,9 @@ func (v *Validation) details() []ErrorDetail {
 				Field:    joinPath(v.prefix, name) + problem.Path,
 				Location: location,
 				Issue:    problem.Issue,
+				Kind:     string(problem.Kind),
+				Key:      problem.Key,
+				Args:     problem.Args,
 			})
 		}
 	}
@@ -322,6 +354,8 @@ func (v *Validation) details() []ErrorDetail {
 			Field:    joinPath(v.prefix, name),
 			Location: location,
 			Issue:    rejected.issue,
+			Key:      rejected.key,
+			Args:     rejected.args,
 		})
 	}
 	for _, child := range v.children {

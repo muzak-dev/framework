@@ -25,6 +25,18 @@ type ErrorDetail struct {
 	// Issue explains what was wrong, phrased to read after the field name, as
 	// in "is required" or "must be a valid integer".
 	Issue string `json:"issue"`
+
+	// Kind names the rule that failed, as "blank" or "too_short". It is not
+	// serialized: it is what an [ErrorRenderer] branches on, and what
+	// [DefaultErrorRenderer] renders Issue from when the application has a
+	// translation store configured.
+	Kind string `json:"-"`
+	// Key names a translation to render Issue from, set by MessageKey or
+	// [Validation.RejectKey]. It wins over Kind. It is not serialized.
+	Key string `json:"-"`
+	// Args carries the values the message interpolates, as alternating names
+	// and values. It is not serialized.
+	Args []any `json:"-"`
 }
 
 // ErrorBody is the "error" member of an error response.
@@ -215,6 +227,14 @@ type HTTPError struct {
 	// Details lists the individual problems behind the error, if any.
 	Details []ErrorDetail
 
+	// MessageKey names a translation the message is rendered from when the
+	// application has a translation store configured. Message remains the
+	// fallback, so an error carrying both reads correctly either way.
+	MessageKey string
+	// MessageArgs carries the values MessageKey interpolates, as alternating
+	// names and values.
+	MessageArgs []any
+
 	cause error
 }
 
@@ -259,6 +279,19 @@ func (e *HTTPError) ErrorCode() string {
 // cause was attached.
 func (e *HTTPError) Unwrap() error { return e.cause }
 
+// WithMessageKey names a translation to render the message from, so that an
+// error raised by an application reads in the caller's language:
+//
+//	return muzak.Forbidden("").WithMessageKey("errors.access.denied")
+//
+// The message already set is kept as the fallback, for a locale that has no
+// translation of the key and for an application with no store configured.
+func (e *HTTPError) WithMessageKey(key string, args ...any) *HTTPError {
+	e.MessageKey = key
+	e.MessageArgs = args
+	return e
+}
+
 // Wrap attaches an underlying cause that is recorded in logs and made visible
 // to [errors.Is] and [errors.As] but never sent to the client. It returns e so
 // it can be used inline in a return statement.
@@ -291,6 +324,10 @@ type ValidationError struct {
 	// Details lists every problem found, in the order the fields are declared
 	// on the input type.
 	Details []ErrorDetail
+	// Model names the input type the failures came from, in snake case, which
+	// is the narrowest scope a translated message is looked up under. It is
+	// empty when the failures belong to the request rather than to one model.
+	Model string
 }
 
 // Error implements the error interface, summarizing how many fields failed and
@@ -319,6 +356,29 @@ func (e *ValidationError) HTTPStatus() int { return http.StatusUnprocessableEnti
 // add appends one field failure.
 func (e *ValidationError) add(location, field, issue string) {
 	e.Details = append(e.Details, ErrorDetail{Field: field, Location: location, Issue: issue})
+}
+
+// addKeyed appends one field failure that names the rule behind it, so that its
+// message can be rendered in the request's locale rather than only in English.
+//
+// The rule is a Kind, which is looked up through the four scopes an application
+// may phrase a message under. Use [ValidationError.addKey] for a failure whose
+// message lives at one fixed key instead.
+func (e *ValidationError) addKeyed(location, field, issue, kind string, args ...any) {
+	e.Details = append(e.Details, ErrorDetail{
+		Field: field, Location: location, Issue: issue, Kind: kind, Args: args,
+	})
+}
+
+// addKey appends one field failure whose message lives at a fixed key.
+//
+// The binder's failures are keyed this way rather than by rule, because a value
+// that could not be read at all is not a rule an application would want to
+// phrase per field.
+func (e *ValidationError) addKey(location, field, issue, key string, args ...any) {
+	e.Details = append(e.Details, ErrorDetail{
+		Field: field, Location: location, Issue: issue, Key: key, Args: args,
+	})
 }
 
 // ErrorRenderer converts an error into the response written for it.
@@ -351,9 +411,9 @@ func DefaultErrorRenderer(ctx *Context, err error) (int, any) {
 	if errors.As(err, &ve) {
 		body.Error = ErrorBody{
 			Code:    CodeValidationError,
-			Message: validationMessage,
+			Message: ctx.message("muzak.validation.summary", validationMessage),
 			Status:  http.StatusUnprocessableEntity,
-			Details: ve.Details,
+			Details: translateDetails(ctx, ve.Model, ve.Details),
 		}
 		return body.Error.Status, body
 	}
@@ -363,9 +423,9 @@ func DefaultErrorRenderer(ctx *Context, err error) (int, any) {
 		status := clampStatus(he.Status)
 		body.Error = ErrorBody{
 			Code:    he.ErrorCode(),
-			Message: he.Message,
+			Message: ctx.httpMessage(he),
 			Status:  status,
-			Details: he.Details,
+			Details: translateDetails(ctx, "", he.Details),
 		}
 		return status, body
 	}
@@ -383,7 +443,7 @@ func DefaultErrorRenderer(ctx *Context, err error) (int, any) {
 
 	body.Error = ErrorBody{
 		Code:    CodeInternalError,
-		Message: internalMessage,
+		Message: ctx.message("muzak.validation.internal", internalMessage),
 		Status:  http.StatusInternalServerError,
 	}
 	return http.StatusInternalServerError, body

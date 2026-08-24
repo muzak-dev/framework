@@ -267,9 +267,13 @@ type Schema struct {
 	// MinLength and MaxLength bound a string's length.
 	MinLength *int `json:"minLength,omitzero"`
 	MaxLength *int `json:"maxLength,omitzero"`
-	// Minimum and Maximum bound a number's value.
+	// Minimum and Maximum bound a number's value inclusively.
 	Minimum *float64 `json:"minimum,omitzero"`
 	Maximum *float64 `json:"maximum,omitzero"`
+	// ExclusiveMinimum and ExclusiveMaximum bound it exclusively, for a rule
+	// that rejects the bound itself rather than admitting it.
+	ExclusiveMinimum *float64 `json:"exclusiveMinimum,omitzero"`
+	ExclusiveMaximum *float64 `json:"exclusiveMaximum,omitzero"`
 	// MultipleOf requires a number to divide evenly by this value.
 	MultipleOf *float64 `json:"multipleOf,omitzero"`
 	// MinItems and MaxItems bound an array's length.
@@ -578,6 +582,12 @@ func applyConstraints(schema *Schema, c validate.Constraints) {
 	}
 	if c.Maximum != nil {
 		schema.Maximum = c.Maximum
+	}
+	if c.ExclusiveMinimum != nil {
+		schema.ExclusiveMinimum = c.ExclusiveMinimum
+	}
+	if c.ExclusiveMaximum != nil {
+		schema.ExclusiveMaximum = c.ExclusiveMaximum
 	}
 	if c.MultipleOf != nil {
 		schema.MultipleOf = c.MultipleOf

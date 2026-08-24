@@ -160,11 +160,20 @@ func TestNumberDescribeAndLabel(t *testing.T) {
 	if c.MultipleOf == nil || *c.MultipleOf != 2 {
 		t.Errorf("MultipleOf = %v", c.MultipleOf)
 	}
-	if got := Number().Positive().Describe(); got.Minimum == nil || *got.Minimum != 0 {
-		t.Errorf("Positive did not describe a lower bound: %+v", got)
+	// Positive rejects zero, so the bound it describes is exclusive. Describing
+	// it as "minimum: 0" would tell a client that zero is allowed, which is the
+	// opposite of what the rule enforces.
+	if got := Number().Positive().Describe(); got.ExclusiveMinimum == nil || *got.ExclusiveMinimum != 0 {
+		t.Errorf("Positive did not describe an exclusive lower bound: %+v", got)
 	}
-	if got := Number().Negative().Describe(); got.Maximum == nil || *got.Maximum != 0 {
-		t.Errorf("Negative did not describe an upper bound: %+v", got)
+	if got := Number().Positive().Describe(); got.Minimum != nil {
+		t.Errorf("Positive described an inclusive lower bound as well: %+v", got)
+	}
+	if got := Number().Negative().Describe(); got.ExclusiveMaximum == nil || *got.ExclusiveMaximum != 0 {
+		t.Errorf("Negative did not describe an exclusive upper bound: %+v", got)
+	}
+	if got := Number().Negative().Describe(); got.Maximum != nil {
+		t.Errorf("Negative described an inclusive upper bound as well: %+v", got)
 	}
 	if got := Number().As("years").Label(); got != "years" {
 		t.Errorf("Label = %q", got)

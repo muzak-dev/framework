@@ -355,6 +355,64 @@ func (r *TimeRules) Between(earliest, latest time.Time) *TimeRules {
 	})
 }
 
+// Past requires a moment already gone.
+//
+// The comparison is made when the request is validated rather than when the
+// rule is declared, so "past" means past at the moment someone asked, which is
+// what a date of birth or an event that has happened means.
+func (r *TimeRules) Past() *TimeRules {
+	return r.add(step[time.Time]{
+		kind: kindPast,
+		check: func(t time.Time) error {
+			if !t.Before(time.Now()) {
+				return errors.New("must be in the past")
+			}
+			return nil
+		},
+	})
+}
+
+// Future requires a moment still to come, judged when the request is validated
+// the way [TimeRules.Past] judges.
+func (r *TimeRules) Future() *TimeRules {
+	return r.add(step[time.Time]{
+		kind: kindFuture,
+		check: func(t time.Time) error {
+			if !t.After(time.Now()) {
+				return errors.New("must be in the future")
+			}
+			return nil
+		},
+	})
+}
+
+// Within requires a moment no further from now than a given distance, in either
+// direction.
+//
+//	v.Time(&in.Timestamp).Within(5 * time.Minute)
+//
+// It is the rule a signed request or a replayed event wants: a timestamp far in
+// the past is stale and one far in the future is a clock that cannot be
+// trusted, and both are the same mistake.
+func (r *TimeRules) Within(distance time.Duration) *TimeRules {
+	return r.add(step[time.Time]{
+		kind: kindWithin,
+		check: func(t time.Time) error {
+			gap := time.Since(t)
+			if gap < 0 {
+				gap = -gap
+			}
+			if gap > distance {
+				return bounded{
+					text: "must be within " + distance.String() + " of now",
+					by:   []any{"duration", distance.String()},
+				}
+			}
+			return nil
+		},
+	})
+}
+
 // Must applies a rule of your own.
 func (r *TimeRules) Must(check func(time.Time) error) *TimeRules {
 	return r.add(step[time.Time]{kind: kindCustom, check: check})

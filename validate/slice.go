@@ -178,6 +178,44 @@ func (r *SliceRules[E]) Each(rules ElementRules[E]) *SliceRules[E] {
 	return r
 }
 
+// Items requires an exact number of elements.
+//
+// It is the collection counterpart of [StringRules.Len], for a field whose
+// length is fixed rather than bounded: a pair of coordinates, a set of answers
+// to a fixed set of questions.
+func (r *SliceRules[E]) Items(n int) *SliceRules[E] {
+	return r.add(step[[]E]{kind: kindItems, n: n})
+}
+
+// NotEmpty requires at least one element.
+//
+// Like [StringRules.NotBlank], and unlike almost every other rule, it runs even
+// when the field was not supplied, because an absent collection is empty too.
+//
+// It therefore differs from Required by wording rather than by effect, and the
+// wording is the point: a client told that a list "must not be empty" knows
+// what to do, where one told it "is required" will go looking for whether it
+// sent the field at all.
+func (r *SliceRules[E]) NotEmpty() *SliceRules[E] {
+	return r.add(step[[]E]{kind: kindNotEmpty})
+}
+
+// Contains requires an element to be present.
+//
+//	v.Slice(&in.Scopes).Contains("read")
+//
+// Elements are compared the way [SliceRules.Unique] compares them, so a
+// collection of structs works as well as one of strings.
+func (r *SliceRules[E]) Contains(wanted E) *SliceRules[E] {
+	return r.add(step[[]E]{kind: kindContainsItem, enum: []any{wanted}})
+}
+
+// Excludes requires an element to be absent, for the value that is legal
+// everywhere else but not here: a wildcard scope, a reserved tag.
+func (r *SliceRules[E]) Excludes(rejected E) *SliceRules[E] {
+	return r.add(step[[]E]{kind: kindExcludesItem, enum: []any{rejected}})
+}
+
 // Must applies a rule of your own to the collection as a whole.
 func (r *SliceRules[E]) Must(check func([]E) error) *SliceRules[E] {
 	return r.add(step[[]E]{kind: kindCustom, check: check})
@@ -232,15 +270,52 @@ func applySliceStep[E any](s *step[[]E], values *[]E) error {
 		for i := range list {
 			for j := i + 1; j < len(list); j++ {
 				if reflect.DeepEqual(list[i], list[j]) {
-					return repeated{
+					return element{
 						text:  fmt.Sprintf("must not repeat %v", list[i]),
 						value: fmt.Sprintf("%v", list[i]),
 					}
 				}
 			}
 		}
+	case kindItems:
+		if len(*values) != s.n {
+			return fmt.Errorf("must have exactly %d %s", s.n, plural(s.n, "item"))
+		}
+	case kindNotEmpty:
+		if len(*values) == 0 {
+			return errors.New("must not be empty")
+		}
+	case kindContainsItem:
+		if !holdsElement(*values, s.enum) {
+			return element{
+				text:  fmt.Sprintf("must contain %v", s.enum[0]),
+				value: fmt.Sprintf("%v", s.enum[0]),
+			}
+		}
+	case kindExcludesItem:
+		if holdsElement(*values, s.enum) {
+			return element{
+				text:  fmt.Sprintf("must not contain %v", s.enum[0]),
+				value: fmt.Sprintf("%v", s.enum[0]),
+			}
+		}
 	default:
 		return s.check(*values)
 	}
 	return nil
+}
+
+// holdsElement reports whether a collection contains the wanted element.
+func holdsElement[E any](values []E, wanted []any) bool {
+	if len(wanted) == 0 {
+		// coverage: Contains and Excludes each record exactly one element, so
+		// the set is never empty by the time it is searched.
+		return false
+	}
+	for i := range values {
+		if reflect.DeepEqual(any(values[i]), wanted[0]) {
+			return true
+		}
+	}
+	return false
 }

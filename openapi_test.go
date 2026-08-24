@@ -795,3 +795,189 @@ func TestRouteLevelTagsReachTheDocument(t *testing.T) {
 		t.Errorf("tags = %v, want the described one first, then first-use order", names)
 	}
 }
+
+// respError is the model a route documents for its failures, standing in for
+// an application's own error envelope rather than Muzak's.
+type respError struct {
+	Message string `json:"message" doc:"What went wrong"`
+	Code    string `json:"code" doc:"A machine-readable classifier"`
+}
+
+// respConflict is a second model, so that one operation can be seen carrying a
+// different schema at two different status codes.
+type respConflict struct {
+	Existing string `json:"existing"`
+}
+
+// TestResponseModelsAreDocumentedPerStatusCode covers what
+// [WithResponseModel] adds over [WithResponseDoc]: a schema of the
+// application's own choosing at each status code, alongside the one the
+// handler's return type describes.
+func TestResponseModelsAreDocumentedPerStatusCode(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/users", okHandler,
+		Status(http.StatusCreated),
+		WithResponseModel[respError](http.StatusBadRequest, "The request was malformed"),
+		WithResponseModel[respConflict](http.StatusConflict, "A user with that name exists"),
+		WithResponseModel[respError](http.StatusInternalServerError, ""),
+	)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+	op := doc.Paths["/users"].Post
+
+	// The declared status still describes the handler's return type: a model
+	// for a failure does not displace the one the route succeeds with.
+	created, described := op.Responses["201"]
+	if !described {
+		t.Fatalf("the declared status is not described: %v", op.Responses)
+	}
+	if ref := created.Content["application/json"].Schema.Ref; ref != componentPrefix+"rtOut" {
+		t.Errorf("201 schema = %q, want the handler's return type", ref)
+	}
+
+	for _, want := range []struct {
+		code, schema, description string
+	}{
+		{"400", "respError", "The request was malformed"},
+		{"409", "respConflict", "A user with that name exists"},
+		// An empty description falls back to the standard reason phrase.
+		{"500", "respError", "Internal Server Error"},
+	} {
+		response, described := op.Responses[want.code]
+		if !described {
+			t.Errorf("%s is not described: %v", want.code, op.Responses)
+			continue
+		}
+		if response.Description != want.description {
+			t.Errorf("%s description = %q, want %q", want.code, response.Description, want.description)
+		}
+		if ref := response.Content["application/json"].Schema.Ref; ref != componentPrefix+want.schema {
+			t.Errorf("%s schema = %q, want a reference to %s", want.code, ref, want.schema)
+		}
+	}
+
+	// The models are described once, in the components section, exactly as a
+	// return type would be.
+	schema, present := doc.Components.Schemas["respError"]
+	if !present {
+		t.Fatalf("the error model is not in the components section: %v", doc.Components.Schemas)
+	}
+	if schema.Properties["code"].Description != "A machine-readable classifier" {
+		t.Errorf("the model lost its doc tags: %+v", schema.Properties)
+	}
+}
+
+// TestResponseDocKeepsTheErrorEnvelope covers the outcome a route documents
+// without naming a model, which is answered with Muzak's own error response
+// and so is described as one.
+func TestResponseDocKeepsTheErrorEnvelope(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/items", okHandler,
+		WithResponseDoc(http.StatusNotFound, ""),
+		WithResponseModel[respError](http.StatusGone, "The item was deleted"),
+	)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+	op := doc.Paths["/items"].Get
+
+	missing := op.Responses["404"]
+	if ref := missing.Content["application/json"].Schema.Ref; ref != componentPrefix+"ErrorResponse" {
+		t.Errorf("404 schema = %q, want the error envelope", ref)
+	}
+	if missing.Description != "Not Found" {
+		t.Errorf("404 description = %q, want the standard reason phrase", missing.Description)
+	}
+	if ref := op.Responses["410"].Content["application/json"].Schema.Ref; ref != componentPrefix+"respError" {
+		t.Errorf("410 schema = %q, want the declared model", ref)
+	}
+}
+
+// TestResponseModelEmptyAndHTML covers the two output types a response model
+// shares with a handler's return type: one that carries no body, and one that
+// carries markup rather than JSON.
+func TestResponseModelEmptyAndHTML(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/feed", okHandler,
+		WithResponseModel[Empty](http.StatusNotModified, "The feed has not changed"),
+		WithResponseModel[HTML](http.StatusServiceUnavailable, "A maintenance page"),
+	)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+	op := doc.Paths["/feed"].Get
+
+	if content := op.Responses["304"].Content; content != nil {
+		t.Errorf("an Empty model describes content: %v", content)
+	}
+	page, carried := op.Responses["503"].Content["text/html"]
+	if !carried {
+		t.Fatalf("an HTML model is not described as text/html: %v", op.Responses["503"].Content)
+	}
+	if page.Schema.Type != "string" {
+		t.Errorf("the HTML schema = %v, want a string", page.Schema.Type)
+	}
+}
+
+// TestResponseModelsAreInheritedAndOverridden covers a model declared on a
+// router, which every route beneath it carries, and what happens when a route
+// declares its own for the same status code.
+func TestResponseModelsAreInheritedAndOverridden(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	api := NewRouter(WithResponseModel[respError](http.StatusNotFound, "Nothing at that path"))
+	api.Get("/items", okHandler)
+	api.Get("/users", okHandler,
+		WithResponseModel[respConflict](http.StatusNotFound, "No such user"))
+	app.Include(api)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document() = %v", err)
+	}
+
+	inherited := doc.Paths["/items"].Get.Responses["404"]
+	if ref := inherited.Content["application/json"].Schema.Ref; ref != componentPrefix+"respError" {
+		t.Errorf("the inherited 404 schema = %q, want the router's model", ref)
+	}
+	own := doc.Paths["/users"].Get.Responses["404"]
+	if ref := own.Content["application/json"].Schema.Ref; ref != componentPrefix+"respConflict" {
+		t.Errorf("the route's own 404 schema = %q, want it to win over the router's", ref)
+	}
+	if own.Description != "No such user" {
+		t.Errorf("the route's own 404 description = %q", own.Description)
+	}
+}
+
+// TestDocumentedResponseStatusIsValidated covers a code that is not a status
+// code at all, which would otherwise become a response key no client could
+// ever receive.
+func TestDocumentedResponseStatusIsValidated(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		opt  RouteOption
+	}{
+		{name: "WithResponseDoc", opt: WithResponseDoc(999, "impossible")},
+		{name: "WithResponseModel", opt: WithResponseModel[respError](42, "impossible")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			app := New(quietOptions())
+			app.Get("/x", okHandler, tc.opt)
+			if msg := buildError(t, app); !strings.Contains(msg, "not a valid HTTP status code") {
+				t.Errorf("Build() = %q, want it to name the invalid status", msg)
+			}
+		})
+	}
+}

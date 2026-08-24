@@ -472,7 +472,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		op.Responses[strconv.Itoa(http.StatusUnprocessableEntity)] = builder.errorResponse("The request could not be validated.")
 	}
 	for _, doc := range rt.responses {
-		op.Responses[strconv.Itoa(doc.code)] = builder.errorResponse(doc.description)
+		op.Responses[strconv.Itoa(doc.code)] = builder.declaredResponse(doc)
 	}
 	if _, described := op.Responses["default"]; !described {
 		op.Responses["default"] = builder.errorResponse("An unexpected error occurred.")
@@ -728,6 +728,27 @@ func (b *schemaBuilder) eventStreamContent(t reflect.Type) map[string]MediaType 
 		return nil
 	}
 	return map[string]MediaType{"text/event-stream": {Schema: b.schemaFor(t)}}
+}
+
+// declaredResponse describes an outcome declared at registration with
+// [WithResponseDoc] or [WithResponseModel].
+//
+// A declaration that named no model is the error envelope, because an outcome
+// a handler reports by returning an error is answered with one; a declaration
+// that named a model is described exactly as a handler's own return type would
+// be, so that an operation can carry a different schema per status code. A
+// description left empty falls back to the status code's standard reason
+// phrase, which OpenAPI requires a response to carry and which is what the
+// declaration would have said anyway.
+func (b *schemaBuilder) declaredResponse(doc responseDoc) *Response {
+	description := orDefault(doc.description, orDefault(http.StatusText(doc.code), "Response"))
+	if doc.model == nil {
+		return b.errorResponse(description)
+	}
+	return &Response{
+		Description: description,
+		Content:     b.responseContent(doc.model),
+	}
 }
 
 // errorResponse describes a failure carrying the standard error envelope.

@@ -1,6 +1,9 @@
 package muzak
 
-import "net/http"
+import (
+	"net/http"
+	"strconv"
+)
 
 // This file holds one constructor per outcome an application reaches for by
 // name, so that returning the right response does not mean remembering the
@@ -55,7 +58,14 @@ var statusMessages = map[int]string{
 // statusError builds the error one of the constructors below returns, falling
 // back to the standard sentence for the status when no message is given.
 func statusError(status int, message string) *HTTPError {
-	return &HTTPError{Status: status, Message: orDefault(message, statusMessages[status])}
+	e := &HTTPError{Status: status, Message: orDefault(message, statusMessages[status])}
+	if message == "" {
+		// Only the standard sentence is translated. A message written by the
+		// caller is the caller's own words, and replacing them with a
+		// translation of something else would be wrong.
+		e.MessageKey = "muzak.http." + strconv.Itoa(status)
+	}
+	return e
 }
 
 // BadRequest returns a 400 classified [CodeBadRequest], for a request that

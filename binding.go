@@ -388,7 +388,7 @@ func setterFor(t reflect.Type) (setter, error) {
 		return func(dst reflect.Value, raw []string) error {
 			d, err := time.ParseDuration(raw[0])
 			if err != nil {
-				return errors.New("must be a valid duration, such as 1500ms")
+				return errNotDuration
 			}
 			dst.SetInt(int64(d))
 			return nil
@@ -410,7 +410,7 @@ func setterFor(t reflect.Type) (setter, error) {
 		return func(dst reflect.Value, raw []string) error {
 			v, err := strconv.ParseBool(raw[0])
 			if err != nil {
-				return errors.New("must be true or false")
+				return errNotBool
 			}
 			dst.SetBool(v)
 			return nil
@@ -420,7 +420,7 @@ func setterFor(t reflect.Type) (setter, error) {
 		return func(dst reflect.Value, raw []string) error {
 			v, err := strconv.ParseInt(raw[0], 10, bits)
 			if err != nil {
-				return errors.New("must be a valid integer")
+				return errNotInt
 			}
 			dst.SetInt(v)
 			return nil
@@ -430,7 +430,7 @@ func setterFor(t reflect.Type) (setter, error) {
 		return func(dst reflect.Value, raw []string) error {
 			v, err := strconv.ParseUint(raw[0], 10, bits)
 			if err != nil {
-				return errors.New("must be a valid non-negative integer")
+				return errNotUint
 			}
 			dst.SetUint(v)
 			return nil
@@ -440,7 +440,7 @@ func setterFor(t reflect.Type) (setter, error) {
 		return func(dst reflect.Value, raw []string) error {
 			v, err := strconv.ParseFloat(raw[0], bits)
 			if err != nil {
-				return errors.New("must be a valid number")
+				return errNotNumber
 			}
 			dst.SetFloat(v)
 			return nil
@@ -504,7 +504,10 @@ func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 	if p.empty {
 		return nil
 	}
-	verr := &ValidationError{}
+	// The model's name is the narrowest scope a translated message is looked up
+	// under, so it travels with the failures rather than being rediscovered by
+	// whatever renders them.
+	verr := &ValidationError{Model: snakeCase(p.typ.Name())}
 
 	var query url.Values
 	if p.needsQuery {
@@ -541,6 +544,44 @@ func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 	return nil
 }
 
+// Errors the parameter setters report.
+//
+// They are package-level values because the same wording is produced on every
+// failure, so a rejected request no longer allocates one, and because a
+// sentinel is what lets [bindingKeyFor] name the translation of each without
+// matching on text.
+var (
+	errNotDuration = errors.New("must be a valid duration, such as 1500ms")
+	errNotBool     = errors.New("must be true or false")
+	errNotInt      = errors.New("must be a valid integer")
+	errNotUint     = errors.New("must be a valid non-negative integer")
+	errNotNumber   = errors.New("must be a valid number")
+)
+
+// bindingKeys maps each of those onto the key its translation is written under.
+var bindingKeys = map[error]string{
+	errNotDuration: "duration",
+	errNotBool:     "boolean",
+	errNotInt:      "integer",
+	errNotUint:     "unsigned",
+	errNotNumber:   "number",
+}
+
+// bindingKeyFor reports the rule a binding failure came from, or the empty
+// string for one this package has no translation of.
+//
+// It walks the sentinels with errors.Is rather than comparing directly, because
+// a failure inside a repeated parameter arrives wrapped in the entry it came
+// from.
+func bindingKeyFor(err error) string {
+	for sentinel, key := range bindingKeys {
+		if errors.Is(err, sentinel) {
+			return key
+		}
+	}
+	return ""
+}
+
 // bindParams writes each supplied parameter into its field, recording a
 // failure for every one that is missing or malformed rather than stopping at
 // the first, so a client learns about all of them at once.
@@ -550,7 +591,7 @@ func bindParams(binders []paramBinder, c *Context, dst reflect.Value, query url.
 		raw, present := b.lookup(c, query)
 		if !present {
 			if b.required {
-				verr.add(b.source.String(), b.name, "is required")
+				verr.addKeyed(b.source.String(), b.name, "is required", "blank")
 				continue
 			}
 			if !b.hasDef {
@@ -559,7 +600,7 @@ func bindParams(binders []paramBinder, c *Context, dst reflect.Value, query url.
 			raw = []string{b.defValue}
 		}
 		if err := b.set(fieldByIndex(dst, b.index), raw); err != nil {
-			verr.add(b.source.String(), b.name, err.Error())
+			verr.addKey(b.source.String(), b.name, err.Error(), bindingKey(err))
 		}
 	}
 }

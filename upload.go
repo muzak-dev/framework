@@ -282,7 +282,7 @@ func (p *bindPlan) bindMultipart(c *Context, dst reflect.Value, route *Route, ve
 		headers := uploadedParts(c.r, b.name)
 		if len(headers) == 0 {
 			if b.required {
-				verr.add(srcFile.String(), b.name, "is required")
+				verr.addKeyed(srcFile.String(), b.name, "is required", "blank")
 			}
 			continue
 		}

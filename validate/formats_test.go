@@ -168,6 +168,13 @@ func TestParsedFormats(t *testing.T) {
 		[]string{"TR", "GB", "US", "NZ", "ZW"},
 		[]string{"", "T", "TUR", "tr", "T1", "Tr", "XQ", "ZZ", "OO"})
 
+	// The dependent territories are assigned codes too, and a service taking an
+	// address meets them. Several have their own currency, so leaving them out
+	// would accept the money and refuse the place it is spent.
+	accepts(t, "isCountryCode territories", isCountryCode,
+		[]string{"HK", "MO", "PR", "GI", "KY", "AW", "BM", "FK", "SH", "GL", "FO", "PS", "AQ"},
+		[]string{"AN", "CS", "YU", "XK", "UK", "EU"})
+
 	accepts(t, "isCurrencyCode", isCurrencyCode,
 		[]string{"TRY", "GBP", "USD", "JPY", "XOF"},
 		[]string{"", "TR", "TRYX", "try", "TR1", "QQQ", "ZZZ"})
@@ -296,4 +303,62 @@ func TestEmptinessRulesRunOnAnAbsentValue(t *testing.T) {
 	if got := String().Email().For(ptr("")).Evaluate(); len(got) != 0 {
 		t.Errorf("Email on an absent value gave %v, want it skipped", got)
 	}
+}
+
+// TestCodeTablesAreComplete pins the size of both registers.
+//
+// A table is easy to edit and easy to half edit. Counting the entries catches
+// the paste that dropped a line, and pinning the number is what makes a later
+// change deliberate: regenerating the table moves it, and the number has to be
+// updated alongside the date above the table.
+func TestCodeTablesAreComplete(t *testing.T) {
+	t.Parallel()
+
+	// Every officially assigned ISO 3166-1 alpha-2 code, as of the date on the
+	// table: the independent states, the dependent territories and the special
+	// areas.
+	if got := len(countryCodes); got != 249 {
+		t.Errorf("countryCodes holds %d codes, want 249", got)
+	}
+	if got := len(currencyCodes); got != 155 {
+		t.Errorf("currencyCodes holds %d codes, want 155", got)
+	}
+
+	// Neither table may hold anything that is not the right shape, which is
+	// what the generated document still advertises.
+	for code := range countryCodes {
+		if len(code) != 2 || !isUpperASCII(code) {
+			t.Errorf("countryCodes holds %q, which is not two upper case letters", code)
+		}
+	}
+	for code := range currencyCodes {
+		if len(code) != 3 || !isUpperASCII(code) {
+			t.Errorf("currencyCodes holds %q, which is not three upper case letters", code)
+		}
+	}
+
+	// A currency belonging to a territory is useless without the territory, so
+	// the two tables have to agree about which places exist.
+	for currency, territory := range map[string]string{
+		"AWG": "AW", "BMD": "BM", "FKP": "FK", "GIP": "GI",
+		"HKD": "HK", "KYD": "KY", "MOP": "MO", "SHP": "SH",
+	} {
+		if _, has := currencyCodes[currency]; !has {
+			continue
+		}
+		if _, has := countryCodes[territory]; !has {
+			t.Errorf("%s is a currency but %s is not a country, so a form taking both would refuse the pair",
+				currency, territory)
+		}
+	}
+}
+
+// isUpperASCII reports whether every byte is an upper case ASCII letter.
+func isUpperASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] < 'A' || value[i] > 'Z' {
+			return false
+		}
+	}
+	return true
 }

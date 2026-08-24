@@ -327,9 +327,12 @@ func isCurrencyCode(value string) bool {
 	return ok
 }
 
-// countryCodes holds the ISO 3166-1 alpha-2 codes for every independent state
-// and certain dependent territories. The set was generated from the official
-// ISO 3166-1 list and should be regenerated when the standard is updated.
+// countryCodes holds every officially assigned ISO 3166-1 alpha-2 code: the
+// independent states first, then the dependent territories and special areas.
+//
+// The set was generated from the official ISO 3166-1 list and should be
+// regenerated when the standard is updated. Codes are assigned and withdrawn,
+// and a stale copy refuses input that has become valid.
 var countryCodes = map[string]struct{}{
 	"AD": {}, "AE": {}, "AF": {}, "AG": {}, "AL": {}, "AM": {}, "AO": {},
 	"AR": {}, "AT": {}, "AU": {}, "AZ": {}, "BA": {}, "BB": {}, "BD": {},
@@ -359,6 +362,19 @@ var countryCodes = map[string]struct{}{
 	"TR": {}, "TT": {}, "TV": {}, "TW": {}, "TZ": {}, "UA": {}, "UG": {},
 	"US": {}, "UY": {}, "UZ": {}, "VA": {}, "VC": {}, "VE": {}, "VN": {},
 	"VU": {}, "WS": {}, "YE": {}, "ZA": {}, "ZM": {}, "ZW": {},
+
+	// The dependent territories and special areas. They are assigned codes of
+	// their own, and a service that takes an address or a shipping destination
+	// meets them: several have their own currency in the table below, so
+	// leaving them out here would accept HKD and refuse HK.
+	"AI": {}, "AQ": {}, "AS": {}, "AW": {}, "AX": {}, "BL": {}, "BM": {},
+	"BQ": {}, "BV": {}, "CC": {}, "CK": {}, "CW": {}, "CX": {}, "EH": {},
+	"FK": {}, "FO": {}, "GF": {}, "GG": {}, "GI": {}, "GL": {}, "GP": {},
+	"GS": {}, "GU": {}, "HK": {}, "HM": {}, "IM": {}, "IO": {}, "JE": {},
+	"KY": {}, "MF": {}, "MO": {}, "MP": {}, "MQ": {}, "MS": {}, "NC": {},
+	"NF": {}, "NU": {}, "PF": {}, "PM": {}, "PN": {}, "PR": {}, "PS": {},
+	"RE": {}, "SH": {}, "SJ": {}, "SX": {}, "TC": {}, "TF": {}, "TK": {},
+	"UM": {}, "VG": {}, "VI": {}, "WF": {}, "YT": {},
 }
 
 // currencyCodes holds the ISO 4217 alphabetic currency codes. The set was

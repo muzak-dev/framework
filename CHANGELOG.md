@@ -9,6 +9,8 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-24
+
 ### Added
 
 - `WithResponseModel[T](code, description)` documents a status code and the
@@ -124,5 +126,6 @@ example application, but it is not frozen: expect it to move before 1.0.0.
   [Safe Defaults](https://muzak.dev/docs/security/safe-defaults).
 - Dual licence, MIT or Apache-2.0 at your option.
 
-[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/muzak-dev/framework/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/muzak-dev/framework/releases/tag/v0.1.0

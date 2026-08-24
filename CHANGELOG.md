@@ -40,10 +40,11 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
   }
   ```
 
-  Ruby's i18n keeps the current locale in a thread; Go has no equivalent, and a
-  package-level one shared by every goroutine would leak one request's language
-  into another. A locale is therefore passed rather than set: resolved once per
-  request, carried on the request's context, and named explicitly anywhere else.
+  A locale is passed rather than set. Go has no per-goroutine storage, and a
+  package-level current locale shared by every goroutine would leak one
+  request's language into another: one request setting it, and another two
+  microseconds later reading it. So it is resolved once per request, carried on
+  the request's context, and named explicitly anywhere there is no request.
 
   Where it comes from is declared rather than written by hand. `Accept-Language`
   is negotiated by default, honouring the quality values the client sent, and
@@ -62,15 +63,16 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 - `muzak.dev/framework/i18n` is the engine: `Store`, `Backend`, `Simple`,
   `Chain`, YAML and JSON locale files, `%{name}` interpolation, CLDR plural
-  rules for around ninety languages, locale fallbacks, default chains, the
-  exception handlers from the Ruby API, and `Localize` with a strftime formatter
-  and the number helpers.
+  rules for around ninety languages, locale fallbacks, default chains,
+  pluggable exception handlers, and `Localize` with a strftime formatter and the
+  number helpers.
 
   Go's own time formatting cannot produce a localized month name, because the
   reference layout hard-codes `January`. Patterns are therefore strftime, which
-  is also what the published rails-i18n corpus is written in, so a locale file
-  from it loads here unchanged. A pattern beginning `go:` is handed to Go's
-  formatter instead, for the formats meant for machines.
+  names the field and so leaves the formatter free to fill it from the locale.
+  It is also the notation the published locale corpora are written in, so a file
+  taken from one loads unchanged. A pattern beginning `go:` is handed to Go's
+  formatter instead, for the formats meant to be read by a machine.
 
 - The locale the framework ships covers every string it produces, and is chained
   beneath an application's own translations. A locale file names only what a
@@ -95,43 +97,79 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
   where there is a `context.Context` but no Muzak one, such as in a repository
   or a goroutine started from a handler.
 
-- **Forty more validation rules.** URLs narrowed to the schemes a field will
-  accept, the network addresses, the character classes, the formats that parse,
-  the numeric bounds that were missing, and the collection and time checks.
+- **Forty three more validation rules.** The engine had twenty string rules,
+  eight numeric, six for collections and five for times. What it was missing was
+  not exotic: a way to say https rather than any URL, an address of any kind, an
+  exclusive numeric bound, and a check that a field of spaces is not a value.
+
+  URLs and addresses, all narrower than the `URL` that was already there:
 
   ```go
-  v.String(&in.Webhook).HTTPS()
-  v.String(&in.Bucket).URLWithSchemes("s3", "gs")
-  v.String(&in.Origin).Host()
-  v.String(&in.Allowed).CIDR()
-  v.String(&in.Name).NotBlank().NoControl()
-  v.String(&in.Slug).Slug()
-  v.String(&in.Zone).Timezone()
-  v.Number(&in.Price).GreaterThan(0)
-  v.Number(&in.Listen).Port()
-  v.Slice(&in.Scopes).NotEmpty().Contains("read")
-  v.Time(&in.Signed).Within(5 * time.Minute)
+  HTTPS()  URLWithSchemes(...)  Host()
+  IP()  IPv4()  IPv6()  CIDR()  MAC()
   ```
 
-  The full list is in the validation guide. Each carries its rule name, so each
-  is translated like every rule that came before, and each describes itself in
-  the generated document where JSON Schema has a way to say it.
+  What a value may hold at all, and the character classes:
 
-  Three of them are worth calling out because they close holes rather than add
-  conveniences. `GreaterThan` and `LessThan` are the exclusive numeric bounds,
-  which had no equivalent: only the inclusive pair and the comparisons against
-  zero existed. `NotBlank` rejects a field of spaces, which satisfies `Required`
-  while carrying nothing anyone would call a value. `NoControl` rejects a
-  carriage return in a value bound for a header, a log line or a redirect.
+  ```go
+  MatchesNot(pattern)  NotBlank()  NoControl()
+  Alpha()  Alphanumeric()  Numeric()  ASCII()
+  ```
+
+  Formats that parse rather than merely match:
+
+  ```go
+  Slug()  Hex()  HexColour()  Base64()  JSON()  Semver()
+  E164()  LanguageTag()  Timezone()  CountryCode()  CurrencyCode()
+  ```
+
+  Comparisons, the last two counting bytes rather than characters:
+
+  ```go
+  EqualFold(other)  MinBytes(n)  MaxBytes(n)
+  ```
+
+  Numbers, collections and times:
+
+  ```go
+  GreaterThan(n)  LessThan(n)  NonNegative()  NonPositive()
+  Whole()  Port()  OneOf(...)
+
+  Items(n)  NotEmpty()  Contains(v)  Excludes(v)
+
+  Past()  Future()  Within(d)
+  ```
+
+  Each carries the name of the rule behind it, so each is translated the way
+  every rule that came before it is, and each describes itself in the generated
+  document wherever JSON Schema has a way to say it: a format for the addresses,
+  an expression for the character classes, bounds for the numbers and item
+  counts for the collections.
+
+  Three of these close holes rather than add conveniences. `GreaterThan` and
+  `LessThan` are the exclusive numeric bounds, which had no equivalent at all:
+  only the inclusive pair and the comparisons against zero existed, so a price
+  that must be above nothing could not be stated. `NotBlank` rejects a field of
+  spaces, which satisfies `Required` while carrying nothing anyone would call a
+  value. `NoControl` rejects a carriage return in something bound for a header,
+  a log line or a redirect, which is where an injection starts.
 
   `NotBlank` and `NotEmpty` run even when a field was not supplied, unlike every
   other rule, because an absent value is blank and an absent collection is
   empty. That makes each a stronger presence check rather than something to pair
-  `Required` with.
+  `Required` with. The skip every other rule follows is now a named predicate,
+  so the exception is stated in one place rather than implied by a comparison.
 
-  `CountryCode` and `CurrencyCode` check the shape rather than the register of
-  assigned codes, for the reason given in their documentation: that table
-  changes, and a stale copy of it rejects valid input.
+  `CountryCode` and `CurrencyCode` check the shape, which is two and three upper
+  case letters, rather than the register of assigned codes. That register is a
+  few hundred entries which change as countries are added and currencies
+  redenominated, and a stale copy of it rejects valid input, which is worse than
+  admitting a pair of letters nobody has assigned yet. Use `OneOf` with your own
+  list when a service trades in a known handful.
+
+  `Alpha` and `Alphanumeric` judge letters as Unicode letters rather than as the
+  twenty six of English, so a name in any script passes. Narrow it by composing:
+  `Alpha().ASCII()`.
 
 - `validate.Kind` names the rule behind a failure, and `Problem` carries it
   alongside the English it has always produced. `MessageKey` on every rule set,

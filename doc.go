@@ -471,7 +471,11 @@
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs
 // are derived from the registrations themselves: path templates, tags,
 // summaries, the schemas of the In and Out types, declared statuses and the
-// entries added by [WithResponseDoc]. All of that reflection happens once,
+// entries added by [WithResponseDoc] and [WithResponseModel]. The return type
+// describes the response a route succeeds with; every other status code it
+// answers is described by one of those two, either as the standard error
+// envelope or as a model of its own, so a single operation can carry a
+// different schema per status code. All of that reflection happens once,
 // while the application is being built. Nothing on the request path inspects a
 // type, because the binding plan and the response schema were both compiled at
 // start-up.

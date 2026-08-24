@@ -9,6 +9,43 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+### Changed
+
+- **The documentation page is no longer part of the framework.** The small
+  self-contained page that was embedded in the module is gone, and
+  `AppOptions.DocsUI` names the UI to serve instead. It is nil by default, so
+  an application publishes its OpenAPI document at `/openapi.json` and serves
+  no page at all unless it asks for one:
+
+  ```go
+  import "muzak.dev/openapi/ui"
+
+  app := muzak.New(muzak.AppOptions{DocsUI: ui.Files()})
+  ```
+
+  A UI is a module of its own so that a service which does not want one does
+  not carry it: Go downloads and links a module only when something imports it,
+  so leaving `DocsUI` unset costs a binary nothing rather than embedding a page
+  it will never serve. Nothing is fetched at run time either way.
+
+  Migration: add the import and the option to keep a page at `/docs`; change
+  nothing to keep only the document. `DocsPath` is no longer reserved when no
+  UI is configured, so a route of your own may use it.
+
+### Added
+
+- `muzak.dev/openapi/ui` serves the OpenAPI dashboard: the reference grouped by
+  tag, every schema as an outline, request snippets in thirteen languages, and
+  a console that sends a request from the page and reports the status, the
+  timing, the headers and the body. It is built from the same document the
+  framework generates, so tags, summaries, descriptions, deprecations,
+  parameters with their validation constraints, request bodies and the response
+  model declared for every status code all reach it.
+- `AppOptions.DocsUI` takes any `fs.FS` meeting a small contract - an
+  `index.html` whose absolute URLs are written under `/__muzak_docs__/` and
+  which reads its document from `/__muzak_spec__` - so a service can serve a
+  dashboard of its own instead.
+
 ## [0.1.1] - 2026-08-24
 
 ### Added

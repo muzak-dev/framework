@@ -480,20 +480,33 @@
 // type, because the binding plan and the response schema were both compiled at
 // start-up.
 //
-// The page at /docs is embedded in the module and loads nothing from anywhere.
-// It reads this application's own document and renders the reference grouped
-// by tag, every schema as an outline, and a console that sends a request from
-// the page and reports the status, the timing, the headers and the body, or
-// writes that same request out as a curl command. Operations are grouped by
-// the tags [WithTags] puts on a router or a route; [OpenAPIOptions.Tags]
-// describes those groups and decides the order they are presented in.
+// The document is what the framework publishes; rendering it is a separate
+// concern, and a separate module. [AppOptions.DocsUI] is nil by default, so a
+// service describes itself at /openapi.json and carries no page at all:
 //
-// Both documents are rendered, hashed and compressed while the application is
-// built, so a request for either is a few header writes and a copy of bytes
-// that never change: each carries an entity tag the client revalidates
-// against, and the page is served under a content security policy that names
-// the page's own script by hash and permits no network access beyond this
-// origin.
+//	import "muzak.dev/openapi/ui"
+//
+//	muzak.AppOptions{DocsUI: ui.Files()}
+//
+// That is the OpenAPI dashboard, which reads this application's own document
+// and renders the operations grouped by tag, every schema as an outline, and a
+// console that sends a request from the page and reports the status, the
+// timing, the headers and the body, or writes that same request out as a curl
+// command. Operations are grouped by the tags [WithTags] puts on a router or a
+// route; [OpenAPIOptions.Tags] describes those groups and decides the order
+// they are presented in.
+//
+// A UI is a module of its own so that a service which does not want one does
+// not carry it: Go downloads and links a module only when something imports
+// it. Nothing is fetched at run time either way, so a configured dashboard
+// works air-gapped, exactly as the document does.
+//
+// Everything is rendered, hashed and compressed while the application is
+// built, so a request for the document, the page or one of its assets is a few
+// header writes and a copy of bytes that never change: each carries an entity
+// tag the client revalidates against, and the page is served under a content
+// security policy that hashes its own inline script and permits no network
+// access beyond this origin.
 //
 // [AppOptions.DocsPath] and [AppOptions.OpenAPIPath] decide where the two are
 // served, and [AppOptions.DisableDocs] turns both off for a deployment that

@@ -3,12 +3,14 @@ package muzak
 import (
 	"bytes"
 	"encoding/json/v2"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 )
 
 // quietOptions returns AppOptions that keep tests silent, so that a passing run
@@ -18,6 +20,27 @@ func quietOptions() AppOptions {
 		Title:         "Test API",
 		Version:       "1.0.0",
 		LoggerOptions: LoggerOptions{Format: LogFormatNone},
+		DocsUI:        testDocsUI(),
+	}
+}
+
+// testDocsUI is a documentation UI standing in for the real one, which lives
+// in a module of its own so that an application that wants no dashboard
+// carries none. It meets the same contract [AppOptions.DocsUI] states: a page
+// at the root whose absolute URLs are written under the base placeholder, and
+// assets beneath it that carry none.
+func testDocsUI() fs.FS {
+	page := `<!doctype html><html><head>` +
+		`<link rel="stylesheet" href="/__muzak_docs__/_nuxt/app.css">` +
+		`<script>window.__DOCS__={spec:"/__muzak_spec__"}</script>` +
+		`<script type="module" src="/__muzak_docs__/_nuxt/app.js"></script>` +
+		`</head><body><div id="app"></div></body></html>`
+	return fstest.MapFS{
+		"index.html":        &fstest.MapFile{Data: []byte(page)},
+		"_nuxt/app.js":      &fstest.MapFile{Data: []byte("export const app = () => {}\n")},
+		"_nuxt/app.css":     &fstest.MapFile{Data: []byte(":root{--x:1}\n")},
+		"_fonts/text.woff2": &fstest.MapFile{Data: []byte("not really a font, but bytes are bytes")},
+		"favicon.ico":       &fstest.MapFile{Data: []byte("icon")},
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -97,6 +98,31 @@ type AppOptions struct {
 	// ErrorRenderer converts errors into responses. It defaults to
 	// [DefaultErrorRenderer]; set it to change the error envelope.
 	ErrorRenderer ErrorRenderer
+
+	// DocsUI is the documentation dashboard served at [AppOptions.DocsPath],
+	// and is nil by default: an application describes itself with the OpenAPI
+	// document at [AppOptions.OpenAPIPath], and adds a UI when it wants one.
+	//
+	//	import "muzak.dev/openapi/ui"
+	//
+	//	muzak.AppOptions{DocsUI: ui.Files()}
+	//
+	// The dashboard is a module of its own so that a service which does not
+	// want one does not carry it: Go downloads and links a module only when
+	// something imports it, so leaving this unset costs a binary nothing at
+	// all rather than embedding a page it will never serve. Nothing is
+	// fetched at run time either way; a UI that is configured is one that is
+	// already in the binary.
+	//
+	// Any [fs.FS] meeting the contract works, which is how a service serves a
+	// dashboard of its own: an index.html at the root, every absolute URL in
+	// it written under "/__muzak_docs__/" and the OpenAPI document fetched
+	// from "/__muzak_spec__", both of which are rewritten to the configured
+	// paths when the application is built. No other file may carry an
+	// absolute URL, because only the page is rewritten.
+	//
+	// With no UI configured, DocsPath answers as any other unknown path does.
+	DocsUI fs.FS
 
 	// DocsPath is where the documentation UI is served, defaulting to
 	// "/docs". It is an absolute path on this application's own origin, so

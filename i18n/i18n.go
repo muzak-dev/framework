@@ -41,6 +41,11 @@ type Store struct {
 	handler   ExceptionHandler
 	rules     map[string]PluralRule
 	supplied  map[string]PluralRule
+	// chains holds the locales each lookup walks, worked out once at load.
+	// Rebuilding one per lookup cost a slice, a map and a closure on the path
+	// every translated message takes, which on a rejected request is once per
+	// field.
+	chains    map[string][]string
 	separator string
 }
 
@@ -152,6 +157,7 @@ func New(opts StoreOptions) (*Store, error) {
 	}
 	s.entries, _ = s.backend.(entryLookup)
 	s.refreshRules()
+	s.refreshChains()
 
 	if len(s.available) > 0 && !contains(s.available, s.def) {
 		return nil, fmt.Errorf("i18n: the default locale %q is not among the available locales %s",
@@ -310,7 +316,13 @@ func collect(prefix string, node map[string]any, into Group) {
 // FallbacksFor lists the locales tried for a locale, in order, ending at the
 // default. It is what a lookup walks, exposed so that a configuration can be
 // checked rather than guessed at.
-func (s *Store) FallbacksFor(locale string) []string { return s.chain(locale) }
+//
+// The result is a copy. The chains a lookup walks are worked out once and shared
+// by every request, so handing one out directly would let a caller reorder what
+// the whole process resolves against.
+func (s *Store) FallbacksFor(locale string) []string {
+	return append([]string(nil), s.chain(locale)...)
+}
 
 // chain builds the locales a lookup walks.
 //
@@ -319,6 +331,15 @@ func (s *Store) FallbacksFor(locale string) []string { return s.chain(locale) }
 // reaching its language without being told to is the rule that makes "pt-BR"
 // useful with only a "pt" file present.
 func (s *Store) chain(locale string) []string {
+	if cached, known := s.chains[locale]; known {
+		return cached
+	}
+	return s.buildChain(locale)
+}
+
+// buildChain works a chain out from the settings, for a locale that was not
+// seen at load time.
+func (s *Store) buildChain(locale string) []string {
 	out := make([]string, 0, 4)
 	seen := map[string]bool{}
 	add := func(candidate string) {
@@ -434,6 +455,26 @@ func (s *Store) ruleFor(locale string) PluralRule {
 		return rule
 	}
 	return PluralRuleFor(locale)
+}
+
+// refreshChains works out the chain for every locale the store can answer in.
+//
+// It runs after loading, for the same reason the rules are resolved there: the
+// contract that a store is loaded before it is read is what makes caching safe
+// without a lock, and the alternative is rebuilding a chain on every lookup.
+func (s *Store) refreshChains() {
+	chains := make(map[string][]string)
+	for _, locale := range s.backend.Locales() {
+		chains[locale] = s.buildChain(locale)
+	}
+	for locale := range s.fallbacks {
+		chains[locale] = s.buildChain(locale)
+	}
+	for _, locale := range s.available {
+		chains[locale] = s.buildChain(locale)
+	}
+	chains[s.def] = s.buildChain(s.def)
+	s.chains = chains
 }
 
 // refreshRules resolves the rule each loaded locale names at "i18n.plural.rule".

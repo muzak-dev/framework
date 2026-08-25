@@ -9,7 +9,7 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
-## [Unreleased]
+## [0.2.2] - 2026-08-25
 
 ### Added
 
@@ -399,7 +399,8 @@ example application, but it is not frozen: expect it to move before 1.0.0.
   [Safe Defaults](https://muzak.dev/docs/security/safe-defaults).
 - Dual licence, MIT or Apache-2.0 at your option.
 
-[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/muzak-dev/framework/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/muzak-dev/framework/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/muzak-dev/framework/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/muzak-dev/framework/compare/v0.1.0...v0.1.1

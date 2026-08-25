@@ -9,7 +9,7 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-08-24
+## [0.2.1] - 2026-08-25
 
 ### Added
 

@@ -9,6 +9,35 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Added
+
+- `validate.TimezoneDataAvailable` reports whether a binary can resolve time
+  zone names at all.
+
+  `Timezone()` resolves against the zone database, and a Go binary carries one
+  only when something imports `time/tzdata`. An image built from scratch has no
+  `/usr/share/zoneinfo` either, so the rule refuses every value including the
+  correct ones and nothing says why. Call this where the application is built
+  and refuse to start without it, so the fault is a failed deploy rather than a
+  week of rejected requests.
+
+### Changed
+
+- **The locales a lookup walks are worked out once rather than per lookup.** A
+  chain was rebuilt on every translated message, costing a slice, a map and a
+  closure, which on a rejected request is once per field. They are settled while
+  the application is being built, alongside the plural rules, and only read
+  afterwards.
+
+  A message with nothing to interpolate now allocates nothing: 50ns and no
+  allocations, against 91ns and one before.
+
+  `FallbacksFor` returns a copy, since the chains are now shared by every
+  request and handing one out directly would let a caller reorder what the whole
+  process resolves against.
+
 ## [0.2.1] - 2026-08-25
 
 ### Added

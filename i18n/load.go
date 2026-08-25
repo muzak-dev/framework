@@ -54,6 +54,7 @@ func (s *Store) Load(files fs.FS, dir string) error {
 		return err
 	}
 	s.refreshRules()
+	s.refreshChains()
 	return nil
 }
 
@@ -69,6 +70,7 @@ func (s *Store) LoadPath(paths ...string) error {
 		}
 	}
 	s.refreshRules()
+	s.refreshChains()
 	return errors.Join(problems...)
 }
 
@@ -85,6 +87,7 @@ func (s *Store) StoreTranslations(locale string, tree map[string]any) error {
 		return err
 	}
 	s.refreshRules()
+	s.refreshChains()
 	return nil
 }
 

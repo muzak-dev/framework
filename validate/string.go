@@ -471,8 +471,44 @@ func (r *StringRules) LanguageTag() *StringRules {
 // that resolve are remembered, and a value that could not be one is rejected on
 // its shape first, so a client sending nonsense pays for a scan of the string
 // rather than for a search of the zone data.
+//
+// # Zone data has to be there
+//
+// Go does not carry the zone database unless something asks it to. A binary on
+// a scratch or distroless image, which is what most container deployments use,
+// has no /usr/share/zoneinfo either, and then this rule refuses every value
+// including the correct ones. Nothing announces that: the requests simply start
+// failing validation.
+//
+// An application that uses this rule should either carry the database:
+//
+//	import _ "time/tzdata"
+//
+// which costs about 450 kilobytes of binary, or run on an image that has one.
+// Check at start-up with [TimezoneDataAvailable] either way, so that a missing
+// database stops the process rather than every request.
 func (r *StringRules) Timezone() *StringRules {
 	return r.add(step[string]{kind: kindTimezone})
+}
+
+// TimezoneDataAvailable reports whether this binary can resolve time zone names
+// at all.
+//
+// It exists because the alternative is finding out from production. A Go binary
+// resolves a zone from the host's database or from one compiled in by importing
+// time/tzdata, and a container built from scratch has neither, so every call to
+// [StringRules.Timezone] refuses its input and nothing says why.
+//
+// Call it once, where the application is built, and refuse to start without it:
+//
+//	if !validate.TimezoneDataAvailable() {
+//		log.Fatal("no time zone database: import _ \"time/tzdata\" or use an image that has one")
+//	}
+//
+// It resolves a real zone rather than UTC, which the standard library answers
+// without reading anything.
+func TimezoneDataAvailable() bool {
+	return isTimezone("America/New_York")
 }
 
 // CountryCode requires an assigned ISO 3166-1 alpha-2 country code.

@@ -328,7 +328,17 @@ func locationTag(f reflect.StructField) (paramSource, string, bool) {
 		{tagCookie, srcCookie},
 		{tagForm, srcForm},
 	} {
-		if name, ok := f.Tag.Lookup(candidate.tag); ok {
+		if value, ok := f.Tag.Lookup(candidate.tag); ok {
+			// Everything after the first comma is discarded, the way encoding/json
+			// reads its own tag. Nothing here has ever meant anything by an
+			// option - `default` and `required` are tags of their own - but a
+			// struct tag that looks like a json tag will eventually be written
+			// like one, and `query:"limit,omitzero"` binding a parameter
+			// literally named `limit,omitzero` is a filter that silently does
+			// nothing. It fails as a default rather than as an error, which is
+			// the worst way for a parameter to fail: the endpoint answers, and
+			// answers the unfiltered question.
+			name, _, _ := strings.Cut(value, ",")
 			return candidate.src, name, true
 		}
 	}

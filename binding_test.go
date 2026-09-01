@@ -891,3 +891,40 @@ func TestTextCodedTypesAreDocumentedAsStrings(t *testing.T) {
 		}
 	}
 }
+
+func TestALocationTagIgnoresWhatFollowsTheFirstComma(t *testing.T) {
+	// A struct tag that looks like a json tag gets written like one, and the
+	// failure is silent in the worst way: `query:"limit,omitzero"` binds a
+	// parameter named `limit,omitzero`, nothing ever sends that, and the
+	// endpoint answers the unfiltered question rather than refusing.
+	//
+	// Options mean nothing in a location tag - `default` and `required` are
+	// tags of their own - so discarding them costs nothing and stops the trap.
+	type in struct {
+		Plain   string `query:"plain"`
+		Omitted string `query:"omitted,omitzero"`
+		Several int    `query:"several,omitempty,string"`
+	}
+
+	type out struct {
+		OK bool `json:"ok"`
+	}
+
+	var got in
+	app := New(quietOptions())
+	app.Get("/t", func(_ *Context, body in) (out, error) {
+		got = body
+		return out{OK: true}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/t?plain=a&omitted=b&several=7", nil)
+	res := httptest.NewRecorder()
+	app.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", res.Code, res.Body.String())
+	}
+	if got.Plain != "a" || got.Omitted != "b" || got.Several != 7 {
+		t.Errorf("bound %+v; the options were read as part of the name", got)
+	}
+}

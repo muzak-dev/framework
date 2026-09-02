@@ -9,6 +9,68 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-02
+
+### Added
+
+- **`RateLimitOptions.Resolver` supplies quotas per request.** A `Quota` is
+  fixed when the application is built and one name may not carry two policies,
+  which is right for a policy the application owns and cannot express one its
+  customers do: a plan, a negotiated ceiling, a tier read from a database.
+
+  ```go
+  muzak.WithRateLimit(muzak.RateLimitOptions{
+      AfterDependencies: true,
+      Resolver: func(ctx *muzak.Context) ([]muzak.Quota, error) {
+          plan, ok := muzak.TryFrom[Plan](ctx)
+          if !ok {
+              return nil, nil // nothing resolved, nothing enforced
+          }
+          return plan.Quotas, nil
+      },
+  })
+  ```
+
+  Resolved quotas are counted alongside any static ones, so a route can carry
+  both a floor everyone shares and a ceiling that varies, and `RateLimit-Policy`
+  describes the union. Setting a resolver turns limiting on even with no static
+  quota, because what is enforced becomes a run time question. Returning nothing
+  enforces nothing, which is what an unauthenticated request reaching a
+  plan-based route should do.
+
+  A quota that arrives at run time cannot be validated when the application is
+  built, so one with no name, no window or no limit fails the request rather
+  than being counted under an empty name. Nothing can check a resolver's names
+  against the statically declared ones either, which is the price of the
+  flexibility.
+
+### Changed
+
+- **A panic in a lifecycle component's `Start` or `Stop` becomes an error
+  instead of killing the process.** `Stop` runs after the drain, on the
+  framework's goroutine, when every request has already been answered and there
+  is nothing left to report a crash to. A partially constructed component
+  panicking there took the process down at the one moment where doing so
+  achieves nothing, and the stack pointed at the framework rather than at the
+  application that supplied the value.
+
+  A handler that panics already becomes a 500 rather than a dead process; this
+  is the same bargain for the same reason. The panic and its stack are returned
+  as the component's error, so a failed stop is reported the way any other
+  failed stop is, and the components either side of it are still released.
+
+  No migration. A component that never panicked behaves exactly as before.
+
+### Documentation
+
+- `DefaultShutdownTimeout` names the grace periods of the platforms it has to
+  sit below. The default of 15s is longer than Cloud Run's ten, so the platform
+  killed a drain that was still running and nothing said why.
+
+- `LogFormatAuto` says what it does in a container. A container's stdout is not
+  a terminal, so a service under Compose gets JSON even locally, which is right
+  for production and a surprise in front of `docker compose logs`.
+
 ## [0.2.2] - 2026-08-25
 
 ### Added

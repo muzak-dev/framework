@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -206,7 +207,7 @@ func (m *lifecycleManager) Start(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			at := time.Now()
-			err := component.Start(startCtx)
+			err := startComponent(startCtx, component)
 			results[i] = componentResult{component: component, err: err, took: time.Since(at)}
 			if err != nil {
 				cancel()
@@ -271,8 +272,10 @@ func (m *lifecycleManager) Stop(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			at := time.Now()
-			if err := component.Stop(ctx); err != nil {
-				errs[i] = fmt.Errorf("lifecycle component %q failed to stop: %w", component.Name(), err)
+
+			err := stopComponent(ctx, component)
+			if err != nil {
+				errs[i] = err
 				return
 			}
 			m.logger.Info(fmt.Sprintf("Stopped %q (%s)", component.Name(), roundDuration(time.Since(at))))
@@ -285,6 +288,44 @@ func (m *lifecycleManager) Stop(ctx context.Context) error {
 		m.logger.Error("Some lifecycle components failed to stop", slog.String("error", joined.Error()))
 	}
 	return joined
+}
+
+// recoverComponent turns a panic in a lifecycle hook into an error.
+//
+// A component's Start and Stop are application code running on the framework's
+// goroutines, and Stop runs after the drain, when every request has already
+// been answered and there is nothing left to report a crash to. A panic there
+// would take the process down at the one moment where doing so achieves
+// nothing and looks like a fault in the framework.
+//
+// A handler that panics already becomes a 500 rather than a dead process; this
+// is the same bargain for the same reason.
+func recoverComponent(name, phase string, err *error) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	*err = fmt.Errorf("lifecycle component %q panicked while it %s: %v\n%s",
+		name, phase, recovered, debug.Stack())
+}
+
+// startComponent starts one component, converting a panic into an error so
+// that a component built wrong fails the start-up rather than the process.
+// Every component that did come up is released either way.
+func startComponent(ctx context.Context, component Lifecycle) (err error) {
+	defer recoverComponent(component.Name(), "started", &err)
+	return component.Start(ctx)
+}
+
+// stopComponent stops one component, converting a panic into an error so that
+// one misbehaving component cannot take the whole shutdown with it.
+func stopComponent(ctx context.Context, component Lifecycle) (err error) {
+	defer recoverComponent(component.Name(), "stopped", &err)
+
+	if stopErr := component.Stop(ctx); stopErr != nil {
+		return fmt.Errorf("lifecycle component %q failed to stop: %w", component.Name(), stopErr)
+	}
+	return nil
 }
 
 // roundDuration trims a duration to a precision worth reading in a log line.

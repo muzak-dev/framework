@@ -620,7 +620,9 @@ func (a *App) buildHandler() http.Handler {
 	for i := len(a.middleware) - 1; i >= 0; i-- {
 		handler = a.middleware[i](handler)
 	}
-	return handler
+	// Outermost, so everything above -- the access log included -- can read the
+	// template dispatch writes.
+	return withRouteHolder(handler)
 }
 
 // corsMiddleware builds the CORS middleware when a policy was configured. A
@@ -685,6 +687,13 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.fail(c, NewHTTPErrorf(http.StatusNotFound, "no route matches %s %s", r.Method, r.URL.Path))
 		return
 	}
+	// Published for instrumentation, into the holder installed on the way in.
+	// Middleware above keeps the request it was handed, so a new context made
+	// here would never reach it; writing through the holder does.
+	if holder, ok := r.Context().Value(routeContextKey{}).(*routeHolder); ok {
+		holder.template = route.Path
+	}
+
 	a.run(c, route)
 }
 

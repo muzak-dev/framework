@@ -9,6 +9,55 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-09-02
+
+### Added
+
+- **`RouteFromContext` names the route a request matched, so a service can be
+  instrumented from outside.** Middleware is the seam for tracing and metrics,
+  and it runs below the typed layer and before routing, so it never learned
+  which route matched. All it had was `r.URL.Path` -- the concrete path.
+
+  For a log that is right; you want the path that was requested. For a span
+  name or a metric label it is fatal. `GET /orgs/01a0.../apps/01a0.../keys` is
+  one time series per organization per app, which is the classic way to take a
+  tracing backend down, and it makes the only question worth asking -- how slow
+  is this endpoint -- unanswerable, because every request is its own endpoint.
+
+  ```go
+  func Tracing(next http.Handler) http.Handler {
+      return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+          next.ServeHTTP(w, r)
+          if route, ok := muzak.RouteFromContext(r.Context()); ok {
+              // "/orgs/{org_id}/apps/{app_id}/keys"
+          }
+      })
+  }
+  ```
+
+  Read it **after** `next.ServeHTTP` returns; before that, routing has not
+  happened and it reports false. A request that matched nothing also reports
+  false, so a 404 is counted as a 404 rather than as traffic to a route named
+  `""`.
+
+  The framework takes no dependency for this and should not: it has none at
+  all, and the OpenTelemetry API alone is ten modules, its SDK fifteen, and an
+  OTLP exporter eighty-eight. Instrumentation belongs beside the framework, and
+  this is the one fact it could not get from outside.
+
+- **`StatusRecorder`**, implemented by the response writer the access log
+  installs, so middleware can read a response's status without wrapping the
+  writer a second time. The assertion can fail -- `DisableAccessLog` means no
+  wrapper -- so middleware that needs the status either way should still fall
+  back to wrapping.
+
+### Changed
+
+- **The access log records `route` beside the path.** The concrete path stays
+  in the message, because that is what somebody reading a log wants; the
+  template is the field a query groups by, and the one that joins a log line to
+  the trace and the metric for the same endpoint.
+
 ## [0.2.4] - 2026-09-02
 
 ### Fixed
@@ -522,7 +571,8 @@ example application, but it is not frozen: expect it to move before 1.0.0.
   [Safe Defaults](https://muzak.dev/docs/security/safe-defaults).
 - Dual licence, MIT or Apache-2.0 at your option.
 
-[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/muzak-dev/framework/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/muzak-dev/framework/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/muzak-dev/framework/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/muzak-dev/framework/compare/v0.2.1...v0.2.2

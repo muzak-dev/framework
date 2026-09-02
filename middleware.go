@@ -49,6 +49,80 @@ func contextWithRequestID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, requestIDContextKey{}, id)
 }
 
+// routeContextKey carries the holder the matched route's template is written
+// into.
+type routeContextKey struct{}
+
+// routeHolder is filled in by dispatch and read by middleware.
+//
+// A holder rather than the string itself, because of where the two ends are.
+// Middleware runs above routing and keeps the request it was handed; dispatch
+// runs below and can only produce a *new* request with a new context. A value
+// written down there is invisible up here. So the holder is installed on the
+// way in, when middleware can still see it, and filled on the way through.
+//
+// No lock: one request is handled by one goroutine from the chain root to the
+// handler and back, and the read happens after next.ServeHTTP has returned.
+type routeHolder struct{ template string }
+
+// RouteFromContext returns the template of the route this request matched,
+// such as "/v1/orgs/{org_id}/apps/{app_id}", and whether one matched at all.
+//
+// It exists for instrumentation. Middleware runs below the typed layer and
+// before routing, so it never learns which route matched, and the concrete
+// path is the wrong thing to name a span or label a metric with: one time
+// series per identifier in the path is unbounded cardinality, and it makes the
+// only question worth asking -- how slow is this endpoint -- unanswerable,
+// because every request is its own endpoint.
+//
+// Read it after next.ServeHTTP has returned, which is where an access log
+// already reads the status. Before that, routing has not happened and there is
+// nothing to report.
+//
+//	func Tracing(next http.Handler) http.Handler {
+//	    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//	        start := time.Now()
+//	        next.ServeHTTP(w, r)
+//	        name, ok := muzak.RouteFromContext(r.Context())
+//	        ...
+//	    })
+//	}
+//
+// A request that matched nothing reports false rather than an empty string, so
+// a 404 is counted as a 404 rather than as traffic to a route named "".
+func RouteFromContext(ctx context.Context) (string, bool) {
+	holder, ok := ctx.Value(routeContextKey{}).(*routeHolder)
+	if !ok || holder.template == "" {
+		return "", false
+	}
+	return holder.template, true
+}
+
+// withRouteHolder installs the holder RouteFromContext reads.
+//
+// Always installed, outermost of the framework's own chain, so that anything
+// added with App.Use sits inside it and can read what dispatch wrote.
+func withRouteHolder(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(
+			context.WithValue(r.Context(), routeContextKey{}, &routeHolder{})))
+	})
+}
+
+// StatusRecorder is implemented by the response writer Muzak installs, so
+// middleware can read the status of a response without wrapping the writer a
+// second time.
+//
+// The assertion can fail: the writer is installed by the access log, and an
+// application that sets DisableAccessLog gets its own writer through
+// unchanged. Middleware that needs the status either way should fall back to
+// wrapping.
+type StatusRecorder interface {
+	// Status is the code that was written, or 0 if nothing has been written
+	// yet.
+	Status() int
+}
+
 // newRequestID returns a fresh request identifier. Version 7 UUIDs are used
 // because their leading timestamp makes identifiers sort chronologically,
 // which turns a log store's index into a time index for free.
@@ -180,8 +254,8 @@ type AccessLogOptions struct {
 	SkipPaths []string
 }
 
-// AccessLog records one line per request with its method, path, status,
-// duration and request identifier.
+// AccessLog records one line per request with its method, path, matched route,
+// status, duration and request identifier.
 //
 // Only fixed, non-sensitive fields are recorded. Query strings, request bodies
 // and headers are deliberately omitted, because each of them routinely carries
@@ -216,6 +290,13 @@ func AccessLog(logger *slog.Logger, opts AccessLogOptions) Middleware {
 				slog.Duration("duration", time.Since(start)),
 				slog.Int64("bytes", rw.bytes),
 				slog.String(RequestIDKey, id),
+			}
+			// The template beside the concrete path, which is what joins a log
+			// line to the trace and the metric for the same endpoint. The path
+			// stays in the message because that is what somebody reading a log
+			// wants; the template is what a query groups by.
+			if route, ok := RouteFromContext(r.Context()); ok {
+				attrs = append(attrs, slog.String("route", route))
 			}
 			// The locale is recorded only when one was resolved, so a service
 			// that does not translate logs exactly what it logged before.
@@ -387,6 +468,9 @@ func asResponseWriter(w http.ResponseWriter) *responseWriter {
 	}
 	return &responseWriter{ResponseWriter: w}
 }
+
+// Status returns the code written so far, satisfying [StatusRecorder].
+func (w *responseWriter) Status() int { return w.status }
 
 // WriteHeader records the status and forwards it, ignoring repeated calls the
 // way net/http does.

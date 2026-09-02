@@ -1,6 +1,6 @@
 module muzak.dev/framework/example
 
-go 1.27
+go 1.27.0
 
 require (
 	muzak.dev/framework v0.0.0

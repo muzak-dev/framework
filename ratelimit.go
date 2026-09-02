@@ -144,6 +144,37 @@ type RateLimitStorage interface {
 // address can never collide into one budget.
 type RateLimitTracker func(ctx *Context) (string, error)
 
+// QuotaResolver returns the quotas one request is held to.
+//
+// It exists for the limits an application cannot know when it is built: a
+// customer's plan, a negotiated ceiling, a tier read from a database. A Quota
+// declared in [RateLimitOptions] is fixed at build time and its name may not
+// carry two policies, which is right for a policy the application owns and
+// cannot express one its customers do.
+//
+// The resolver runs on every request that reaches the limiter, so it should
+// answer from memory or from a cache rather than from the database each time.
+// Returning an error abandons the request, and the error becomes the response
+// exactly as one returned from a handler would.
+//
+// Quotas it returns are counted under their own names, in the same storage as
+// every other quota, so a name used here must not collide with one declared
+// statically elsewhere unless it means the same thing. Nothing can check that
+// at build time, which is the price of the flexibility.
+//
+//	func PlanQuotas(ctx *muzak.Context) ([]muzak.Quota, error) {
+//		plan, ok := muzak.TryFrom[Plan](ctx)
+//		if !ok {
+//			return nil, nil // no plan resolved, nothing to enforce
+//		}
+//		return plan.Quotas, nil
+//	}
+//
+// Returning nil enforces nothing, which is what an unauthenticated request
+// reaching a route whose limits depend on who is calling should do; put a
+// static quota on that route as well if it needs a floor.
+type QuotaResolver func(ctx *Context) ([]Quota, error)
+
 // IPTracker keys a rate limit on the client's address, and is what a policy
 // that does not name a tracker uses.
 //
@@ -238,6 +269,18 @@ type RateLimitOptions struct {
 	// [IPTracker].
 	Tracker RateLimitTracker
 
+	// Resolver supplies quotas per request, for limits the application does
+	// not know when it is built. When it is set its quotas are enforced in
+	// addition to any static Quotas, so a route can have both a floor everyone
+	// shares and a ceiling that varies.
+	//
+	// Setting it turns rate limiting on for the route even when Quotas is
+	// empty, because whether anything is enforced is then a run time question.
+	// AfterDependencies is usually wanted alongside it: a resolver that reads
+	// the caller's plan needs the dependency that produced the caller to have
+	// run.
+	Resolver QuotaResolver
+
 	// FailOpen serves a request that the storage could not count.
 	//
 	// By default a storage that cannot answer refuses the request with 503,
@@ -283,6 +326,9 @@ func (o RateLimitOptions) overlay(over RateLimitOptions) RateLimitOptions {
 	}
 	if over.Tracker != nil {
 		o.Tracker = over.Tracker
+	}
+	if over.Resolver != nil {
+		o.Resolver = over.Resolver
 	}
 	if over.FailOpen {
 		o.FailOpen = true
@@ -363,10 +409,12 @@ func SkipRateLimit() SharedOption {
 // rateLimitConfig is a route's resolved rate limiting, with everything that
 // can be worked out once already worked out.
 type rateLimitConfig struct {
-	quotas  []Quota
-	storage RateLimitStorage
-	tracker RateLimitTracker
-	// policy is the fixed RateLimit-Policy header value for these quotas.
+	quotas   []Quota
+	storage  RateLimitStorage
+	tracker  RateLimitTracker
+	resolver QuotaResolver
+	// policy is the fixed RateLimit-Policy header value for the static quotas.
+	// A request whose resolver adds quotas renders its own.
 	policy            string
 	failOpen          bool
 	headers           bool
@@ -389,7 +437,7 @@ func (rt *Route) resolveRateLimit(in inherited) error {
 	}
 	rt.rateLimitOpts = opts
 	rt.skipRateLimit = in.skipRateLimit || rt.cfg.skipRateLimit
-	if rt.skipRateLimit || len(opts.Quotas) == 0 {
+	if rt.skipRateLimit || (len(opts.Quotas) == 0 && opts.Resolver == nil) {
 		return nil
 	}
 	cfg, err := newRateLimitConfig(opts, opts.Quotas)
@@ -441,6 +489,7 @@ func newRateLimitConfig(opts RateLimitOptions, quotas []Quota) (*rateLimitConfig
 		quotas:            quotas,
 		storage:           opts.Storage,
 		tracker:           opts.Tracker,
+		resolver:          opts.Resolver,
 		policy:            policy.String(),
 		failOpen:          opts.FailOpen,
 		headers:           !opts.DisableHeaders,
@@ -510,6 +559,16 @@ func boundRateLimitKey(key string) string {
 // check counts a request against every quota and reports whether it may
 // proceed, setting the RateLimit headers on the way.
 func (cfg *rateLimitConfig) check(c *Context) error {
+	quotas, policy, err := cfg.quotasFor(c)
+	if err != nil {
+		return err
+	}
+	if len(quotas) == 0 {
+		// A resolver that returned nothing leaves the request unlimited, which
+		// is the documented meaning and not a failure.
+		return nil
+	}
+
 	key, err := cfg.key(c)
 	if err != nil {
 		return err
@@ -518,7 +577,7 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 
 	var worst outcome
 	var tightest outcome
-	for i, quota := range cfg.quotas {
+	for i, quota := range quotas {
 		count, reset, storageErr := cfg.storage.Increment(ctx, quota.Name, key, quota.Window)
 		if storageErr != nil {
 			return cfg.storageFailed(c, quota, storageErr)
@@ -534,7 +593,7 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 	}
 
 	if worst.exceeded() {
-		cfg.setHeaders(c, worst)
+		cfg.setHeaders(c, worst, policy)
 		// Retry-After is set even where the RateLimit headers are turned off.
 		// Refusing a client without telling it when to come back is what
 		// produces a client that comes back immediately, forever.
@@ -544,8 +603,63 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 			"the %q rate limit of %d requests per %d seconds has been exceeded; retry in %d seconds",
 			worst.quota.Name, worst.quota.Limit, windowSeconds(worst.quota.Window), retry)
 	}
-	cfg.setHeaders(c, tightest)
+	cfg.setHeaders(c, tightest, policy)
 	return nil
+}
+
+// quotasFor works out which quotas this request is held to, and the
+// RateLimit-Policy value that describes them.
+//
+// With no resolver this is the precomputed pair and costs nothing. With one,
+// the resolved quotas are appended to the static ones, so a route can carry
+// both a floor everyone shares and a ceiling that varies, and the policy is
+// rendered for the union.
+func (cfg *rateLimitConfig) quotasFor(c *Context) ([]Quota, string, error) {
+	if cfg.resolver == nil {
+		return cfg.quotas, cfg.policy, nil
+	}
+
+	resolved, err := cfg.resolver(c)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(resolved) == 0 {
+		return cfg.quotas, cfg.policy, nil
+	}
+
+	quotas := resolved
+	if len(cfg.quotas) > 0 {
+		quotas = make([]Quota, 0, len(cfg.quotas)+len(resolved))
+		quotas = append(quotas, cfg.quotas...)
+		quotas = append(quotas, resolved...)
+	}
+
+	for _, quota := range quotas {
+		if quota.Name == "" || quota.Window <= 0 || quota.Limit <= 0 {
+			// A build-time quota is validated when the application is built.
+			// One that arrives at run time cannot be, so it is checked here
+			// rather than counted under an empty name or a zero window.
+			return nil, "", fmt.Errorf(
+				"muzak: the quota resolver returned an unusable quota %q of %d requests per %s",
+				quota.Name, quota.Limit, quota.Window)
+		}
+	}
+
+	return quotas, renderPolicy(quotas), nil
+}
+
+// renderPolicy builds the RateLimit-Policy header value for a set of quotas.
+func renderPolicy(quotas []Quota) string {
+	var policy strings.Builder
+	for _, quota := range quotas {
+		if policy.Len() > 0 {
+			policy.WriteString(", ")
+		}
+		policy.WriteString(strconv.Itoa(quota.Limit))
+		policy.WriteString(";w=")
+		policy.WriteString(strconv.Itoa(windowSeconds(quota.Window)))
+	}
+	return policy.String()
 }
 
 // storageFailed decides what to do about a storage that could not count, and
@@ -565,12 +679,12 @@ func (cfg *rateLimitConfig) storageFailed(c *Context, quota Quota, err error) er
 }
 
 // setHeaders reports one quota's state to the client.
-func (cfg *rateLimitConfig) setHeaders(c *Context, state outcome) {
+func (cfg *rateLimitConfig) setHeaders(c *Context, state outcome, policy string) {
 	if !cfg.headers || c.w.written {
 		return
 	}
 	header := c.w.Header()
-	header.Set(canonicalRateLimitPolicy, cfg.policy)
+	header.Set(canonicalRateLimitPolicy, policy)
 	header.Set(canonicalRateLimitLimit, strconv.Itoa(state.quota.Limit))
 	header.Set(canonicalRateLimitRemaining, strconv.Itoa(state.remaining()))
 	header.Set(canonicalRateLimitReset, strconv.Itoa(resetSeconds(state.reset)))

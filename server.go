@@ -34,6 +34,13 @@ const (
 	DefaultIdleTimeout = 120 * time.Second
 	// DefaultShutdownTimeout bounds how long a graceful shutdown waits for
 	// in-flight requests before connections are closed.
+	//
+	// Set it below whatever grace period the platform allows, or the platform
+	// kills a drain that is still running. The common ones are worth knowing:
+	// Cloud Run allows about ten seconds after SIGTERM by default, Kubernetes
+	// uses terminationGracePeriodSeconds and defaults to thirty, and ECS uses
+	// stopTimeout and defaults to thirty. Leave room afterwards for anything
+	// the application flushes on the way out, such as a message publisher.
 	DefaultShutdownTimeout = 15 * time.Second
 )
 

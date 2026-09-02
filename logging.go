@@ -59,9 +59,17 @@ const (
 	// is an interactive terminal and JSON otherwise, which gives readable
 	// local development and machine-parseable production logs with no
 	// configuration.
+	//
+	// A container's stdout is not a terminal, so a service run under Docker or
+	// Compose gets JSON even locally. That is the right default for a
+	// production container and a surprise in front of `docker compose logs`;
+	// name [LogFormatConsole] and set [LoggerOptions.Color] to read it there.
 	LogFormatAuto LogFormat = iota
 	// LogFormatConsole always writes the aligned, optionally coloured console
 	// format.
+	//
+	// Colour still follows [LoggerOptions.Color], which defaults to a terminal
+	// check, so a container wanting coloured output has to ask for both.
 	LogFormatConsole
 	// LogFormatJSON always writes one JSON object per record.
 	LogFormatJSON

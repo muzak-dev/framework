@@ -55,6 +55,12 @@ type Context struct {
 	// reflect.Type. Entries are zeroed on release so that a pooled Context
 	// never carries a previous request's values.
 	deps []depValue
+
+	// rawBody holds the request body as it arrived, for a route that declared
+	// [CaptureBody]. It is nil on every other route, and rawBodyCaptured is
+	// what tells the two apart from a request that carried no body at all.
+	rawBody         []byte
+	rawBodyCaptured bool
 }
 
 // depValue is one resolved value dependency, keyed by the concrete type the
@@ -68,6 +74,28 @@ type depValue struct {
 // router has already finished matching, so changes to the URL have no effect
 // on which handler runs.
 func (c *Context) Request() *http.Request { return c.r }
+
+// RawBody returns the request body exactly as it arrived, and whether the route
+// declared [CaptureBody].
+//
+// A signed request is signed over the bytes that were sent. Verifying a
+// re-encoding of them verifies a different document: a decoder that reorders
+// members, normalises a number or drops insignificant whitespace produces bytes
+// the client never signed, and every signature fails. That is why this returns
+// the original rather than something reconstructed from the bound value.
+//
+// The second return is not decoration. Without it, a helper shared between a
+// route that captures and one that does not would verify a signature against an
+// empty body on the second, which is exactly the check that must not pass:
+//
+//	body, ok := ctx.RawBody()
+//	if !ok {
+//	    return muzak.NewHTTPError(500, "this route does not capture its body")
+//	}
+//
+// The bytes are valid only while the handler runs. A Context is pooled, and the
+// buffer is released with it, so anything that outlives the request must copy.
+func (c *Context) RawBody() ([]byte, bool) { return c.rawBody, c.rawBodyCaptured }
 
 // ResponseWriter returns the http.ResponseWriter for the response.
 //
@@ -258,4 +286,9 @@ func (c *Context) reset() {
 		c.deps[i] = depValue{}
 	}
 	c.deps = c.deps[:0]
+	// Dropped rather than kept for reuse: the buffer is exactly the size of one
+	// request's body, so pooling it would hold the largest body this Context
+	// ever saw for the life of the process.
+	c.rawBody = nil
+	c.rawBodyCaptured = false
 }

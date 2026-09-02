@@ -9,6 +9,67 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-02
+
+### Fixed
+
+- **A location tag is read the way `encoding/json` reads its own, cut at the
+  first comma.** `query:"limit,omitzero"` registered a parameter literally named
+  `limit,omitzero`, because the tag's whole value was taken as the name.
+
+  Options have never meant anything in a location tag -- `default` and
+  `required` are tags of their own -- so this was a footgun with no upside: a
+  tag that looks like a json tag gets written like one eventually.
+
+  It failed in the worst way available, which is why it went unnoticed. A
+  parameter nothing can send is not an error; it is a filter that silently does
+  not filter, and the endpoint answers the unfiltered question with `200`. In
+  the service it was found in, it had disabled twenty-five parameters across
+  eight endpoints -- every environment and platform filter, every granularity,
+  every row limit and every percentile -- each with a plausible default sitting
+  behind it, so every response looked reasonable.
+
+### Added
+
+- **`CaptureBody` keeps the request body as it arrived, read back with
+  `Context.RawBody`.** A request whose authentication covers its bytes could not
+  be verified: the binder reads the body to decode the input, a route declared
+  with `Empty` drains it, and a handler found nothing left to hash. The only way
+  through was middleware that read the body and put an identical reader back,
+  which every user had to discover for themselves, and the failure while they
+  were looking was a signature that never matched for reasons that look like a
+  bug in the client's signing code.
+
+  ```go
+  r.Post("/webhooks/stripe", handlers.Stripe,
+      muzak.CaptureBody(),
+      muzak.Needs(core.VerifyStripeSignature))
+
+  body, ok := ctx.RawBody()
+  ```
+
+  It is a shared option, so a router of webhook receivers declares it once.
+  Capture happens **before the dependencies resolve**, so a guard verifying a
+  signature refuses an unsigned request before anything decodes it, and **after
+  the rate limit is counted**, so a client past its budget never makes the
+  server buffer on its behalf. It works for a route whose input is `Empty` and
+  for one that binds a multipart form, neither of which reaches the JSON body
+  path at all.
+
+  The body is bounded by the route's existing `MaxBodySize` rather than a second
+  limit, and one over it is refused with `413` rather than truncated: a
+  truncated body fails its signature check, and a signature failure reads as an
+  attack rather than as the oversized request it is.
+
+  `RawBody` returns `([]byte, bool)`. The second value is not decoration -- a
+  helper shared between a route that captures and one that does not would
+  otherwise verify a signature against an empty body and pass. The bytes are
+  released with the pooled `Context`, so anything outliving the request copies
+  them.
+
+  This is not a niche case. Stripe, GitHub, Slack and Apple's SKAdNetwork
+  postbacks all sign the raw body.
+
 ## [0.2.3] - 2026-09-02
 
 ### Added
@@ -461,7 +522,9 @@ example application, but it is not frozen: expect it to move before 1.0.0.
   [Safe Defaults](https://muzak.dev/docs/security/safe-defaults).
 - Dual licence, MIT or Apache-2.0 at your option.
 
-[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/muzak-dev/framework/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/muzak-dev/framework/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/muzak-dev/framework/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/muzak-dev/framework/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/muzak-dev/framework/compare/v0.1.1...v0.2.0

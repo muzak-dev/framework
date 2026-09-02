@@ -755,6 +755,15 @@ func (a *App) run(c *Context, route *Route) {
 			return
 		}
 	}
+	// Before the dependencies, so a guard verifying a signature over the bytes
+	// sees them, and after the rate limit above, so a client past its budget is
+	// refused without the server buffering a body on its behalf.
+	if route.captureBody {
+		if err := captureRequestBody(c, route); err != nil {
+			a.fail(c, err)
+			return
+		}
+	}
 	if err := route.resolveDependencies(c); err != nil {
 		a.fail(c, err)
 		return

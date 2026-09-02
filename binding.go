@@ -770,3 +770,42 @@ func discardBody(r *http.Request) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 4<<10))
 	}
 }
+
+// captureRequestBody reads the body into the Context and puts an identical
+// reader back, for a route that declared [CaptureBody].
+//
+// Reading it here rather than reusing the buffer the binder fills is
+// deliberate. It makes the bytes available to a guard, which is where a
+// signature check belongs -- an unsigned request should be refused before
+// anything decodes it -- and it works the same for a route whose input is
+// [Empty] and for one that binds a multipart form, neither of which reaches
+// bindBody at all.
+func captureRequestBody(c *Context, route *Route) error {
+	if c.r.Body == nil {
+		c.rawBodyCaptured = true
+		return nil
+	}
+
+	// One byte past the limit, so a body exactly at it is not mistaken for one
+	// over. MaxBytesReader is not used here because its error is reported
+	// against the response writer, and this read happens before the binder's
+	// own limit would apply.
+	limit := route.maxBodySize
+	body, err := io.ReadAll(io.LimitReader(c.r.Body, limit+1))
+	if err != nil {
+		return NewHTTPError(http.StatusBadRequest, "the request body could not be read").Wrap(err)
+	}
+
+	if int64(len(body)) > limit {
+		// Refused here rather than truncated. A truncated body fails its
+		// signature check, and a signature failure reads as an attack rather
+		// than as the oversized request this is.
+		return NewHTTPErrorf(http.StatusRequestEntityTooLarge,
+			"request body exceeds the %d byte limit for this route", limit)
+	}
+
+	c.rawBody = body
+	c.rawBodyCaptured = true
+	c.r.Body = io.NopCloser(bytes.NewReader(body))
+	return nil
+}

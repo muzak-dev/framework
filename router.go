@@ -86,6 +86,7 @@ type routerConfig struct {
 	sse                *SSEOptions
 	rateLimit          *RateLimitOptions
 	allowUnknownFields *bool
+	captureBody        *bool
 	versions           []Version
 	versionsSet        bool
 	deprecated         bool
@@ -110,6 +111,7 @@ type routeConfig struct {
 	sse                *SSEOptions
 	rateLimit          *RateLimitOptions
 	allowUnknownFields *bool
+	captureBody        *bool
 	versions           []Version
 	versionsSet        bool
 	skipValidation     bool
@@ -342,6 +344,44 @@ func AllowUnknownFields() SharedOption {
 	}
 }
 
+// CaptureBody keeps the request body as it arrived, so that a guard, a provider
+// or the handler can read it with [Context.RawBody].
+//
+// It exists for one problem, and it is a common one: a request whose
+// authentication covers its bytes. A webhook signature is computed over exactly
+// what was sent, and verifying a re-encoding verifies a different document --
+// a decoder that reorders members, normalises a number or drops insignificant
+// whitespace produces bytes the client never signed, and every signature fails.
+// Stripe, GitHub, Slack and Apple's SKAdNetwork postbacks all sign the raw body.
+//
+// Without it the body is consumed: the binder reads it to decode the input, and
+// a route declared with [Empty] drains it so the connection can be reused.
+//
+//	r.Post("/webhooks/stripe", handlers.Stripe,
+//	    muzak.CaptureBody(),
+//	    muzak.Needs(core.VerifyStripeSignature))
+//
+// Capture happens before dependencies resolve, so a guard sees the bytes and can
+// reject an unsigned request before anything expensive runs. It happens after
+// the rate limit is counted, so a client past its budget is refused without the
+// server buffering anything on its behalf.
+//
+// The body is bounded by the route's own [MaxBodySize] and needs no second
+// limit. One over it is refused with 413 here rather than truncated: a truncated
+// body would fail its signature check, which reads as an attack rather than as
+// the oversized request it is.
+//
+// It is a shared option, so a router of webhook receivers can declare it once.
+// Do not reach for it application-wide. Buffering costs memory for every request
+// in flight, and a route with nothing to verify has nothing to gain.
+func CaptureBody() SharedOption {
+	yes := true
+	return sharedOption{
+		route:  func(c *routeConfig) { c.captureBody = &yes },
+		router: func(c *routerConfig) { c.captureBody = &yes },
+	}
+}
+
 // SkipValidation stops a route from running its input model's Validate method.
 //
 // Validation is otherwise automatic: a model that declares rules has them
@@ -395,6 +435,7 @@ type Route struct {
 	maxUploadSize      int64
 	maxFileSize        int64
 	allowUnknownFields bool
+	captureBody        bool
 	skipValidation     bool
 
 	// rateLimit is the route's resolved request policy, and is nil for a route
@@ -651,6 +692,7 @@ type inherited struct {
 	sseMaxStreamsPerIP    int
 	rateLimit             RateLimitOptions
 	allowUnknownFields    bool
+	captureBody           bool
 	versions              []Version
 	deprecated            bool
 	hidden                bool
@@ -677,6 +719,7 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		sseMaxStreamsPerIP:    in.sseMaxStreamsPerIP,
 		rateLimit:             in.rateLimit,
 		allowUnknownFields:    in.allowUnknownFields,
+		captureBody:           in.captureBody,
 		versions:              in.versions,
 		deprecated:            in.deprecated || cfg.deprecated,
 		hidden:                in.hidden || cfg.hidden,
@@ -699,6 +742,9 @@ func (in inherited) merge(cfg routerConfig) inherited {
 	}
 	if cfg.rateLimit != nil {
 		out.rateLimit = out.rateLimit.overlay(*cfg.rateLimit)
+	}
+	if cfg.captureBody != nil {
+		out.captureBody = *cfg.captureBody
 	}
 	if cfg.allowUnknownFields != nil {
 		out.allowUnknownFields = *cfg.allowUnknownFields
@@ -806,6 +852,10 @@ func (rt *Route) resolve(in inherited) error {
 	rt.maxFileSize = in.maxFileSize
 	if cfg.maxFileSize != 0 {
 		rt.maxFileSize = cfg.maxFileSize
+	}
+	rt.captureBody = in.captureBody
+	if cfg.captureBody != nil {
+		rt.captureBody = *cfg.captureBody
 	}
 	rt.allowUnknownFields = in.allowUnknownFields
 	if cfg.allowUnknownFields != nil {

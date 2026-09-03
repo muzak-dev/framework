@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -645,4 +646,80 @@ func (p *bindPlan) runValidation(dst reflect.Value, failed map[string]bool) []Er
 		}
 	}
 	return kept
+}
+
+// checkRulesBindToFields refuses a model whose rules are bound to something
+// that is not one of its fields.
+//
+// A rule set is matched to its field by that field's address, so
+// `v.String(&in.Name)` is matched and `v.String(in.Name)` -- the pointer the
+// field holds rather than the field -- is not. Both compile, because
+// StringField and NumberField admit the pointer type so that one entry point
+// can serve `Name string` and `Nickname *string` alike.
+//
+// The wrong one fails in the two ways that look most like working:
+//
+//   - the request is still refused, and the detail carries an empty field, so
+//     a client is told that something is wrong and not what;
+//   - the rule contributes nothing to the generated document, because
+//     describeConstraints skips a rule it cannot name, so the published schema
+//     quietly loses the constraint the code still enforces.
+//
+// Neither shows up in a test that asserts a status. In the service this check
+// was written for it had gone unnoticed across nineteen call sites and five
+// models -- every optional field on five resources.
+//
+// It runs once, when the route is compiled, against a zero value: declaring a
+// rule set only records it, which is what makes that safe and is the same trick
+// describeConstraints uses. A rule the model only declares under a condition is
+// not seen here, and that is the residue -- but the condition is usually a nil
+// check that is itself redundant, because a nil pointer field already skips its
+// rules.
+//
+// A rule that named itself with As() is left alone. Binding to something
+// outside the model is then deliberate, and the name it reports under is the
+// one the caller chose.
+func (p *bindPlan) checkRulesBindToFields() error {
+	if p.validation == nil {
+		return nil
+	}
+	scratch := reflect.New(p.typ)
+	model, ok := scratch.Interface().(Validatable)
+	if !ok {
+		// coverage: the caller only reaches this for a type implementing it.
+		return nil
+	}
+
+	v := &Validation{
+		plan:  p.validation,
+		base:  scratch.Pointer(),
+		size:  p.typ.Size(),
+		value: scratch.Elem(),
+	}
+	model.Validate(v)
+
+	for _, rules := range v.rules {
+		if rules.Label() != "" {
+			continue
+		}
+		if _, found := v.originOf(rules.Target()); found {
+			continue
+		}
+		return fmt.Errorf(
+			"a %s rule is bound to a value rather than to a field of %s, so its failures would name no field "+
+				"and its constraints would be missing from the generated document; "+
+				"pass the field's address (v.Rule(&in.Field), not v.Rule(in.Field)), or name it with As()",
+			ruleSetKind(rules), p.typ)
+	}
+	return nil
+}
+
+// ruleSetKind names a rule set for the error above, so it says "a String rule"
+// rather than a package-qualified type nobody wrote.
+func ruleSetKind(rules validate.Evaluator) string {
+	name := reflect.TypeOf(rules).String()
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.TrimSuffix(name, "Rules")
 }

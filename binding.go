@@ -191,6 +191,9 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 
 	if reflect.PointerTo(t).Implements(reflect.TypeFor[Validatable]()) {
 		plan.validation = newValidationPlan(t, plan)
+		if err := plan.checkRulesBindToFields(); err != nil {
+			return nil, fmt.Errorf("muzak: %s %s: %w", method, path, err)
+		}
 	}
 
 	if len(plan.form) > 0 || len(plan.files) > 0 {

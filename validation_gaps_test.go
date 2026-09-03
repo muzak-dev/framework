@@ -3,6 +3,7 @@ package muzak
 import (
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"muzak.dev/framework/validate"
@@ -344,23 +345,59 @@ func (in *unnamedRules) Validate(v *Validation) {
 
 var straySlice []string
 
-// TestConstraintDescriptionSkipsUnnamedRules covers the guard that keeps a rule
-// bound outside the model out of the generated document.
-func TestConstraintDescriptionSkipsUnnamedRules(t *testing.T) {
+// namedStrayRule binds outside itself and says so, which is allowed.
+type namedStrayRule struct {
+	Name string `json:"name"`
+}
+
+func (in *namedStrayRule) Validate(v *Validation) {
+	v.String(&in.Name).Required()
+	v.String(&strayField).As("computed").Required()
+}
+
+// TestRuleBoundOutsideTheModelIsRefused covers the startup check.
+//
+// A rule bound to something that is not a field used to be dropped quietly: its
+// failures named no field and its constraints never reached the generated
+// document. Both are silent, and neither shows up in a test that asserts a
+// status, so the model is refused when the route is compiled instead.
+func TestRuleBoundOutsideTheModelIsRefused(t *testing.T) {
 	t.Parallel()
-	plan, err := newBindPlan(reflect.TypeFor[unnamedRules](), "POST", "/x")
+	_, err := newBindPlan(reflect.TypeFor[unnamedRules](), "POST", "/x")
+	if err == nil {
+		t.Fatal("a model binding a rule outside itself was accepted")
+	}
+	for _, want := range []string{"bound to a value rather than to a field", "&in.Field"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
+	}
+}
+
+// TestRuleNamedWithAsMayBindAnywhere covers the escape hatch. Naming a rule is
+// a statement that the caller knows where it is bound and what it reports as.
+func TestRuleNamedWithAsMayBindAnywhere(t *testing.T) {
+	t.Parallel()
+	plan, err := newBindPlan(reflect.TypeFor[namedStrayRule](), "POST", "/x")
 	if err != nil {
-		t.Fatalf("newBindPlan = %v", err)
+		t.Fatalf("a named rule was refused: %v", err)
 	}
 	constraints := plan.describeConstraints()
-	if len(constraints) != 1 {
-		t.Errorf("constraints = %v, want only the model's own field", constraints)
+	if _, described := constraints["computed"]; !described {
+		t.Errorf("the named rule is missing from the document: %v", constraints)
 	}
-	if _, described := constraints["name"]; !described {
-		t.Errorf("the model's field is missing: %v", constraints)
-	}
-	if elements := plan.elementConstraints(); len(elements) != 0 {
-		t.Errorf("element constraints = %v, want none", elements)
+}
+
+// TestNestedModelsStillBuild is the check on the check.
+//
+// A nested model's fields live outside the parent's memory when the nested
+// value is a pointer, so a naive "is this address inside the model" test would
+// reject correct code. It does not, because each nesting level validates
+// through its own Validation with its own base -- and this is what says so.
+func TestNestedModelsStillBuild(t *testing.T) {
+	t.Parallel()
+	if _, err := newBindPlan(reflect.TypeFor[delivery](), "POST", "/x"); err != nil {
+		t.Fatalf("a model with nested and pointer-nested models was refused: %v", err)
 	}
 }
 

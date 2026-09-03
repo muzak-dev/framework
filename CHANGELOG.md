@@ -9,6 +9,46 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-09-03
+
+### Fixed
+
+- **A rule bound to a value rather than to a field is refused when the route is
+  compiled.** A rule set is matched to its field by that field's address, so
+  `v.String(&in.Name)` is matched and `v.String(in.Name)` -- the pointer the
+  field holds rather than the field -- is not. Both compile, because
+  `StringField` and `NumberField` admit the pointer type so that one entry point
+  can serve `Name string` and `Nickname *string` alike.
+
+  The wrong one failed in the two ways that look most like working. The request
+  was still refused, and the detail carried an empty `field`, so a client was
+  told that something was wrong and not what. And the rule contributed nothing
+  to the generated document, because the description step skips a rule it
+  cannot name -- so the published schema quietly lost a constraint the code was
+  still enforcing.
+
+  Neither shows up in a test that asserts a status: a 422 with a nameless detail
+  is still a 422. In the service this was found in it had gone unnoticed across
+  nineteen call sites and five models -- every optional field on five resources.
+
+  ```
+  muzak: PATCH /orgs/{org_id}: a String rule is bound to a value rather than to
+  a field of schemas.UpdateOrgIn, so its failures would name no field and its
+  constraints would be missing from the generated document; pass the field's
+  address (v.Rule(&in.Field), not v.Rule(in.Field)), or name it with As()
+  ```
+
+  The check runs once, against a zero value, when the route is compiled --
+  declaring a rule set only records it, which is what makes that safe. A rule
+  named with `As()` is left alone: binding outside the model is then deliberate
+  and the name it reports under is the one you chose.
+
+  **A rule declared only under a condition is not seen**, since the zero-value
+  pass does not take that branch. That residue is smaller than it looks: the
+  condition is usually a nil check that is itself redundant, because a nil
+  pointer field already skips its rules.
+
+
 ## [0.2.6] - 2026-09-03
 
 ### Changed

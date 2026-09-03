@@ -48,16 +48,65 @@ func TestNumberRules(t *testing.T) {
 	}
 }
 
-// TestNumberOptionalSkipsItsChecks documents that zero reads as absent for a
-// numeric field, which is why a field that may legitimately be zero should be
-// declared as a pointer.
-func TestNumberOptionalSkipsItsChecks(t *testing.T) {
+// TestNumberZeroSkipsOnlyWhenTheBoundsAllowIt is the numeric half of "optional
+// means optional", and the half that had to be narrowed.
+//
+// Zero reads as absent for a number, which is a guess: unlike an empty string,
+// zero is a value people mean. Skipping every rule on it let
+// `Between(1, 720)` accept nought -- a rule set saying in as many words that
+// zero is out of range, quietly letting it through -- and made the generated
+// document lie, since it advertised the minimum the server did not enforce.
+//
+// So the skip now applies only where zero would have passed anyway. A field
+// that may legitimately be absent *and* whose bounds exclude zero is a pointer,
+// which is what it always should have been.
+func TestNumberZeroSkipsOnlyWhenTheBoundsAllowIt(t *testing.T) {
 	t.Parallel()
-	if err := Number().Min(10).Check(0); err != nil {
-		t.Errorf("Check(0) on an optional field = %v, want it accepted", err)
+
+	// Bounds that exclude zero now apply to it.
+	for name, rules := range map[string]*NumberRules{
+		"Min":         Number().Min(10),
+		"Between":     Number().Between(1, 720),
+		"Positive":    Number().Positive(),
+		"GreaterThan": Number().GreaterThan(0),
+		"Port":        Number().Port(),
+		"OneOf":       Number().OneOf(1, 2, 3),
+		"Max below":   Number().Max(-1),
+		"Negative":    Number().Negative(),
+	} {
+		t.Run(name+" rejects zero", func(t *testing.T) {
+			if err := rules.Check(0); err == nil {
+				t.Error("zero was accepted by a rule set that excludes it")
+			}
+		})
 	}
+
+	// Bounds that admit zero still skip it, so nothing that was optional and
+	// coherent has become mandatory.
+	for name, rules := range map[string]*NumberRules{
+		"Max":           Number().Max(10),
+		"Between spans": Number().Between(0, 10),
+		"NonNegative":   Number().NonNegative(),
+		"MultipleOf":    Number().MultipleOf(5),
+		"OneOf with 0":  Number().OneOf(0, 1, 2),
+		// A rule of the caller's own is never evaluated speculatively, so a
+		// field guarded only by Must behaves exactly as it did before.
+		"Must": Number().Must(func(float64) error { return errors.New("never runs on zero") }),
+	} {
+		t.Run(name+" still skips zero", func(t *testing.T) {
+			if err := rules.Check(0); err != nil {
+				t.Errorf("zero was rejected by a rule set that admits it: %v", err)
+			}
+		})
+	}
+
+	// A value that was supplied is checked either way, which is the part that
+	// never changed.
 	if err := Number().Min(10).Check(5); err == nil {
 		t.Error("a supplied value skipped its check")
+	}
+	if err := Number().Min(10).Check(11); err != nil {
+		t.Errorf("a valid value was rejected: %v", err)
 	}
 }
 

@@ -24,6 +24,14 @@
 // entirely. That is what makes an optional field optional: MaxLen(20) has
 // nothing to say about a value nobody sent.
 //
+// A number is the exception, and it is narrower. Zero is a value people mean,
+// unlike an empty string, so it only counts as empty when the rules would have
+// accepted zero anyway: Between(0, 60) skips it, and Between(1, 720) applies to
+// it and rejects it. A rule set saying in as many words that zero is out of
+// range should not be the one thing that lets it through, and the generated
+// document publishes those bounds, so the server has to mean them. A number
+// that may legitimately be absent and whose bounds exclude zero is a pointer.
+//
 // # Writing a rule
 //
 // A rule is an ordinary function, so it needs no registration and can be tested

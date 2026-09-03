@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"slices"
 )
 
 // Problem is one thing a rule set found wrong.
@@ -410,14 +411,30 @@ func runString(value *string, steps []step[string], required bool) []Problem {
 }
 
 // runNumber is the numeric counterpart to [runString].
+//
+// The zero skip is narrower here than it is for a string, and the difference is
+// the point. "Optional means optional" reads an empty value as an absent one,
+// which is fair for a string: a field nobody filled in arrives as "". For a
+// number it is a guess, because zero is a value people mean. Skipping every
+// rule on it made `Number(&in.Window).Between(1, 720)` accept `0` -- a rule set
+// that says in as many words that zero is out of range, quietly letting it
+// through, and the caller finding out from a constraint violation two layers
+// down instead of a 422. It also made the generated document lie: `minimum: 18`
+// with a server that accepts nought.
+//
+// So the skip applies only when zero would have satisfied the rules anyway. If
+// the bounds exclude it, the field cannot be optional *with that value*, and
+// the rules run and say so in their own words. See [zeroAdmissible].
 func runNumber(value *float64, steps []step[float64], required bool) []Problem {
+	skipOnZero := zeroAdmissible(steps)
+
 	for i := range steps {
 		s := &steps[i]
 		if s.isTransform() {
 			_ = applyNumberStep(s, value)
 			continue
 		}
-		if s.kind != kindRequired && *value == 0 {
+		if s.kind != kindRequired && *value == 0 && skipOnZero {
 			continue
 		}
 		if err := applyNumberStep(s, value); err != nil {
@@ -425,6 +442,53 @@ func runNumber(value *float64, steps []step[float64], required bool) []Problem {
 		}
 	}
 	return nil
+}
+
+// zeroAdmissible reports whether zero satisfies every bound the rule set
+// declares, and therefore whether an unset field may skip them.
+//
+// It reads the declared bounds rather than running the rules, for one reason:
+// [NumberRules.Must] takes a function, and evaluating a caller's predicate
+// speculatively would call it twice per request with a value that was never
+// submitted. A custom rule is treated as admitting zero, so a field guarded
+// only by Must behaves exactly as it did before: an explicit
+// [NumberRules.Required] is what makes such a field mandatory, as it always was.
+func zeroAdmissible(steps []step[float64]) bool {
+	for i := range steps {
+		s := &steps[i]
+		switch s.kind {
+		case kindMin:
+			if s.lo > 0 {
+				return false
+			}
+		case kindMax:
+			if s.hi < 0 {
+				return false
+			}
+		case kindBetween:
+			if s.lo > 0 || s.hi < 0 {
+				return false
+			}
+		case kindGreaterThan:
+			if s.lo >= 0 {
+				return false
+			}
+		case kindLessThan:
+			if s.hi <= 0 {
+				return false
+			}
+		case kindPositive, kindNegative, kindPort:
+			// Each excludes zero by definition: Port documents that nought
+			// means "any free port" to the operating system rather than a port
+			// a client can be told to reach.
+			return false
+		case kindOneOfNumber:
+			if !slices.Contains(s.enum, any(float64(0))) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // problemFor describes one failed step: the wording it is reported with, the

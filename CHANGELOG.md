@@ -9,6 +9,55 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-09-03
+
+### Changed
+
+- **A numeric rule whose bounds exclude zero now applies to zero.** Previously
+  every rule on a number was skipped when the value was nought, so
+
+  ```go
+  v.Number(&in.ClickWindowHours).Between(1, 720)
+  ```
+
+  accepted `0` -- a rule set saying in as many words that zero is out of range,
+  quietly letting it through. The request reached the database, died on a CHECK
+  constraint, and the caller got a `500` where the whole point of the rule was
+  to produce a `422`.
+
+  "Optional means optional" reads an empty value as an absent one. For a string
+  that is fair: a field nobody filled in arrives as `""`. For a number it is a
+  guess, because zero is a value people mean, and the guess was wrong in the
+  direction that fails open. It also made the generated document lie -- the
+  OpenAPI said `minimum: 18` while the server accepted nought, so a client
+  reading the contract and a client testing the server learned different rules.
+
+  The skip now applies only where zero would have passed anyway. Nothing
+  changes for `Max(10)`, `Between(0, 10)`, `NonNegative()`, `MultipleOf(5)` or
+  a bare `Must`, and a rule of your own is never evaluated speculatively, so a
+  field guarded only by `Must` behaves exactly as before.
+
+  **Migration.** A numeric field that may legitimately be *absent* and whose
+  bounds exclude zero is a pointer, which is what it always should have been --
+  the same rule that already applied to a field which may legitimately *be*
+  zero:
+
+  ```go
+  // before: optional, and silently unvalidated when omitted
+  Age int `json:"age"`
+  v.Number(&in.Age).Between(18, 120)
+
+  // after: optional, and validated when supplied
+  Age *int `json:"age,omitzero"`
+  v.Number(&in.Age).Between(18, 120)
+  ```
+
+  A field that was always meant to be mandatory needs nothing: it now fails
+  with its own words (`must be between 1 and 720`) instead of passing.
+  `Required()` still means what it did and is still the way to demand presence
+  when the bounds themselves admit zero.
+
+
 ## [0.2.5] - 2026-09-02
 
 ### Added

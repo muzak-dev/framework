@@ -17,7 +17,7 @@ type signup struct {
 	Email    string   `json:"email"`
 	Password string   `json:"password"`
 	Confirm  string   `json:"confirm_password"`
-	Age      int      `json:"age"`
+	Age      *int     `json:"age,omitzero"`
 	Role     string   `json:"role"`
 	Tags     []string `json:"tags,omitzero"`
 	Website  *string  `json:"website,omitzero"`
@@ -42,7 +42,7 @@ func (in *signup) Validate(v *Validation) {
 	v.String(&in.Website).URL()
 	v.String(&in.Referrer).MaxLen(20)
 
-	v.When(in.Role == "admin" && in.Age < 21).
+	v.When(in.Role == "admin" && in.Age != nil && *in.Age < 21).
 		Reject(&in.Role, "an admin must be at least 21")
 }
 

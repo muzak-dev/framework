@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,7 +27,7 @@ func TestCompressReportsAFlushThatFailed(t *testing.T) {
 			req.Header.Set("Accept-Encoding", encoding)
 			handler.ServeHTTP(&brokenWriter{recorder: httptest.NewRecorder(), failFlush: 1}, req)
 
-			if flushErr != errBrokenWriter {
+			if !errors.Is(flushErr, errBrokenWriter) {
 				t.Fatalf("Flush through Compress = %v, want the error of the writer underneath", flushErr)
 			}
 		})

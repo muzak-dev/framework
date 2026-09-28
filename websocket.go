@@ -604,7 +604,14 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 			c.startMessageClock(ctx)
 		}
 
-		if int64(len(message))+header.Length > c.readLimit {
+		// The comparison is arranged so that nothing in it can overflow. The
+		// sum of what has arrived and what the header declares is the obvious
+		// way to write it, but a peer chooses the declared length, up to the
+		// largest int64 there is, and adding even one byte already received
+		// to that wraps the sum negative and waves the frame through. What
+		// has arrived never exceeds the limit, so the room left is never
+		// negative and subtracting it is always exact.
+		if header.Length > c.readLimit-int64(len(message)) {
 			return 0, nil, c.abort(WSStatusMessageTooBig,
 				"the message exceeds the "+strconv.FormatInt(c.readLimit, 10)+" byte limit for this connection")
 		}

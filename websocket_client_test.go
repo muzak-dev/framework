@@ -285,6 +285,30 @@ func TestWSDialReadLimit(t *testing.T) {
 	}
 }
 
+func TestWSDialRefusesALengthThatOverflowsTheReadLimit(t *testing.T) {
+	t.Parallel()
+	// The client reads with the same code the server does, so a hostile
+	// server can try the same overflow on it: one byte of a message, then a
+	// continuation declaring the largest length there is.
+	server := serveRawWS(t, nil, func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		frames := append(frameHeader(false, opBinary, 1, nil), 'A')
+		_, _ = conn.Write(append(frames, wsOverflowingContinuation(false)...))
+		_, _ = io.Copy(io.Discard, conn)
+	})
+	conn := dialClient(t, server.URL, WSDialOptions{})
+
+	// The server never sends the payload it declared, so a read that let the
+	// frame through would wait for it; the deadline turns that into a failure
+	// rather than a hang.
+	ctx, cancel := context.WithTimeout(t.Context(), wsTestTimeout)
+	defer cancel()
+	_, _, readErr := conn.Read(ctx)
+	if status, ok := WSCloseStatus(readErr); !ok || status != WSStatusMessageTooBig {
+		t.Fatalf("read error = %v, want the message refused as too big", readErr)
+	}
+}
+
 func TestWSDialCancellationClosesTheConnection(t *testing.T) {
 	t.Parallel()
 	_, server := newWSTestApp(t, func(app *App) {

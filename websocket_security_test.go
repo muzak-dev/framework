@@ -3,9 +3,11 @@ package muzak
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,6 +43,61 @@ func TestWebSocketRefusesAFragmentationBomb(t *testing.T) {
 
 	if reason := conn.expectClose(uint16(WSStatusPolicyViolation)); !strings.Contains(reason, "too many frames") {
 		t.Errorf("close reason = %q, want it to name the abuse", reason)
+	}
+	conn.expectEOF()
+}
+
+// wsOverflowingContinuation is the second half of an attack on the read limit:
+// a continuation frame, masked with a key of zeroes so that its payload would
+// go through unchanged, declaring the largest length the wire format allows.
+// Added to a single byte already received, that length wraps a signed sum
+// negative.
+func wsOverflowingContinuation(masked bool) []byte {
+	frame := []byte{0x80 | opContinuation, 127}
+	if masked {
+		frame[1] |= 0x80
+	}
+	frame = binary.BigEndian.AppendUint64(frame, math.MaxInt64)
+	if masked {
+		frame = append(frame, 0, 0, 0, 0)
+	}
+	return frame
+}
+
+func TestWebSocketRefusesALengthThatOverflowsTheReadLimit(t *testing.T) {
+	t.Parallel()
+	// One byte of a message, then a continuation declaring the largest length
+	// there is. A limit check that adds the two overflows, passes, and leaves
+	// the server buffering whatever the peer cares to stream, far past the
+	// limit, for as long as the read timeout allows. The check has to refuse
+	// the frame from its header alone, before a byte of its payload is sent.
+	reported := make(chan error, 1)
+	_, server := newWSTestApp(t, func(app *App) {
+		app.WS("/ws", func(ctx *Context, _ Empty, conn *WSConn) error {
+			_, _, err := conn.Read(ctx.Context())
+			reported <- err
+			return nil
+		})
+	})
+	conn := dialWS(t, server.URL, "/ws")
+
+	conn.sendRaw(append(frameHeader(false, opBinary, 1, []byte{0, 0, 0, 0}), 'A'))
+	conn.sendRaw(wsOverflowingContinuation(true))
+
+	start := time.Now()
+	if reason := conn.expectClose(uint16(WSStatusMessageTooBig)); !strings.Contains(reason, "byte limit") {
+		t.Errorf("close reason = %q, want it to name the limit", reason)
+	}
+	if waited := time.Since(start); waited > wsTestTimeout/2 {
+		t.Errorf("the refusal took %v, want it to come from the header alone", waited)
+	}
+	select {
+	case err := <-reported:
+		if status, ok := WSCloseStatus(err); !ok || status != WSStatusMessageTooBig {
+			t.Errorf("read error = %v, want the message refused as too big", err)
+		}
+	case <-time.After(wsTestTimeout):
+		t.Fatal("the handler's read did not end")
 	}
 	conn.expectEOF()
 }

@@ -506,11 +506,11 @@ tightens, with a migration.
 | S5 | Medium | Frontend and Static mounts ran guards but not `Needs` providers or rate limits, so a router authenticated by a provider served its files publicly | Yes | Fixed |
 | S6 | Medium | An inner `Needs[T]` removed an outer `Needs[T]` of the same type, so an admin check declared at `Include` never ran | Yes | Fixed |
 | S7 | Medium | A custom `StatusCoder` rendered the whole wrapped error chain to the client, 5xx included | Yes | Fixed |
-| S8 | Medium | A singleton cached a panic or a cancellation error forever, so one aborted first request could fail every later one | Yes | Fixed |
+| S8 | Medium | A singleton cached a panic or a cancellation error forever, so one aborted first request could fail every later one | Yes | Fixed; its fix regressed, see T5 |
 | S9 | Medium | The binder accepted `NaN`/`Inf` for float query, path, header, cookie and form fields (finding 5 fixed only `validate.Number`) | Yes | Fixed |
 | S10 | Medium | `IP()`/`IPv6()` accepted any text as a zone, CRLF and markup included | Yes | Fixed |
 | S11 | Medium | The per-client WebSocket/SSE caps and the default tracker counted an IPv6 client per address, so one /64 had unlimited allowance | Yes | Fixed (/64) |
-| S12 | Low | `/openapi.json` and the docs UI were served before any application-wide guard | Yes | Fixed |
+| S12 | Low | `/openapi.json` and the docs UI were served before any application-wide guard | Yes | Fixed; its fix regressed, see T4 |
 | S13 | Low | A JSON route accepted a body with no Content-Type, enabling cross-site POSTs without a preflight | Yes | Fixed (415) |
 | S14 | Low | The console log format wrote request-controlled CR, LF and terminal escapes raw | TTY stderr | Fixed |
 | S15 | Low | A failure after the response started ended it cleanly, so a truncated body looked complete | Yes | Fixed (abort) |
@@ -540,6 +540,74 @@ overflow in binding, and multipart limits.
 bound, as its documentation now says. The case check between mounts does not
 cover Unicode normalization on volumes that fold composed and decomposed
 accents.
+
+---
+
+## Third review - 2026-09-29
+
+A third pass, organised by class of weakness rather than by subsystem: the
+second review's own fixes, HTTP protocol handling, resource exhaustion,
+secrets and credentials, information disclosure and caching, and concurrency
+and lifecycle. As before, each finding was reproduced with a test before it
+counted, and each test is now a regression test beside its fix.
+
+Two findings are regressions introduced by the second review's fixes: T4
+(from S12, the docs gained the application's guards but not its rate limit)
+and T5 (from S8, a failing singleton was no longer cached, but its waiters
+then retried one at a time). Both are fixed.
+
+| # | Severity | Finding | Default config? | Status |
+|---|---|---|---|---|
+| T1 | High | Validation details were unbounded: `Each` or per-element `Nested` reported every failing element, so a 1 MiB body produced a 22 MB 422 and 559 MiB of allocation | Yes | Fixed (100-failure cap) |
+| T2 | High | Recursive `Nested` built paths eagerly at every level: a 100 KB body produced a 300 MB 422, 6.9 GB of allocation, and the pooled validator kept the tree | Recursive models | Fixed (32-level limit, lazy paths) |
+| T3 | High | A late SSE send could write into a response net/http had recycled, crashing the process or writing into another request on the connection | Yes | Fixed |
+| T4 | Medium | The docs ran the application's guards but not its rate limit, so `/openapi.json` was an unlimited oracle for guessing the token (regression from S12) | With app guards | Fixed |
+| T5 | Medium | A slowly failing singleton made every waiting request retry in turn under a lock, ignoring cancellation (regression from S8) | Yes | Fixed (single-flight) |
+| T6 | Medium | Static served extension-less uploads as `text/html` and SVG inline: stored XSS on the API origin | Uploads under Static | Fixed (no sniffing, CSP sandbox) |
+| T7 | Medium | Error responses kept the handler's success headers, so reflected input went out as `text/html` and could be cached publicly | Yes | Fixed |
+| T8 | Medium | Guarded routes and mounts sent no Cache-Control, so a shared cache could serve one user's response to another | Yes | Fixed |
+| T9 | Medium | 422 details echoed client values and raw parser errors (5-10x amplification), and urlencoded forms were read up to 32 MiB | Yes | Fixed |
+| T10 | Medium | A malformed multipart header was logged whole at ERROR: a 1 MiB request wrote a 5 MB log line | Yes | Fixed |
+| T11 | Medium | Multipart temp files leaked when a guard or handler parsed the form itself | Yes | Fixed |
+| T12 | Medium | `Timezone()` cached every accepted spelling forever and re-read the zone database on every miss | Yes | Fixed |
+| T13 | Low | Shutdown took up to three times `ShutdownTimeout`, and lifecycle `Stop` had no deadline and ran under live handlers | Yes | Fixed (one deadline) |
+| T14 | Low | One home IPv6 /56 could take every WebSocket/SSE slot, with no way to widen the per-client key | Yes | Fixed (/56, configurable) |
+| T15 | Low | Log redaction skipped group-valued keys (`slog.Group`, `LogValuer`, `WithGroup`) | Yes | Fixed |
+| T16 | Low | Log redaction matched whole keys only, so `db_password`, `X-Api-Key` and `jwt` were logged | Yes | Fixed |
+| T17 | Low | `SSEDial` followed redirects, sending credentials to another host or over plain HTTP | Client side | Fixed |
+| T18 | Low | `secret:"true"` on an embedded config struct was ignored | Yes | Fixed |
+| T19 | Low | The SPA fallback answered HTML or JSON by Accept without `Vary: Accept` | With a fallback | Fixed |
+| T20 | Low | Header and media-type versioning chose a handler by header without `Vary` | Non-URI versioning | Fixed |
+| T21 | Low | A shutdown requested during start-up was lost and the server came up | Yes | Fixed |
+| T22 | Low | Configuration after an implicit build (`Document`, `ServeHTTP`) was silently dropped, so a late guard left routes open | Yes | Fixed (panics) |
+| T23 | Low | A raw non-ASCII path was written to the 404 and the logs at 3-4 times its size | Yes | Fixed (1 KiB) |
+| T24 | Low | On Windows an 8.3 short name (`/ENV~1`) bypassed the dotfile block | Windows | Fixed (untested on Windows) |
+| T25 | Low | SSE keepalives and WebSocket pong checks used the wall clock | Yes | Fixed |
+| T26 | Low | A WebSocket handler's context outlived its connection, so a handler waiting on it outlived its peer and the server's close at shutdown | Yes | Fixed |
+| T27 | Bug | A 103 Early Hints swallowed the response after it | Yes | Fixed |
+
+**Checked and found solid in this pass:** the second review's routing decode
+against double encoding, mixed-case hex, NUL, encoded dots and long segments;
+the dotfile and case checks (except T24); Content-Type enforcement edge cases;
+the unreachable-location-tag check across embedded pointers, aliases,
+recursion and inline fields; context pool isolation under load with the race
+detector; exact rate-limit admission under concurrency; bearer and header
+token comparison; request ID generation and trust; cookies; randomness; server
+timeouts and TLS defaults; redirects; query parsing agreement between guards
+and the binder; and linear cost for every string rule on megabyte inputs.
+
+**Residual.**
+- A handler that ignores both its context and its connection, for example one
+  blocked on a channel, can still be running when lifecycle `Stop` is called
+  at the end of shutdown; it is logged and documented on `App.Shutdown`.
+- A guard or handler that parses a form itself through `ctx.Request()` uses
+  net/http's own limits (32 MiB in memory and unbounded spill to disk for
+  multipart), not the route's; this is documented on `Context.Request`, since
+  capping every raw body would break streaming uploads.
+- `validate.SliceRules.Evaluate` remains unbounded for callers using the
+  validate package directly; `EvaluateUpTo` is the bounded form.
+- The Windows short-name check (T24) is exercised by tests on every OS, but has
+  not been run on Windows.
 
 ---
 

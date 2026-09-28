@@ -26,7 +26,9 @@ type Empty struct{}
 
 // Struct tags recognised by the binder. A field carrying one of the first six
 // is read from that part of the request; a field carrying none of them becomes
-// part of the JSON body.
+// part of the JSON body. A json:"-" tag keeps a field out of the body and its
+// schema and nothing more, so a located field carrying one is still bound from
+// its location.
 const (
 	tagPath     = "path"
 	tagQuery    = "query"
@@ -270,9 +272,14 @@ func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][
 			continue
 		}
 		index := append(append([]int(nil), prefix...), i)
-		if name, _, _ := strings.Cut(f.Tag.Get(tagJSON), ","); name == "-" {
-			continue
-		}
+		// A json:"-" tag keeps a field out of the body and out of the schema,
+		// and that is all it does. It used to end the field's binding
+		// altogether, which turned `header:"X-User-ID" json:"-"`, the natural
+		// way to write "from the header and never from the body", into a field
+		// bound from nowhere: the header, its default and its required check
+		// all went silently with it.
+		jsonName, _, _ := strings.Cut(f.Tag.Get(tagJSON), ",")
+		inBody := jsonName != "-"
 
 		if name, declared := f.Tag.Lookup(tagFile); declared {
 			binder, err := newFileBinder(f, index, name)
@@ -299,22 +306,32 @@ func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][
 
 		// An embedded struct may itself declare located parameters. Recurse to
 		// find them; if it declares none, the embedded value is body content
-		// like any other field.
+		// like any other field. One excluded from the body with json:"-" still
+		// contributes its located parameters, and nothing else, since the
+		// decoder never writes to it.
 		if f.Anonymous && f.Type.Kind() == reflect.Struct {
 			before := plan.located()
 			var nestedBody [][]int
 			if err := collectFields(f.Type, index, plan, &nestedBody); err != nil {
 				return err
 			}
+			if !inBody {
+				continue
+			}
 			if plan.located() != before {
 				*bodyFields = append(*bodyFields, nestedBody...)
 				continue
 			}
 		}
+		// A field kept out of the body is checked as well: a location tag
+		// inside it would be ignored just the same, and a developer who wrote
+		// one expected it to bind.
 		if err := checkUnreachable(f); err != nil {
 			return err
 		}
-		*bodyFields = append(*bodyFields, index)
+		if inBody {
+			*bodyFields = append(*bodyFields, index)
+		}
 	}
 	return nil
 }

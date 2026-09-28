@@ -916,7 +916,7 @@ func (a *App) recoverRoute(c *Context) {
 		panic(recovered)
 	}
 	a.logger.ErrorContext(c.Context(), "muzak: recovered from a panic in a handler",
-		slog.Any("panic", recovered),
+		slog.String("panic", panicValue(recovered)),
 		slog.String("method", c.r.Method),
 		slog.String("route", c.route.Path),
 		slog.String(RequestIDKey, c.RequestID()),
@@ -1142,11 +1142,14 @@ const truncatedMarker = "...(truncated)"
 // so a well-formed path is not left ending in half a character; the bound on
 // the walk keeps a run of bytes that are not UTF-8 at all from moving it
 // further.
-func truncateForMessage(s string) string {
-	if len(s) <= maxQuotedLength {
+func truncateForMessage(s string) string { return truncateTo(s, maxQuotedLength) }
+
+// truncateTo is [truncateForMessage] for a limit of the caller's choosing.
+func truncateTo(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	cut := maxQuotedLength
+	cut := limit
 	for i := 0; i < utf8.UTFMax-1 && !utf8.RuneStart(s[cut]); i++ {
 		cut--
 	}

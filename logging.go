@@ -3,6 +3,7 @@ package muzak
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -281,6 +282,26 @@ func appendJSONEscaped(dst, p []byte) []byte {
 		return nil
 	}
 	return append(dst, p[copied:]...)
+}
+
+// maxLoggedPanicLength bounds how much of a recovered panic's value a log line
+// carries. It is several times [maxQuotedLength] because a panic value is the
+// application's own words and often the only account of what went wrong that
+// the log will have, but it is still a bound: a message assembled from a
+// request's input, a query or a decoded body is as large as that input, and one
+// request can panic as often as it likes.
+const maxLoggedPanicLength = 4096
+
+// panicValue renders a recovered panic value for a log line, cut to
+// [maxLoggedPanicLength].
+//
+// It is rendered with fmt rather than handed to the handler as it is, for two
+// reasons besides the bound. A value that is not a string or an error would
+// otherwise be marshalled in full by the JSON handler, however large or deeply
+// nested, and fmt reports a String or Error method that itself panics rather
+// than losing the record. The stack is logged separately.
+func panicValue(recovered any) string {
+	return truncateTo(fmt.Sprint(recovered), maxLoggedPanicLength)
 }
 
 // isTerminal reports whether w is a character device, which is the closest the

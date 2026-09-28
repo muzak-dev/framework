@@ -210,7 +210,7 @@ func Recovery(logger *slog.Logger) Middleware {
 				}
 				id, _ := RequestIDFromContext(r.Context())
 				logger.ErrorContext(r.Context(), "muzak: recovered from a panic",
-					slog.Any("panic", recovered),
+					slog.String("panic", panicValue(recovered)),
 					slog.String("method", r.Method),
 					slog.String("path", truncateForMessage(r.URL.Path)),
 					slog.String(RequestIDKey, id),

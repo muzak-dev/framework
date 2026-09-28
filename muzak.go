@@ -555,6 +555,15 @@ func (a *App) build() {
 		return len(y.path) - len(x.path)
 	})
 
+	// Built with the other checks, not while the handler is assembled, so a
+	// policy that cannot be served is reported with them: after that point the
+	// failure had already been logged as a success and nothing said why every
+	// request was refused.
+	cors, err := a.corsMiddleware()
+	if err != nil {
+		state.errs = append(state.errs, err)
+	}
+
 	if len(state.errs) > 0 {
 		a.buildErr = errors.Join(state.errs...)
 		startup.Error("muzak: the application could not be built", slog.String("error", a.buildErr.Error()))
@@ -576,7 +585,7 @@ func (a *App) build() {
 			slog.String("docs", a.opts.DocsPath),
 			slog.String("openapi", a.opts.OpenAPIPath))
 	}
-	a.handler = a.buildHandler()
+	a.handler = a.buildHandler(cors)
 }
 
 // entryFor returns the path entry for a template, inserting it into the tree
@@ -651,13 +660,13 @@ func anyAnswersHead(routes []*Route) bool {
 }
 
 // buildHandler wraps the router in the middleware chain and the documentation
-// routes.
-func (a *App) buildHandler() http.Handler {
+// routes, with cors as the innermost layer when a policy was configured.
+func (a *App) buildHandler(cors Middleware) http.Handler {
 	var handler http.Handler = http.HandlerFunc(a.dispatch)
 	if !a.opts.DisableDocs {
 		handler = a.withDocs(handler)
 	}
-	if cors, ok := a.corsMiddleware(); ok {
+	if cors != nil {
 		handler = cors(handler)
 	}
 	for i := len(a.middleware) - 1; i >= 0; i-- {
@@ -668,20 +677,16 @@ func (a *App) buildHandler() http.Handler {
 	return withRouteHolder(handler)
 }
 
-// corsMiddleware builds the CORS middleware when a policy was configured. A
-// policy that cannot be served safely is reported as a build error rather than
-// silently applied.
-func (a *App) corsMiddleware() (Middleware, bool) {
+// corsMiddleware builds the CORS middleware when a policy was configured, and
+// returns nil when none was. A policy that cannot be served safely is returned
+// as an error for the caller to report as a build error rather than silently
+// applied.
+func (a *App) corsMiddleware() (Middleware, error) {
 	opts := a.opts.CORS
 	if len(opts.AllowedOrigins) == 0 && opts.AllowOriginFunc == nil {
-		return nil, false
+		return nil, nil
 	}
-	mw, err := CORS(opts)
-	if err != nil {
-		a.buildErr = errors.Join(a.buildErr, err)
-		return nil, false
-	}
-	return mw, true
+	return CORS(opts)
 }
 
 // ServeHTTP implements http.Handler, building the application on first use.

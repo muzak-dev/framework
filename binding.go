@@ -249,10 +249,24 @@ func templateParams(path string) map[string]bool {
 // carries a location tag and recording the index of every field that belongs
 // to the JSON body. It recurses into embedded structs so that shared parameter
 // sets can be composed by embedding.
+//
+// Only the top level and structs embedded by value are searched for location
+// tags. A tag anywhere else is a build error rather than something to skip,
+// because skipping it is not neutral: the field it sits on becomes body
+// content, and a request can then set the user ID the gateway was supposed to
+// supply in a header by writing it into the JSON body instead.
 func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][]int) error {
 	for i := range t.NumField() {
 		f := t.Field(i)
 		if !usableField(f) {
+			if location, declared := declaredLocation(f); declared {
+				return fmt.Errorf("field %s declares a %s parameter but is unexported, so the binder cannot set it; export the field", f.Name, location)
+			}
+			if f.Anonymous {
+				if err := checkUnreachable(f); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		index := append(append([]int(nil), prefix...), i)
@@ -297,9 +311,79 @@ func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][
 				continue
 			}
 		}
+		if err := checkUnreachable(f); err != nil {
+			return err
+		}
 		*bodyFields = append(*bodyFields, index)
 	}
 	return nil
+}
+
+// declaredLocation reports the location a field's own tags bind it from, file
+// included, which is what the reachability checks below look for.
+func declaredLocation(f reflect.StructField) (string, bool) {
+	if _, declared := f.Tag.Lookup(tagFile); declared {
+		return tagFile, true
+	}
+	if source, _, declared := locationTag(f); declared {
+		return source.String(), true
+	}
+	return "", false
+}
+
+// checkUnreachable refuses a field the binder treats as a single unit, body
+// content or an embedded pointer, when a location tag sits somewhere inside
+// its type.
+//
+// The binder does not follow such a field, so the tag inside would do nothing,
+// and doing nothing is the dangerous outcome: the value is decoded from the
+// body along with its parent, which hands the client a field the developer
+// believed came from the path, a header or a cookie. Supporting the case
+// instead would mean allocating embedded pointers and inventing a meaning for
+// a query parameter inside element three of a slice; refusing it costs one
+// "embed by value" and leaves nothing to guess.
+func checkUnreachable(f reflect.StructField) error {
+	path, location, found := locatedWithin(f.Type, map[reflect.Type]bool{})
+	if !found {
+		return nil
+	}
+	if f.Anonymous && f.Type.Kind() == reflect.Pointer {
+		return fmt.Errorf("field %s.%s declares a %s parameter inside the embedded pointer %s, which the binder does not follow, so the value could be set by the request body instead; embed %s by value rather than by pointer",
+			f.Name, path, location, f.Type, f.Type.Elem())
+	}
+	return fmt.Errorf("field %s.%s declares a %s parameter inside the field %s, but located parameters are read only at the top level of the input and in structs embedded by value, so the value could be set by the request body instead; move the field to the top level of the input or embed its struct by value",
+		f.Name, path, location, f.Name)
+}
+
+// locatedWithin searches a type for a field carrying a location tag, looking
+// through pointers, slices, arrays and map values, since JSON reaches a struct
+// through any of them. It returns the dotted path to the first such field and
+// the location it declares.
+//
+// Only fields encoding/json can reach are searched: exported ones and embedded
+// ones. The seen set stops a recursive type, such as a tree of nodes, from
+// being walked forever.
+func locatedWithin(t reflect.Type, seen map[reflect.Type]bool) (path, location string, found bool) {
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || seen[t] {
+		return "", "", false
+	}
+	seen[t] = true
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if !f.IsExported() && !f.Anonymous {
+			continue
+		}
+		if location, declared := declaredLocation(f); declared {
+			return f.Name, location, true
+		}
+		if path, location, found := locatedWithin(f.Type, seen); found {
+			return f.Name + "." + path, location, true
+		}
+	}
+	return "", "", false
 }
 
 // located counts the binders compiled so far, which is what tells

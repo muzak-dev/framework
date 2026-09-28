@@ -104,6 +104,13 @@ const (
 // same rule applies to a list passed as [LoggerOptions.RedactKeys], so a short
 // or common term there redacts every key that contains it.
 //
+// The same rule is why the list has no "auth", "pass", "sig" or "otp": each is
+// inside a common word that is not a secret ("author", "passenger", "design",
+// "hot_path"), and would hide it. The terms that stand for them are the
+// specific spellings, "basic-auth", "auth-header", "x-auth", "passphrase",
+// "totp" and "otp-code". A key that is a secret under a shorter name is one
+// for [LoggerOptions.RedactKeys] to add.
+//
 // A key names a group as well as a single value. A group whose key matches,
 // whether it was built with [slog.Group], produced by a [slog.LogValuer], or
 // opened with [slog.Logger.WithGroup], has every value inside it redacted, in
@@ -122,6 +129,20 @@ var DefaultRedactedKeys = []string{
 	"session",
 	"jwt",
 	"bearer",
+	"passphrase",
+	"pwd",
+	"dsn",
+	"connection-string",
+	"access-key",
+	"signing-key",
+	"master-key",
+	"encryption-key",
+	"hmac",
+	"totp",
+	"otp-code",
+	"basic-auth",
+	"auth-header",
+	"x-auth",
 }
 
 // RedactedPlaceholder is written in place of a redacted value.

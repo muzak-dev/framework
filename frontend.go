@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,12 +74,21 @@ type FrontendOptions struct {
 }
 
 // frontend is one resolved frontend mount: a path, the filesystem behind it,
-// and the guards it inherited from the routers it was registered under.
+// and the guards, providers and rate limit it inherited from the routers it
+// was registered under.
 type frontend struct {
 	// path is the full mount path, with no trailing slash unless it is root.
-	path   string
-	opts   FrontendOptions
-	guards []Guard
+	path      string
+	opts      FrontendOptions
+	guards    []Guard
+	providers []*provider
+
+	// limits is a stand-in route that carries the mount's rate limit. It is
+	// resolved by the same code that resolves a route's, and completed with
+	// every route's once the application is built, so a quota a mount shares
+	// with the routes beside it is one budget in one storage. It is never
+	// registered and never answers a request.
+	limits *Route
 
 	// open resolves the filesystem once, so that a directory named but not yet
 	// built is reported on the first request rather than at start-up.
@@ -110,9 +120,12 @@ type frontend struct {
 //
 // Routes win. A request is matched against every registered route first, and
 // reaches the frontend only when none of them answered, so mounting a frontend
-// at "/" cannot shadow an API. Middleware still applies, as do the guards of
-// the routers the frontend was registered under, which is what lets a frontend
-// sit behind the same authentication as everything else.
+// at "/" cannot shadow an API. Middleware still applies, and so does what the
+// routers the frontend was registered under would run before a route's
+// handler: their rate limit, then their guards, then every [Needs] and
+// [Singleton] provider they declare. An error from any of them is rendered
+// exactly as it would be for a route, which is what lets a frontend sit behind
+// the same authentication and the same budget as everything else.
 //
 // A request for a path with no file behind it falls back to one, resolved from
 // the build unless the options say otherwise: a 404.html in the frontend's root
@@ -145,11 +158,19 @@ func (r *Router) Frontend(mountPath string, opts FrontendOptions) {
 	r.frontends = append(r.frontends, &frontend{path: mountPath, opts: opts, index: true, kind: "frontend"})
 }
 
-// resolve computes a frontend's final mount path and guard chain, and verifies
-// what it serves unless the mount asked not to be checked.
+// resolve computes a frontend's final mount path, dependency chain and rate
+// limit, and verifies what it serves unless the mount asked not to be checked.
 func (f *frontend) resolve(in inherited) error {
 	f.path = strings.TrimSuffix(in.prefix+f.path, "/")
 	f.guards = in.guards
+	f.providers = in.providers
+	// The stand-in is named after the mount, so that a rate limit the mount
+	// cannot use is reported against the mount rather than against a route
+	// nobody registered.
+	f.limits = &Route{Method: f.kind, Path: f.mountPath()}
+	if err := f.limits.resolveRateLimit(in); err != nil {
+		return err
+	}
 
 	if f.opts.SkipCheck {
 		// The files are named but not promised. Whether they are there is
@@ -247,11 +268,9 @@ func (f *frontend) matches(requestPath string) (string, bool) {
 
 // serve answers a request from the frontend's files.
 func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
-	for _, guard := range f.guards {
-		if err := guard(c); err != nil {
-			a.fail(c, err)
-			return
-		}
+	if err := f.admit(c); err != nil {
+		a.fail(c, err)
+		return
 	}
 
 	files, err := f.fsys()
@@ -278,6 +297,70 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 		return
 	}
 	a.serveFrontendFallback(c, f, files)
+}
+
+// admit runs everything a route of the same routers would run before its
+// handler: the rate limit, the guards and the value providers, in the order
+// [App.run] runs them.
+//
+// A mount used to run the guards alone. A router whose authentication is a
+// [Needs] provider, which is the documented way to hand the handler the
+// current user, therefore served its files to anyone, and an application-wide
+// rate limit counted every API call and none of the file requests beside
+// them. A mount has no handler to read a resolved value, so a provider runs
+// here for its verdict; the value is still recorded, so that a provider which
+// reads an earlier one with [From] finds it.
+func (f *frontend) admit(c *Context) error {
+	limits := f.limits.rateLimit
+	if limits != nil && !limits.afterDependencies {
+		if err := limits.check(c); err != nil {
+			return err
+		}
+	}
+	for _, guard := range f.guards {
+		if err := guard(c); err != nil {
+			return err
+		}
+	}
+	if err := resolveInheritedProviders(c, f.providers); err != nil {
+		return err
+	}
+	if limits != nil && limits.afterDependencies {
+		if err := limits.check(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveInheritedProviders runs every provider a mount or the documentation
+// inherited, outermost first, recording each value on the request, and stops
+// at the first error.
+//
+// Every provider runs, not one per type. Nothing served here has a handler
+// that could prefer an inner provider's value, so what is left to decide is
+// which verdicts count, and counting every one is the choice that cannot let
+// a request through that some router meant to stop.
+func resolveInheritedProviders(c *Context, providers []*provider) error {
+	for _, p := range providers {
+		v, err := p.get(c)
+		if err != nil {
+			return err
+		}
+		c.deps = append(c.deps, depValue{typ: p.typ, val: v})
+	}
+	return nil
+}
+
+// rateLimitOwners returns every route whose rate limit is completed once the
+// application is built: each registered route, and the stand-in each file
+// mount counts its requests through. See [frontend.limits].
+func (a *App) rateLimitOwners(mounts []*frontend) []*Route {
+	owners := slices.Clip(a.routes)
+	for _, mount := range mounts {
+		owners = append(owners, mount.limits)
+	}
+	return owners
 }
 
 // errFrontendUnavailable stands in for a frontend whose files cannot be read,
@@ -481,8 +564,8 @@ type StaticOptions struct {
 // for [Router.Frontend] to serve an application whose routing happens in the
 // browser.
 //
-// Everything else matches a frontend mount. Routes are matched first, the
-// guards of the router apply, a directory is never listed, a symbolic link
+// Everything else matches a frontend mount. Routes are matched first, the rate
+// limit, guards and providers of the router apply, a directory is never listed, a symbolic link
 // cannot lead out of the directory, and a method other than GET or HEAD on a
 // file that exists is answered 405 rather than served.
 func (r *Router) Static(mountPath string, opts StaticOptions) {

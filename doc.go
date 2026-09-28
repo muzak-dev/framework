@@ -490,9 +490,11 @@
 //
 // Routes win. A request is matched against every registered route first and
 // reaches the frontend only when none of them answered, so mounting at the root
-// cannot shadow an API. Middleware applies, and so do the guards of the router
-// the frontend was registered on, which is what lets a frontend sit behind the
-// same authentication as everything else.
+// cannot shadow an API. Middleware applies, and so does everything a route of
+// the same router would run before its handler: its rate limit, its guards and
+// its [Needs] and [Singleton] providers, whose errors are rendered as they
+// would be for a route. That is what lets a frontend sit behind the same
+// authentication and the same budget as everything else.
 //
 // A path with no file behind it falls back to one, chosen from what the build
 // produced: a 404.html is served with 404, and failing that an index.html is

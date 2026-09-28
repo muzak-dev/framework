@@ -773,7 +773,7 @@ func (a *App) resolveRateLimiting(state *buildState) {
 	var storages []RateLimitStorage
 	var shared RateLimitStorage
 
-	for _, rt := range a.routes {
+	for _, rt := range a.rateLimitOwners(state.frontends) {
 		for _, cfg := range rt.rateLimiters() {
 			for _, quota := range cfg.quotas {
 				previous, seen := declared[quota.Name]

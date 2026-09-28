@@ -39,6 +39,10 @@ en:
       too_many_items:
         one: "must have at most 1 item"
         other: "must have at most %{count} items"
+      # A report that stopped at MaxValidationDetails, and a model nested past
+      # MaxNestedDepth.
+      too_many_problems: "has more problems than the %{count} listed; correct these and send it again to see the rest"
+      too_deep: "must not be nested more than %{count} levels deep"
       prefix: "must begin with %{value}"
       suffix: "must end with %{value}"
       contains: "must contain %{value}"

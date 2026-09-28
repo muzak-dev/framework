@@ -37,6 +37,12 @@ type Lifecycle interface {
 	// Stop releases the resource. It is called once, after the HTTP server
 	// has finished draining in-flight requests, and is called even for a
 	// start-up that failed part way, for every component that did start.
+	//
+	// During [App.Shutdown] the context expires with what is left of
+	// [ServerOptions.ShutdownTimeout], or one second after Stop is called if
+	// that is later, and a Stop that honours it keeps the shutdown within
+	// its bound. See App.Shutdown for the one case in which a handler may
+	// still be running when Stop is called.
 	Stop(ctx context.Context) error
 }
 
@@ -249,10 +255,12 @@ func (m *lifecycleManager) Start(ctx context.Context) error {
 
 // Stop releases every component that was started, in parallel.
 //
-// It is called after the HTTP server has drained its in-flight requests, never
+// It is called after the HTTP server has drained its in-flight requests, not
 // before: pulling a database connection out from under a request that is still
-// running would turn an orderly shutdown into a burst of errors. Stop is
-// idempotent, so calling it twice releases nothing the second time.
+// running would turn an orderly shutdown into a burst of errors. The one
+// exception, a handler that outlives the shutdown deadline by ignoring both
+// its context and its closed connection, is described on [App.Shutdown]. Stop
+// is idempotent, so calling it twice releases nothing the second time.
 func (m *lifecycleManager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	components := m.started

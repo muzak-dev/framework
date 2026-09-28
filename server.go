@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -33,7 +34,8 @@ const (
 	// unused before it is closed.
 	DefaultIdleTimeout = 120 * time.Second
 	// DefaultShutdownTimeout bounds how long a graceful shutdown waits for
-	// in-flight requests before connections are closed.
+	// in-flight requests before connections are closed. It is one budget for
+	// the whole shutdown; see [App.Shutdown] for how it is spent.
 	//
 	// Set it below whatever grace period the platform allows, or the platform
 	// kills a drain that is still running. The common ones are worth knowing:
@@ -64,7 +66,12 @@ type ServerOptions struct {
 	// defaulting to [DefaultIdleTimeout].
 	IdleTimeout time.Duration
 	// ShutdownTimeout bounds how long [App.Shutdown] waits for in-flight
-	// requests, defaulting to [DefaultShutdownTimeout].
+	// requests, defaulting to [DefaultShutdownTimeout]. It is one deadline
+	// for the whole shutdown: WebSocket connections, event streams and
+	// ordinary requests are drained together within it, and the lifecycle
+	// components are then stopped with what it leaves, or with at least one
+	// second when the drain used all of it. A negative value waits for
+	// in-flight requests without limit.
 	ShutdownTimeout time.Duration
 	// MaxHeaderBytes bounds the size of the request header block, defaulting
 	// to [DefaultMaxHeaderBytes].
@@ -108,6 +115,21 @@ func orDefaultDuration(v, fallback time.Duration) time.Duration {
 	}
 }
 
+// Bounds on the part of a shutdown that comes after its deadline.
+const (
+	// shutdownHandlerGrace is how long a shutdown whose deadline has passed
+	// still waits for handlers once their connections are closed. Closing a
+	// connection cancels its request's context and fails any read or write
+	// on it, and a handler that honours either returns within this; one that
+	// honours neither is not waited for any longer.
+	shutdownHandlerGrace = 100 * time.Millisecond
+	// lifecycleStopFloor is the least time lifecycle components are given to
+	// stop, however little of the shutdown deadline the drain left, so that a
+	// component flushing on the way out is not handed a context that has
+	// already expired.
+	lifecycleStopFloor = time.Second
+)
+
 // serverRunner owns the http.Server and the state needed to shut it down
 // exactly once, no matter which of the run methods started it.
 //
@@ -119,6 +141,74 @@ type serverRunner struct {
 	listener net.Listener
 	done     chan struct{}
 	stopOnce sync.Once
+	// stopped is closed once a shutdown has finished, lifecycle components
+	// included, which is what a run method waits for before it returns.
+	stopped chan struct{}
+	// handlers counts the requests being served, hijacked ones included.
+	handlers handlerTracker
+}
+
+// handlerTracker counts the handlers a server is running, so that a shutdown
+// can wait for them before the lifecycle components they use are stopped.
+//
+// net/http cannot answer this itself. It forgets a hijacked connection, and a
+// shutdown that reaches its deadline closes the connections it does know
+// about without waiting for their handlers to return. The count is kept with
+// one atomic add on each side of a request; the lock is taken only once a
+// shutdown is waiting.
+type handlerTracker struct {
+	active   atomic.Int64
+	draining atomic.Bool
+	mu       sync.Mutex
+	// idle is closed by the last handler to return while a shutdown waits.
+	idle chan struct{}
+}
+
+// track wraps the handler the server runs so that every call is counted.
+func (t *handlerTracker) track(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.active.Add(1)
+		defer t.finish()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// finish records a handler that returned, and tells a waiting shutdown when
+// it was the last one.
+func (t *handlerTracker) finish() {
+	if t.active.Add(-1) != 0 || !t.draining.Load() {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.idle != nil {
+		close(t.idle)
+		t.idle = nil
+	}
+}
+
+// wait blocks until no handler is running or timeout has passed, and reports
+// how many handlers were still running when it gave up.
+func (t *handlerTracker) wait(timeout time.Duration) int64 {
+	t.mu.Lock()
+	t.draining.Store(true)
+	if t.active.Load() == 0 {
+		t.mu.Unlock()
+		return 0
+	}
+	if t.idle == nil {
+		t.idle = make(chan struct{})
+	}
+	idle := t.idle
+	t.mu.Unlock()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return 0
+	case <-timer.C:
+		return t.active.Load()
+	}
 }
 
 // newServer builds the http.Server for the application, applying every
@@ -156,9 +246,9 @@ func (a *App) Run() error {
 // RunContext starts the server and blocks until ctx is cancelled or the server
 // fails.
 //
-// When ctx is cancelled the server stops accepting new connections and waits
-// up to [ServerOptions.ShutdownTimeout] for in-flight requests to finish
-// before closing the rest. A shutdown triggered this way returns nil, because
+// When ctx is cancelled the server shuts down as [App.Shutdown] describes,
+// waiting up to [ServerOptions.ShutdownTimeout] for in-flight requests to
+// finish before closing the rest. A shutdown triggered this way returns nil, because
 // stopping on request is the expected outcome rather than a failure.
 func (a *App) RunContext(ctx context.Context) error {
 	listener, err := a.listen(ctx)
@@ -196,11 +286,14 @@ func (a *App) listen(ctx context.Context) (net.Listener, error) {
 	if err != nil {
 		return nil, errors.Join(err, a.StopLifecycle(context.WithoutCancel(ctx)))
 	}
-	a.server.Store(&serverRunner{
+	runner := &serverRunner{
 		http:     a.newServer(),
 		listener: listener,
 		done:     make(chan struct{}),
-	})
+		stopped:  make(chan struct{}),
+	}
+	runner.http.Handler = runner.handlers.track(runner.http.Handler)
+	a.server.Store(runner)
 	return listener, nil
 }
 
@@ -233,6 +326,12 @@ func (a *App) serve(ctx context.Context, listener net.Listener) error {
 
 	select {
 	case err := <-errCh:
+		if err == nil {
+			// The server was closed by a Shutdown called elsewhere, which is
+			// still draining and stopping components. Returning now would let
+			// a main function exit underneath it.
+			<-runner.stopped
+		}
 		return err
 	case <-ctx.Done():
 		if err := a.Shutdown(context.Background()); err != nil {
@@ -251,13 +350,29 @@ func (a *App) servesTLS() bool {
 // Shutdown stops the server gracefully.
 //
 // It stops accepting new connections and waits for in-flight requests to
-// finish, giving up after [ServerOptions.ShutdownTimeout] and closing whatever
-// remains. The ctx argument can cut the wait short; pass context.Background to
-// use the configured timeout alone.
+// finish, then stops the lifecycle components. [ServerOptions.ShutdownTimeout]
+// is one deadline for all of it, counted from the call, and the ctx argument
+// can bring it forward; pass context.Background to use the configured timeout
+// alone.
+//
+// Within the deadline, WebSocket connections are told the server is going
+// away, event streams are ended, and ordinary requests are left to finish, all
+// at once. When the deadline passes, every connection still open is closed,
+// hijacked ones included, and handlers are given a further 100 milliseconds to
+// notice and return. The lifecycle components are then stopped with a context
+// that expires at the deadline, or one second after they are asked to stop if
+// that is later. Shutdown therefore returns within ShutdownTimeout plus about
+// one second, unless a component's Stop ignores its context.
+//
+// A component is stopped only after every handler has returned, with one
+// exception: a handler that ignores both its request's context and its
+// connection being closed, and is still running when the grace period ends,
+// may still be running when Stop is called. Shutdown logs how many there were.
 //
 // Shutdown is safe to call more than once and from more than one goroutine;
 // only the first call does the work. Calling it on a server that was never
-// started returns nil.
+// started returns nil. A run method that was serving returns once the
+// shutdown has finished.
 func (a *App) Shutdown(ctx context.Context) error {
 	runner := a.server.Load()
 	if runner == nil {
@@ -265,45 +380,113 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}
 	var err error
 	runner.stopOnce.Do(func() {
-		log := Scoped(a.logger, ScopeServer)
-		log.Info("Shutting down, waiting for in-flight requests...")
-
-		// A hijacked connection is no longer one net/http tracks, so a
-		// WebSocket would otherwise be left open through the whole shutdown
-		// with its peer none the wiser.
-		closed := a.websockets.shutdown(a.opts.ShutdownTimeout, wsCloseGoingAway)
-		if closed > 0 {
-			log.Info(fmt.Sprintf("Closed %d websocket %s", closed, plural(closed, "connection")))
-		}
-
-		// An event stream is tracked by net/http, which is exactly why it has
-		// to be ended here: waiting for a handler that is streaming means
-		// waiting for the whole shutdown deadline, once per stream.
-		ended := a.streams.shutdown(a.opts.ShutdownTimeout, (*sseStream).shuttingDown)
-		if ended > 0 {
-			log.Info(fmt.Sprintf("Ended %d event %s", ended, plural(ended, "stream")))
-		}
-
-		timeout := a.opts.ShutdownTimeout
-		if timeout > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, timeout)
-			defer cancel()
-		}
-		err = runner.http.Shutdown(ctx)
-		if err != nil {
-			log.Warn("Shutdown deadline reached, closing remaining connections",
-				slog.String("error", err.Error()))
-			err = errors.Join(err, runner.http.Close())
-		}
-		<-runner.done
-
-		// Only now that no request is in flight is it safe to release the
-		// resources those requests were using.
-		err = errors.Join(err, a.StopLifecycle(context.WithoutCancel(ctx)))
-		log.Info("Stopped")
+		defer close(runner.stopped)
+		err = a.drain(ctx, runner)
 	})
 	return err
+}
+
+// drain is the body of [App.Shutdown], run once per server.
+func (a *App) drain(ctx context.Context, runner *serverRunner) error {
+	log := Scoped(a.logger, ScopeServer)
+	log.Info("Shutting down, waiting for in-flight requests...")
+
+	// One deadline covers the whole drain. Each phase used to be given the
+	// full timeout in turn, so a shutdown could take three times as long as
+	// configured and overrun the grace period the platform allowed.
+	if timeout := a.opts.ShutdownTimeout; timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	// The listeners are closed and ordinary requests drained while the
+	// long-lived responses below are ended, rather than after them, so that
+	// a slow goodbye from one kind does not spend the others' share.
+	shutdownErr := make(chan error, 1)
+	go func() { shutdownErr <- runner.http.Shutdown(ctx) }()
+
+	// A hijacked connection is no longer one net/http tracks, so a WebSocket
+	// would otherwise be left open through the whole shutdown with its peer
+	// none the wiser.
+	closed := a.websockets.shutdown(untilDeadline(ctx), wsCloseGoingAway)
+	if closed > 0 {
+		log.Info(fmt.Sprintf("Closed %d websocket %s", closed, plural(closed, "connection")))
+	}
+
+	// An event stream is tracked by net/http, which is exactly why it has to
+	// be ended here: waiting for a handler that is streaming means waiting
+	// for the whole shutdown deadline, once per stream.
+	ended := a.streams.shutdown(untilDeadline(ctx), (*sseStream).shuttingDown)
+	if ended > 0 {
+		log.Info(fmt.Sprintf("Ended %d event %s", ended, plural(ended, "stream")))
+	}
+
+	err := <-shutdownErr
+	if err != nil {
+		log.Warn("Shutdown deadline reached, closing remaining connections",
+			slog.String("error", err.Error()))
+		err = errors.Join(err, runner.http.Close())
+	}
+	<-runner.done
+
+	// A WebSocket whose peer stopped reading can hold its handler in a write,
+	// and the goodbye above behind it, for the whole write timeout. Past the
+	// deadline its transport is closed outright, as net/http has just done
+	// for every connection it tracks, which fails that write at once. The
+	// grace period for handlers to return starts now and is shared by both
+	// waits below.
+	graceEnds := time.Now().Add(shutdownHandlerGrace)
+	a.websockets.shutdown(shutdownHandlerGrace, wsAbandon)
+
+	// Only once no handler is running is it safe to release the resources
+	// those handlers were using.
+	wait := max(untilDeadline(ctx), time.Until(graceEnds), time.Nanosecond)
+	if running := runner.handlers.wait(wait); running > 0 {
+		log.Warn(fmt.Sprintf("%d %s still running after the shutdown deadline and its grace period; stopping lifecycle components anyway",
+			running, plural(int(running), "handler")))
+	}
+	stopCtx, cancel := lifecycleStopContext(ctx)
+	defer cancel()
+	err = errors.Join(err, a.StopLifecycle(stopCtx))
+	log.Info("Stopped")
+	return err
+}
+
+// wsAbandon closes a connection's transport without a goodbye, for a
+// connection still open once the shutdown deadline has passed.
+func wsAbandon(conn *WSConn) {
+	_ = conn.fail(&WSCloseError{Status: WSStatusAbnormalClosure, Reason: "the server shut down"})
+}
+
+// untilDeadline returns how long remains before ctx's deadline, and zero when
+// it has none, which a registry reads as its own default bound. A deadline
+// already passed yields the smallest positive wait, so that the registry
+// still stops admitting and ends what it holds, without waiting.
+func untilDeadline(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	return max(time.Until(deadline), time.Nanosecond)
+}
+
+// lifecycleStopContext derives the context lifecycle components are stopped
+// with. It keeps ctx's values but not its cancellation, as the components
+// must be released even when the caller gave up waiting, and it expires at
+// ctx's deadline or [lifecycleStopFloor] from now, whichever is later. With no
+// deadline at all, which is a ShutdownTimeout disabled on purpose, it has
+// none either.
+func lifecycleStopContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	stop := context.WithoutCancel(ctx)
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return stop, func() {}
+	}
+	if floor := time.Now().Add(lifecycleStopFloor); floor.After(deadline) {
+		deadline = floor
+	}
+	return context.WithDeadline(stop, deadline)
 }
 
 // Addr returns the address the server is listening on, which is how a test

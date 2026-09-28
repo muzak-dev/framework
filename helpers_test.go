@@ -3,6 +3,7 @@ package muzak
 import (
 	"bytes"
 	"encoding/json/v2"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -156,4 +157,28 @@ func buildError(t *testing.T, app *App) string {
 		t.Fatal("Build() succeeded, want an error")
 	}
 	return err.Error()
+}
+
+// catchPanic runs f and returns whatever it panicked with, or nil, for tests
+// asserting that a response is aborted with http.ErrAbortHandler rather than
+// ended cleanly.
+func catchPanic(f func()) (recovered any) {
+	defer func() { recovered = recover() }()
+	f()
+	return nil
+}
+
+// fetchOverTheWire issues a GET against a real server and reads the whole
+// body, returning the error the read ended with. A response aborted by the
+// server surfaces here as io.ErrUnexpectedEOF or a connection error, which a
+// response recorder cannot show.
+func fetchOverTheWire(t *testing.T, url string) (status int, body string, readErr error) {
+	t.Helper()
+	resp, err := http.Get(url) //nolint:noctx // a test against a local server
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b), err
 }

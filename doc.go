@@ -631,8 +631,10 @@
 // allowed, the connections and the event streams one application holds are both
 // capped, a write to a client that stopped reading gives up, no forwarding
 // header is believed until a proxy is named, and a panic becomes a generic 500
-// with the stack recorded only in the log. Each of these can be relaxed
-// deliberately; none of them is relaxed by omission.
+// with the stack recorded only in the log, or, once the response has started,
+// an aborted connection that a client cannot mistake for a complete response.
+// Each of these can be relaxed deliberately; none of them is relaxed by
+// omission.
 //
 // Rate limiting is the deliberate exception, and is off until a quota is
 // declared. There is no limit that is right for every application, and a

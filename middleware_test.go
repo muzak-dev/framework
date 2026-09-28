@@ -199,7 +199,7 @@ func TestRecoveryMiddlewareStandalone(t *testing.T) {
 		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/x", nil))
 	})
 
-	t.Run("does not rewrite a response already on the wire", func(t *testing.T) {
+	t.Run("aborts a response already on the wire", func(t *testing.T) {
 		handler := Recovery(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rw := asResponseWriter(w)
 			rw.WriteHeader(http.StatusOK)
@@ -207,9 +207,15 @@ func TestRecoveryMiddlewareStandalone(t *testing.T) {
 			panic("too late")
 		}))
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil))
+		recovered := catchPanic(func() { handler.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil)) })
+		if recovered != http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
+			t.Errorf("recovered %v, want ErrAbortHandler", recovered)
+		}
 		if rec.Body.String() != "partial" {
-			t.Errorf("body = %q, want the partial response left alone", rec.Body.String())
+			t.Errorf("body = %q, want nothing appended to the partial response", rec.Body.String())
+		}
+		if !strings.Contains(logs.String(), "too late") {
+			t.Errorf("the panic was not logged before the abort:\n%s", logs.String())
 		}
 	})
 }
@@ -536,15 +542,31 @@ func TestResponseWriter(t *testing.T) {
 	})
 }
 
-func TestWriteMinimalErrorSkipsAStartedResponse(t *testing.T) {
+func TestWriteMinimalErrorAbortsAStartedResponse(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
 	w := asResponseWriter(rec)
 	_, _ = w.Write([]byte("already sent"))
 
-	writeMinimalError(w, "req-1")
+	if recovered := catchPanic(func() { writeMinimalError(w, "req-1") }); recovered != http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
+		t.Errorf("recovered %v, want ErrAbortHandler", recovered)
+	}
 	if rec.Body.String() != "already sent" {
-		t.Errorf("body = %q, want the started response left alone", rec.Body.String())
+		t.Errorf("body = %q, want nothing appended to the started response", rec.Body.String())
+	}
+}
+
+func TestWriteMinimalErrorLeavesAHijackedConnectionAlone(t *testing.T) {
+	t.Parallel()
+	rec := httptest.NewRecorder()
+	w := asResponseWriter(rec)
+	w.markHijacked()
+
+	if recovered := catchPanic(func() { writeMinimalError(w, "req-1") }); recovered != nil {
+		t.Errorf("a hijacked connection was aborted: %v", recovered)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want nothing written onto a hijacked connection", rec.Body.String())
 	}
 }
 

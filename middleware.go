@@ -179,6 +179,14 @@ func RequestID(opts RequestIDOptions) Middleware {
 // instead, correlated with the request identifier so it can be matched to the
 // response the client saw.
 //
+// A panic after the response has started cannot become a 500, because the
+// status is already on the wire. It is logged the same way and then turned
+// into a panic with http.ErrAbortHandler, which net/http answers by closing
+// the connection without logging again, so the client sees a truncated
+// response as the protocol error it is rather than as a short body that ended
+// cleanly. A handler serving the application outside net/http must be ready
+// for that panic, exactly as it would be for one from any http.Handler.
+//
 // http.ErrAbortHandler is re-panicked rather than swallowed, because net/http
 // uses it to abort a response deliberately.
 func Recovery(logger *slog.Logger) Middleware {
@@ -187,7 +195,7 @@ func Recovery(logger *slog.Logger) Middleware {
 			// Wrapping here is what lets the deferred function tell whether the
 			// response has already started. Appending an error envelope to a
 			// body that is partly on the wire would corrupt it, so a panic
-			// after the first write is logged and nothing more is sent.
+			// after the first write is logged and the connection aborted.
 			rw := asResponseWriter(w)
 			defer func() {
 				recovered := recover()
@@ -215,10 +223,12 @@ func Recovery(logger *slog.Logger) Middleware {
 
 // writeMinimalError writes the standard error envelope without needing a
 // Muzak Context, for failures that happen outside the routed request path.
+//
+// When the response has already started it aborts instead; see
+// [abortStartedResponse].
 func writeMinimalError(w http.ResponseWriter, requestID string) {
 	if rw, ok := w.(*responseWriter); ok && rw.written {
-		// The response is already on the wire; the best available outcome is
-		// a truncated body, which the client will see as a protocol error.
+		abortStartedResponse(rw)
 		return
 	}
 	body, err := json.Marshal(ErrorResponse{
@@ -242,6 +252,26 @@ func writeMinimalError(w http.ResponseWriter, requestID string) {
 	_, _ = w.Write(body)
 }
 
+// abortStartedResponse ends a request whose response is already on the wire
+// and has failed, by panicking with http.ErrAbortHandler.
+//
+// Returning quietly would let net/http finish the response normally: the
+// chunked encoding gets its terminating chunk, or the connection is reused as
+// though a Content-Length had been honoured, and a client reading a CSV export
+// or an NDJSON stream has no way to tell rows 3 to N never came. The sentinel
+// is the one net/http documents for exactly this; it closes the connection
+// without the stack trace it logs for any other panic, so the failure is
+// recorded once, by whoever called this.
+//
+// A hijacked connection is left alone: it stopped speaking HTTP when it was
+// taken over, and whoever took it closes it.
+func abortStartedResponse(w *responseWriter) {
+	if w.hijacked {
+		return
+	}
+	panic(http.ErrAbortHandler)
+}
+
 // AccessLogOptions configures [AccessLog].
 type AccessLogOptions struct {
 	// Level is the level used for successful responses. Server errors are
@@ -256,6 +286,11 @@ type AccessLogOptions struct {
 
 // AccessLog records one line per request with its method, path, matched route,
 // status, duration and request identifier.
+//
+// A request whose connection was aborted after its response had started (see
+// [Recovery]) is still recorded, with the status that was sent and
+// "aborted=true", and so is a request whose panic is on its way to [Recovery],
+// with the 500 that Recovery is about to write.
 //
 // Only fixed, non-sensitive fields are recorded. Query strings, request bodies
 // and headers are deliberately omitted, because each of them routinely carries
@@ -274,38 +309,68 @@ func AccessLog(logger *slog.Logger, opts AccessLogOptions) Middleware {
 			}
 			start := time.Now()
 			rw := asResponseWriter(w)
+			// The line is written from a deferred function so that a panic on
+			// its way through, whether one Recovery will turn into a 500 or
+			// the abort of a response that already started, still leaves a
+			// record of the request it ended. The panic is resumed unchanged.
+			defer func() {
+				recovered := recover()
+				logAccess(scoped, opts.Level, r, rw, start, recovered != nil)
+				if recovered != nil {
+					panic(recovered)
+				}
+			}()
 			next.ServeHTTP(rw, r)
-
-			status := rw.statusOrDefault()
-			id, _ := RequestIDFromContext(r.Context())
-			level := opts.Level
-			switch {
-			case status >= 500:
-				level = slog.LevelError
-			case status >= 400:
-				level = slog.LevelWarn
-			}
-			attrs := []slog.Attr{
-				slog.Int("status", status),
-				slog.Duration("duration", time.Since(start)),
-				slog.Int64("bytes", rw.bytes),
-				slog.String(RequestIDKey, id),
-			}
-			// The template beside the concrete path, which is what joins a log
-			// line to the trace and the metric for the same endpoint. The path
-			// stays in the message because that is what somebody reading a log
-			// wants; the template is what a query groups by.
-			if route, ok := RouteFromContext(r.Context()); ok {
-				attrs = append(attrs, slog.String("route", route))
-			}
-			// The locale is recorded only when one was resolved, so a service
-			// that does not translate logs exactly what it logged before.
-			if locale, ok := LocaleFromContext(r.Context()); ok && locale != "" {
-				attrs = append(attrs, slog.String(LocaleKey, locale))
-			}
-			scoped.LogAttrs(r.Context(), level, r.Method+" "+r.URL.Path, attrs...)
 		})
 	}
+}
+
+// logAccess writes the access log line for one request. panicking reports a
+// panic passing through [AccessLog]: before the response has started, that is
+// the 500 [Recovery] will write, and after it, the connection is aborted.
+func logAccess(scoped *slog.Logger, base slog.Level, r *http.Request, rw *responseWriter, start time.Time, panicking bool) {
+	status := rw.statusOrDefault()
+	aborted := false
+	if panicking {
+		if rw.written {
+			aborted = !rw.hijacked
+		} else {
+			status = http.StatusInternalServerError
+		}
+	}
+	id, _ := RequestIDFromContext(r.Context())
+	level := base
+	switch {
+	case status >= 500:
+		level = slog.LevelError
+	case status >= 400:
+		level = slog.LevelWarn
+	}
+	attrs := []slog.Attr{
+		slog.Int("status", status),
+		slog.Duration("duration", time.Since(start)),
+		slog.Int64("bytes", rw.bytes),
+		slog.String(RequestIDKey, id),
+	}
+	// The template beside the concrete path, which is what joins a log
+	// line to the trace and the metric for the same endpoint. The path
+	// stays in the message because that is what somebody reading a log
+	// wants; the template is what a query groups by.
+	if route, ok := RouteFromContext(r.Context()); ok {
+		attrs = append(attrs, slog.String("route", route))
+	}
+	// The locale is recorded only when one was resolved, so a service
+	// that does not translate logs exactly what it logged before.
+	if locale, ok := LocaleFromContext(r.Context()); ok && locale != "" {
+		attrs = append(attrs, slog.String(LocaleKey, locale))
+	}
+	if aborted {
+		// The status on its own reads as a success, which is exactly
+		// what the abort exists to prevent a client from concluding.
+		level = slog.LevelError
+		attrs = append(attrs, slog.Bool("aborted", true))
+	}
+	scoped.LogAttrs(r.Context(), level, r.Method+" "+r.URL.Path, attrs...)
 }
 
 // CORSOptions configures [CORS]. The zero value denies every cross-origin
@@ -453,11 +518,17 @@ func setIfAbsent(h http.Header, key, value string) {
 // responseWriter wraps an http.ResponseWriter to record the status code and
 // the number of bytes written, which the access log reports and which lets
 // [Context.SetStatus] tell whether the response has already started.
+//
+// hijacked is kept apart from written because the two call for opposite
+// handling of a later failure: a started response is aborted so the client
+// cannot mistake it for a complete one, while a hijacked connection no longer
+// belongs to net/http and must not be touched.
 type responseWriter struct {
 	http.ResponseWriter
-	status  int
-	bytes   int64
-	written bool
+	status   int
+	bytes    int64
+	written  bool
+	hijacked bool
 }
 
 // asResponseWriter wraps w unless it is already a *responseWriter, so that
@@ -520,6 +591,7 @@ func (w *responseWriter) Flush() { _ = w.FlushError() }
 func (w *responseWriter) markHijacked() {
 	w.status = http.StatusSwitchingProtocols
 	w.written = true
+	w.hijacked = true
 }
 
 // hijackAware is implemented by every response writer this package wraps a

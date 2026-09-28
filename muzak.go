@@ -815,7 +815,33 @@ func (a *App) recoverRoute(c *Context) {
 var errPanic = errors.New("muzak: handler panicked")
 
 // fail renders an error into the response using the configured renderer.
+//
+// A request that fails after its response has started, whether its handler
+// returned an error or panicked, is logged and then aborted rather than
+// rendered: see [abortStartedResponse]. The same applies to a returned error
+// as to a panic, because a handler that streams (rows written as they are
+// read, say) reports a failure halfway through by returning one, and the
+// client of that stream is owed the same signal either way. A handler that
+// wrote a complete response and then returned an error loses nothing it could
+// have kept: net/http never learns the response was meant to be final, and
+// the error says it was not. A hijacked connection is left alone, and so is
+// a WebSocket or event stream route; see [Context.endsItsOwnResponse].
 func (a *App) fail(c *Context, err error) {
+	if c.w.written && !c.w.hijacked && !c.endsItsOwnResponse() {
+		// Every failure is logged here, even the deliberate 4xx logCause
+		// would leave out, because the response the client sees says nothing
+		// about why the connection dropped.
+		cause := logCause(err)
+		if cause == nil {
+			cause = err
+		}
+		a.logger.ErrorContext(c.Context(), "muzak: request failed after its response had started, so the connection was aborted",
+			slog.String("method", c.r.Method),
+			slog.String("path", c.r.URL.Path),
+			slog.String(RequestIDKey, c.RequestID()),
+			slog.String("error", cause.Error()))
+		abortStartedResponse(c.w)
+	}
 	if cause := logCause(err); cause != nil {
 		a.logger.ErrorContext(c.Context(), "muzak: request failed",
 			slog.String("method", c.r.Method),
@@ -825,6 +851,8 @@ func (a *App) fail(c *Context, err error) {
 	}
 	status, body := a.renderError(c, err)
 	if c.w.written {
+		// Only a hijacked connection or a streaming route reaches this, and
+		// either one has already ended its response in its own way.
 		return
 	}
 	if body == nil {
@@ -839,6 +867,20 @@ func (a *App) fail(c *Context, err error) {
 			slog.String("error", writeErr.Error()))
 		writeMinimalError(c.w, c.RequestID())
 	}
+}
+
+// endsItsOwnResponse reports whether the request was routed to a WebSocket or
+// event stream route, whose failures fail leaves to the route rather than
+// aborting.
+//
+// Both protocols frame every message they carry, so a stream that stops early
+// cannot be mistaken for a complete document the way a truncated JSON array
+// or CSV can, and both already report a failure in their own terms: a
+// WebSocket with a close frame, an event stream by ending, which an
+// EventSource answers by reconnecting. A refusal written after something else
+// in the chain had already answered is left as that answer, too.
+func (c *Context) endsItsOwnResponse() bool {
+	return c.route != nil && (c.route.websocket != nil || c.route.sse != nil)
 }
 
 // acquire takes a Context from the pool and binds it to the request.

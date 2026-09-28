@@ -305,7 +305,8 @@ request bodies are capped at one mebibyte, unknown JSON members are rejected,
 CORS denies every cross-origin request until a policy is written, a cross-origin
 WebSocket handshake is refused, no forwarding header is believed until a proxy
 is named, and a panic becomes a generic 500 with the stack recorded only in the
-log.
+log. A panic or an error after the response has started aborts the connection
+instead, so a truncated body cannot pass for a complete one.
 
 Each of these can be relaxed deliberately. None of them is relaxed by omission.
 The full list is in

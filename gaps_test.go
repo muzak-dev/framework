@@ -18,26 +18,6 @@ import (
 	"muzak.dev/framework/internal/radix"
 )
 
-// TestFailLeavesAStartedResponseAlone covers the guard in fail that stops an
-// error envelope from being appended to a body already on the wire.
-func TestFailLeavesAStartedResponseAlone(t *testing.T) {
-	t.Parallel()
-	app := New(quietOptions())
-	app.Get("/x", func(ctx *Context, _ Empty) (rtOut, error) {
-		w := ctx.ResponseWriter()
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("partial"))
-		return rtOut{}, errors.New("failed after writing")
-	})
-	mustBuild(t, app)
-
-	rec := do(t, app, "GET", "/x")
-	assertStatus(t, rec, http.StatusOK)
-	if rec.Body.String() != "partial" {
-		t.Errorf("body = %q, want the started response left intact", rec.Body.String())
-	}
-}
-
 // TestEmbeddedStructPlanErrorsPropagate covers the error return inside the
 // recursive half of collectFields.
 func TestEmbeddedStructPlanErrorsPropagate(t *testing.T) {

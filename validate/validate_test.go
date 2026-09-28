@@ -459,7 +459,8 @@ func TestMatchesCompilesAPatternOnce(t *testing.T) {
 	if allocs := testing.AllocsPerRun(50, func() { declare().MatchesNot(pattern) }); allocs > 20 {
 		t.Errorf("declaring Matches allocated %.0f times, want the compiled expression reused", allocs)
 	}
-	if compilePattern(pattern) != compilePattern(pattern) {
+	first, second := compilePattern(pattern), compilePattern(pattern)
+	if first != second {
 		t.Error("the same pattern compiled to two expressions")
 	}
 	if err := declare().Check("abc"); err != nil {
@@ -496,7 +497,8 @@ func TestPatternCacheIsBounded(t *testing.T) {
 	if store.compile("^bounded-9$").MatchString("bounded-1") {
 		t.Error("a pattern beyond the limit was not applied")
 	}
-	if store.compile("^bounded-0$") != store.compile("^bounded-0$") {
+	first, second := store.compile("^bounded-0$"), store.compile("^bounded-0$")
+	if first != second {
 		t.Error("a pattern within the limit was compiled twice")
 	}
 }

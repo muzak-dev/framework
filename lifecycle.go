@@ -32,7 +32,9 @@ type Lifecycle interface {
 	// Start acquires the resource. It is called once, before the server
 	// begins accepting requests, and must return only when the resource is
 	// ready to use. The context is cancelled when a sibling component fails,
-	// so a long-running dial should honour it and give up.
+	// so a long-running dial should honour it and give up. On a successful
+	// start it stays live until the components are stopped, so a component
+	// may keep it for a background worker; it is cancelled after Stop has run.
 	Start(ctx context.Context) error
 	// Stop releases the resource. It is called once, after the HTTP server
 	// has finished draining in-flight requests, and is called even for a
@@ -166,6 +168,11 @@ type lifecycleManager struct {
 	mu      sync.Mutex
 	started []Lifecycle
 	running bool
+	// cancel ends the context the components were started with. It is kept
+	// until Stop rather than released when Start returns, because a component
+	// that hands its context to a background worker would otherwise have that
+	// worker cancelled during boot.
+	cancel context.CancelFunc
 }
 
 // componentResult carries the outcome of one component's start.
@@ -203,7 +210,9 @@ func (m *lifecycleManager) Start(ctx context.Context) error {
 	// to completion, which keeps a failed start-up as short as the first
 	// failure plus the time the rest take to notice.
 	startCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	m.mu.Lock()
+	m.cancel = cancel
+	m.mu.Unlock()
 
 	began := time.Now()
 	results := make([]componentResult, len(m.components))
@@ -266,7 +275,14 @@ func (m *lifecycleManager) Stop(ctx context.Context) error {
 	components := m.started
 	m.started = nil
 	m.running = false
+	cancel := m.cancel
+	m.cancel = nil
 	m.mu.Unlock()
+	// The start context ends with the components it was given to, and is
+	// released on every path out, including the one with nothing to stop.
+	if cancel != nil {
+		defer cancel()
+	}
 
 	if len(components) == 0 {
 		return nil

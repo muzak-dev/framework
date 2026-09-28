@@ -500,7 +500,7 @@ func (a *App) build() {
 	if err := a.opts.Versioning.validate(); err != nil {
 		state.errs = append(state.errs, err)
 	}
-	if err := a.opts.ServerOptions.validate(); err != nil {
+	if err := a.opts.validate(); err != nil {
 		state.errs = append(state.errs, err)
 	}
 

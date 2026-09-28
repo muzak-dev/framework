@@ -3,7 +3,9 @@ package muzak
 import (
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -83,12 +85,16 @@ type VersioningOptions struct {
 	Prefix *string
 
 	// Header names the request header carrying the version, for
-	// [VersioningHeader]. It is required for that type.
+	// [VersioningHeader]. It is required for that type. A request that sends
+	// it on more than one line names no version that any route answers.
 	Header string
 
 	// Key is the Accept header parameter naming the version, for
 	// [VersioningMediaType], such as "v=" for "application/json;v=2". It is
-	// required for that type.
+	// required for that type, and is matched without regard to case. Accept is
+	// read as a list of media ranges: of the ranges that carry the parameter,
+	// the one with the highest quality value picks the version, and one
+	// refused with "q=0" is ignored.
 	Key string
 
 	// Extractor pulls the version(s) a request carries, for
@@ -283,7 +289,10 @@ func (rt *Route) versionVariants(v VersioningOptions) []*Route {
 func (o VersioningOptions) requestedVersions(r *http.Request) []Version {
 	switch o.Type {
 	case VersioningHeader:
-		v := r.Header.Get(o.Header)
+		// A header sent on several lines is one comma-separated list, and a
+		// list names no version, so it matches nothing rather than whichever
+		// line this reads and a proxy might not.
+		v := strings.Join(r.Header.Values(o.Header), ", ")
 		if v == "" {
 			return nil
 		}
@@ -317,20 +326,47 @@ func (o VersioningOptions) varyField() string {
 
 // mediaTypeVersion finds o.Key's value among the parameters of the request's
 // Accept header, which may name several media ranges separated by commas,
-// each with its own parameters separated by semicolons.
+// each with its own parameters separated by semicolons, and may be sent as
+// several lines that HTTP defines as one list.
+//
+// Each range is read as a media range, so that the parameter name is matched
+// without regard to case, a quoted value is unquoted, and text that is not a
+// media range at all, such as a bare "v=1", names nothing. When more than one
+// range carries the parameter the one with the highest quality wins, the
+// first written among equals, and a range refused with "q=0" is not offered.
+// A proxy or firewall that parses Accept the standard way then agrees with
+// the application about which version a request asked for.
 func (o VersioningOptions) mediaTypeVersion(r *http.Request) []Version {
-	accept := r.Header.Get("Accept")
-	if accept == "" || o.Key == "" {
+	// The key is documented with its "=", as in "v=", and is accepted with or
+	// without it.
+	key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(o.Key), "="))
+	lines := r.Header.Values("Accept")
+	if len(lines) == 0 || key == "" {
 		return nil
 	}
-	for mediaRange := range strings.SplitSeq(accept, ",") {
-		for param := range strings.SplitSeq(mediaRange, ";") {
-			if v, ok := strings.CutPrefix(strings.TrimSpace(param), o.Key); ok && v != "" {
-				return []Version{Version(v)}
+	var best string
+	bestQuality := 0.0
+	for _, line := range lines {
+		for mediaRange := range strings.SplitSeq(line, ",") {
+			_, params, err := mime.ParseMediaType(mediaRange)
+			if err != nil || params[key] == "" {
+				continue
+			}
+			quality := 1.0
+			if raw, ok := params["q"]; ok {
+				if quality, err = strconv.ParseFloat(raw, 64); err != nil {
+					continue
+				}
+			}
+			if quality > bestQuality {
+				best, bestQuality = params[key], quality
 			}
 		}
 	}
-	return nil
+	if best == "" {
+		return nil
+	}
+	return []Version{Version(best)}
 }
 
 // extractedVersions runs the configured extractor and drops any empty

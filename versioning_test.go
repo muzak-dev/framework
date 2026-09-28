@@ -437,3 +437,81 @@ func doHeader(t *testing.T, app *App, method, target, header, value string) *htt
 	req.Header.Set(header, value)
 	return doRequest(t, app, req)
 }
+
+// TestMediaTypeVersionParsesAcceptAsAMediaRange is the regression test for
+// the version being read out of Accept by text matching, which took a bare
+// "v=1" for a media range, ignored case, quoting and q, and read only the
+// first line of a header sent as several. A proxy or firewall that parses the
+// header properly would then disagree with the application about which
+// version a request asked for.
+func TestMediaTypeVersionParsesAcceptAsAMediaRange(t *testing.T) {
+	t.Parallel()
+	opts := VersioningOptions{Type: VersioningMediaType, Key: "v="}
+	cases := []struct {
+		name   string
+		accept []string
+		want   Version
+	}{
+		{"plain parameter", []string{"application/json;v=2"}, "2"},
+		{"parameter name is case insensitive", []string{"application/json;V=2"}, "2"},
+		{"quoted value", []string{`application/json;v="2"`}, "2"},
+		{"spaces around the parameter", []string{"application/json ; v=2"}, "2"},
+		{"a bare token is not a media range", []string{"v=1"}, ""},
+		{"a bare token beside a real range", []string{"v=1, application/json;v=2"}, "2"},
+		{"the highest quality wins", []string{"application/json;v=1;q=0.1, application/json;v=2"}, "2"},
+		{"quality wins whatever the order", []string{"application/json;v=2;q=0.1, application/json;v=1"}, "1"},
+		{"an equal quality keeps the order written", []string{"application/json;v=3, application/json;v=2"}, "3"},
+		{"a range refused with q=0 is not chosen", []string{"application/json;v=1;q=0, application/json;v=2;q=0.5"}, "2"},
+		{"only a refused range", []string{"application/json;v=1;q=0"}, ""},
+		{"an unreadable quality is not trusted", []string{"application/json;v=1;q=abc"}, ""},
+		{"every line is read, by quality", []string{"application/json;v=1;q=0.2", "application/json;v=2"}, "2"},
+		{"every line is read, in order", []string{"application/json;v=1", "application/json;v=2"}, "1"},
+		{"no parameter", []string{"application/json"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptestRequest(t, "GET", "/x")
+			for _, line := range tc.accept {
+				req.Header.Add("Accept", line)
+			}
+			got := opts.requestedVersions(req)
+			if tc.want == "" {
+				if got != nil {
+					t.Errorf("requestedVersions(%q) = %v, want none", tc.accept, got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != tc.want {
+				t.Errorf("requestedVersions(%q) = %v, want [%s]", tc.accept, got, tc.want)
+			}
+		})
+	}
+
+	// A key configured without its "=" names the same parameter.
+	bare := VersioningOptions{Type: VersioningMediaType, Key: "v"}
+	if got := bare.requestedVersions(httptestRequest(t, "GET", "/x", "Accept", "application/json;v=4")); len(got) != 1 || got[0] != "4" {
+		t.Errorf("Key %q read %v, want [4]", bare.Key, got)
+	}
+}
+
+// TestHeaderVersionWithSeveralLinesMatchesNothing is the regression test for
+// a version header sent on two lines being read from the first only, which a
+// proxy that reads the last line would disagree with. HTTP defines the two
+// lines as one comma-separated list, and that list names no version.
+func TestHeaderVersionWithSeveralLinesMatchesNothing(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.Versioning = VersioningOptions{Type: VersioningHeader, Header: "X-API-Version"}
+	app := New(opts)
+	app.Get("/cats", versionHandler("1"), WithVersion("1"))
+	app.Get("/cats", versionHandler("2"), WithVersion("2"))
+	mustBuild(t, app)
+
+	req := httptest.NewRequest("GET", "/cats", nil)
+	req.Header.Add("X-Api-Version", "2")
+	req.Header.Add("X-Api-Version", "1")
+	assertStatus(t, doRequest(t, app, req), http.StatusNotFound)
+
+	assertJSON(t, doHeader(t, app, "GET", "/cats", "X-Api-Version", "2"), `{"v":"2"}`)
+}

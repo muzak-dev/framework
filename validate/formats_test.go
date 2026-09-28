@@ -388,3 +388,43 @@ func TestIPRulesRefuseAZone(t *testing.T) {
 		t.Errorf("IPv6().Check(fe80::1) = %v, want a link-local address without a zone accepted", err)
 	}
 }
+
+// runes spells a string from code points, so that the characters below are
+// named by number and this file stays plain ASCII.
+func runes(codes ...rune) string { return string(codes) }
+
+// TestEmailRefusesHiddenCharacters pins both sides of the email rule: nothing
+// invisible gets through, and addresses in other scripts, lookalikes
+// included, still do.
+func TestEmailRefusesHiddenCharacters(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"admin" + runes(0x202e) + "@example.com",                   // right-to-left override
+		"a" + runes(0x0085) + "b@example.com",                      // next line, a C1 control
+		"a" + runes(0x200b) + "@example.com",                       // zero-width space
+		"a" + runes(0x200d) + "@example.com",                       // zero-width joiner
+		"a" + runes(0x00ad) + "b@example.com",                      // soft hyphen
+		"a" + runes(0xfeff) + "@example.com",                       // byte order mark
+		"a" + runes(0x2066) + "b" + runes(0x2069) + "@example.com", // directional isolates
+		"a" + runes(0x2028) + "b@example.com",                      // line separator
+		"a" + runes(0x2029) + "b@example.com",                      // paragraph separator
+		"a@exam" + runes(0x200b) + "ple.com",                       // hidden in the domain
+		"a" + runes(0x7f) + "@example.com",                         // delete, a C0 control
+	} {
+		if err := String().Email().Check(value); err == nil || err.Error() != "must be a valid email address" {
+			t.Errorf("Email().Check(%q) = %v, want it refused", value, err)
+		}
+	}
+	for _, value := range []string{
+		"ada@muzak.dev",
+		"first.last+tag@example.co.uk",
+		"jos" + runes(0xe9) + "@example.com",    // accented Latin
+		"adm" + runes(0x0456) + "n@example.com", // Cyrillic i, a lookalike
+		runes(0x7528, 0x6237) + "@" + runes(0x4f8b, 0x5b50) + "." + runes(0x5e7f, 0x544a),      // Chinese, local part and domain
+		runes(0x0627, 0x0644, 0x0645, 0x0633, 0x062a, 0x062e, 0x062f, 0x0645) + "@example.com", // Arabic, right to left
+	} {
+		if err := String().Email().Check(value); err != nil {
+			t.Errorf("Email().Check(%q) = %v, want it accepted", value, err)
+		}
+	}
+}

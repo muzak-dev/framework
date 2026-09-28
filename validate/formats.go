@@ -147,6 +147,20 @@ func hasControl(value string) bool {
 	return false
 }
 
+// hasHiddenRune reports whether a value holds a character that renders as
+// nothing, or as something other than itself: a control character (Unicode
+// category Cc, which includes the C1 controls), a format character (Cf, which
+// includes the bidirectional overrides and the zero-width characters), or a
+// line or paragraph separator.
+func hasHiddenRune(value string) bool {
+	for _, r := range value {
+		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return true
+		}
+	}
+	return false
+}
+
 // isAlpha reports whether every character is a letter.
 //
 // Letters are Unicode letters, not the twenty-six of English, so a name in any

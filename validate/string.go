@@ -194,6 +194,19 @@ func (r *StringRules) Len(n int) *StringRules {
 // The address is parsed with net/mail, so what passes here is what a mail
 // library will accept. It deliberately does not try to prove the mailbox
 // exists, which only sending to it can establish.
+//
+// Characters nobody can see are refused before the parser is consulted:
+// control characters, including the C1 set such as U+0085, format characters
+// such as the bidirectional override U+202E and the zero-width space U+200B,
+// and the line and paragraph separators U+2028 and U+2029. net/mail accepts
+// them, and an address holding one displays as a different address from the
+// one mail is sent to, or splits a line in whatever it is written into.
+//
+// Letters from other scripts are accepted, because internationalised
+// addresses are real addresses. That includes letters that look like Latin
+// ones, so "adm\u0456n@example.com" passes although it renders as a familiar
+// name: telling a lookalike from a legitimate address in another script is a
+// policy about who may register what, not a question of syntax.
 func (r *StringRules) Email() *StringRules {
 	return r.add(step[string]{kind: kindEmail})
 }
@@ -649,6 +662,9 @@ func applyStringStep(s *step[string], value *string) error {
 			return fmt.Errorf("must be exactly %d %s", s.n, plural(s.n, "character"))
 		}
 	case kindEmail:
+		if hasHiddenRune(*value) {
+			return errors.New("must be a valid email address")
+		}
 		address, err := mail.ParseAddress(*value)
 		if err != nil || address.Address != *value {
 			return errors.New("must be a valid email address")

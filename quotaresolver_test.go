@@ -216,3 +216,53 @@ func TestQuotaResolverAfterDependencies(t *testing.T) {
 	client.Get("/thing").AssertStatus(http.StatusOK)
 	client.Get("/thing").AssertStatus(http.StatusTooManyRequests)
 }
+
+// A resolver's quotas are held to the same rules as static ones, because where
+// a quota came from decides nothing about how its name is stored: a colon or a
+// NUL in it collides with another quota's storage key, and a name used twice in
+// one policy counts every request once per copy against one counter.
+func TestQuotaResolverRejectsAnUnstorableOrRepeatedName(t *testing.T) {
+	q := func(name string) muzak.Quota { return muzak.Quota{Name: name, Window: time.Minute, Limit: 2} }
+	tests := []struct {
+		name   string
+		static []muzak.Quota
+		quotas []muzak.Quota
+	}{
+		{name: "a colon", quotas: []muzak.Quota{q("plan:pro")}},
+		{name: "a NUL", quotas: []muzak.Quota{q("plan\x00pro")}},
+		{name: "a space", quotas: []muzak.Quota{q("plan pro")}},
+		{name: "a repeated name", quotas: []muzak.Quota{q("plan"), q("plan")}},
+		{name: "a name a static quota has", static: []muzak.Quota{q("plan")}, quotas: []muzak.Quota{q("plan")}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := resolverApp(t, muzak.RateLimitOptions{
+				Tracker: fixedTracker("client"),
+				Quotas:  test.static,
+				Resolver: func(*muzak.Context) ([]muzak.Quota, error) {
+					return test.quotas, nil
+				},
+			})
+			testclient.New(t, app).Get("/thing").AssertStatus(http.StatusInternalServerError)
+		})
+	}
+}
+
+// Names that are valid, distinct and alongside a static quota count normally,
+// each request once per quota.
+func TestQuotaResolverAcceptsDistinctTokenNames(t *testing.T) {
+	app := resolverApp(t, muzak.RateLimitOptions{
+		Tracker: fixedTracker("client"),
+		Quotas:  []muzak.Quota{{Name: "floor", Window: time.Minute, Limit: 10}},
+		Resolver: func(*muzak.Context) ([]muzak.Quota, error) {
+			return []muzak.Quota{
+				{Name: "plan-pro", Window: time.Minute, Limit: 2},
+				{Name: "burst.1", Window: time.Minute, Limit: 5},
+			}, nil
+		},
+	})
+	client := testclient.New(t, app)
+	client.Get("/thing").AssertStatus(http.StatusOK)
+	client.Get("/thing").AssertStatus(http.StatusOK)
+	client.Get("/thing").AssertStatus(http.StatusTooManyRequests)
+}

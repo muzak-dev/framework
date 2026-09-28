@@ -476,26 +476,13 @@ func newRateLimitConfig(opts RateLimitOptions, quotas []Quota) (*rateLimitConfig
 	seen := make(map[string]struct{}, len(quotas))
 	var policy strings.Builder
 	for _, quota := range quotas {
-		if quota.Name == "" {
-			return nil, errors.New("a quota needs a name, because the name is the namespace its counters are stored under")
-		}
-		if !isHTTPToken(quota.Name) {
-			// The name is reported to clients and stored as part of a key, so
-			// one carrying a separator or a control character is refused here
-			// rather than escaped later.
-			return nil, fmt.Errorf("quota name %q is not a valid token", quota.Name)
+		if err := checkQuota(quota); err != nil {
+			return nil, err
 		}
 		if _, taken := seen[quota.Name]; taken {
 			return nil, fmt.Errorf("quota %q is declared twice in one policy", quota.Name)
 		}
 		seen[quota.Name] = struct{}{}
-		if quota.Window <= 0 {
-			return nil, fmt.Errorf("quota %q needs a positive window, not %s", quota.Name, quota.Window)
-		}
-		if quota.Limit <= 0 {
-			return nil, fmt.Errorf("quota %q needs a positive limit, not %d; a route that allows nothing should not be registered",
-				quota.Name, quota.Limit)
-		}
 		if policy.Len() > 0 {
 			policy.WriteString(", ")
 		}
@@ -513,6 +500,33 @@ func newRateLimitConfig(opts RateLimitOptions, quotas []Quota) (*rateLimitConfig
 		headers:           !opts.DisableHeaders,
 		afterDependencies: opts.AfterDependencies,
 	}, nil
+}
+
+// checkQuota reports whether one quota can be enforced, for a quota declared
+// when the application is built and for one a resolver returns at run time
+// alike, so that where a quota came from decides nothing about what it may
+// say.
+//
+// The name is reported to clients and stored as part of a key, so one carrying
+// a separator or a control character is refused rather than escaped: a colon
+// in it makes the key the storage recipe in [RateLimitStorage] builds equal to
+// that of another quota with a different name and a different client, and a
+// NUL does the same to the in-process storage's key.
+func checkQuota(quota Quota) error {
+	if quota.Name == "" {
+		return errors.New("a quota needs a name, because the name is the namespace its counters are stored under")
+	}
+	if !isHTTPToken(quota.Name) {
+		return fmt.Errorf("quota name %q is not a valid token", quota.Name)
+	}
+	if quota.Window <= 0 {
+		return fmt.Errorf("quota %q needs a positive window, not %s", quota.Name, quota.Window)
+	}
+	if quota.Limit <= 0 {
+		return fmt.Errorf("quota %q needs a positive limit, not %d; a route that allows nothing should not be registered",
+			quota.Name, quota.Limit)
+	}
+	return nil
 }
 
 // windowSeconds renders a window for the policy header, where a window shorter
@@ -662,14 +676,22 @@ func (cfg *rateLimitConfig) quotasFor(c *Context) ([]Quota, string, error) {
 		quotas = append(quotas, resolved...)
 	}
 
-	for _, quota := range quotas {
-		if quota.Name == "" || quota.Window <= 0 || quota.Limit <= 0 {
-			// A build-time quota is validated when the application is built.
-			// One that arrives at run time cannot be, so it is checked here
-			// rather than counted under an empty name or a zero window.
-			return nil, "", fmt.Errorf(
-				"muzak: the quota resolver returned an unusable quota %q of %d requests per %s",
-				quota.Name, quota.Limit, quota.Window)
+	// The static quotas were checked when the application was built. What the
+	// resolver returned was not, so it is checked here, rather than counted
+	// under an empty name, a zero window or a name that collides with another
+	// quota's storage keys. A name repeated among them, or repeating a static
+	// one, would count each request once per copy against the same counter, so
+	// a limit of two would refuse the second request.
+	first := len(quotas) - len(resolved)
+	for i := first; i < len(quotas); i++ {
+		if err := checkQuota(quotas[i]); err != nil {
+			return nil, "", fmt.Errorf("muzak: the quota resolver returned an unusable quota: %w", err)
+		}
+		for _, earlier := range quotas[:i] {
+			if earlier.Name == quotas[i].Name {
+				return nil, "", fmt.Errorf("muzak: the quota resolver returned quota %q, which this route already has; "+
+					"a quota name must be unique within one policy", quotas[i].Name)
+			}
 		}
 	}
 

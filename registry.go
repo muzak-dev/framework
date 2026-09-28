@@ -40,6 +40,14 @@ type liveRegistry[T comparable] struct {
 	keyOf  map[T]string
 	perKey map[string]int
 
+	// reserved and perKeyReserved count the entries a caller has promised to
+	// add and has not added yet, which is the interval between deciding to
+	// answer a handshake and the connection existing to be recorded. They
+	// count against both limits like entries do, so a second handshake that
+	// arrives in that interval sees the room the first one is about to take.
+	reserved       int
+	perKeyReserved map[string]int
+
 	draining bool
 	// drained is closed by the last entry to go, which is what a shutdown
 	// waits on. It is a channel rather than a wait group because a shutdown
@@ -86,13 +94,72 @@ func (g *liveRegistry[T]) admitsLocked(key string) admission {
 	switch {
 	case g.draining:
 		return registryDraining
-	case g.limit > 0 && len(g.entries) >= g.limit:
+	case g.limit > 0 && len(g.entries)+g.reserved >= g.limit:
 		return registryFull
-	case g.perKeyLimit > 0 && key != "" && g.perKey[key] >= g.perKeyLimit:
+	case g.perKeyLimit > 0 && key != "" && g.perKey[key]+g.perKeyReserved[key] >= g.perKeyLimit:
 		return registryKeyFull
 	default:
 		return admitted
 	}
+}
+
+// reserve takes room for an entry that is about to be added, reporting why it
+// was refused when there is none. Whoever reserves must end the reservation
+// with either [liveRegistry.addReserved] or [liveRegistry.unreserve].
+//
+// It exists for a caller whose entry cannot be added until something happens
+// that cannot be taken back. A WebSocket connection is only recorded once it
+// has been upgraded, and the upgrade tells the peer it succeeded, so counting
+// it afterwards would leave a window in which the peer knows it is connected
+// and the register does not, and a handshake arriving in that window would be
+// admitted past a limit the first one had filled.
+func (g *liveRegistry[T]) reserve(key string) admission {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if refused := g.admitsLocked(key); refused != admitted {
+		return refused
+	}
+	g.reserved++
+	if g.perKeyLimit > 0 && key != "" {
+		if g.perKeyReserved == nil {
+			g.perKeyReserved = make(map[string]int)
+		}
+		g.perKeyReserved[key]++
+	}
+	return admitted
+}
+
+// unreserve gives back room taken by [liveRegistry.reserve] for an entry that
+// is not going to be added.
+func (g *liveRegistry[T]) unreserve(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.unreserveLocked(key)
+}
+
+func (g *liveRegistry[T]) unreserveLocked(key string) {
+	g.reserved--
+	if g.perKeyLimit > 0 && key != "" {
+		if g.perKeyReserved[key] <= 1 {
+			delete(g.perKeyReserved, key)
+		} else {
+			g.perKeyReserved[key]--
+		}
+	}
+}
+
+// addReserved records an entry in the room [liveRegistry.reserve] took for it,
+// which is given up whether the entry is recorded or not. The only reason it
+// can refuse is that the application began shutting down in between.
+func (g *liveRegistry[T]) addReserved(v T, key string) admission {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.unreserveLocked(key)
+	if g.draining {
+		return registryDraining
+	}
+	g.recordLocked(v, key)
+	return admitted
 }
 
 // add records a new entry, reporting why it was refused when the application
@@ -110,6 +177,12 @@ func (g *liveRegistry[T]) add(v T, key string) admission {
 	if refused := g.admitsLocked(key); refused != admitted {
 		return refused
 	}
+	g.recordLocked(v, key)
+	return admitted
+}
+
+// recordLocked holds an entry, under the key it counts against.
+func (g *liveRegistry[T]) recordLocked(v T, key string) {
 	if g.entries == nil {
 		g.entries = make(map[T]struct{})
 	}
@@ -122,7 +195,6 @@ func (g *liveRegistry[T]) add(v T, key string) admission {
 		g.keyOf[v] = key
 		g.perKey[key]++
 	}
-	return admitted
 }
 
 // remove forgets an entry whose handler has finished, and tells a waiting

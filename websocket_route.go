@@ -570,22 +570,32 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 			return nil, err
 		}
 	}
-	// The per-client key is resolved once here and reused for both the
-	// pre-upgrade check and the post-upgrade recording below, so the same
-	// client is counted against the same budget in both places.
-	connKey, err := a.admitWebSocket(c)
+	// Room is taken now, not when the connection is recorded, because the
+	// upgrade tells the peer it is connected and a second handshake arriving
+	// before the first is counted would be admitted past a limit the first had
+	// filled. The key is resolved once and kept for the recording below, so
+	// the same client is counted against the same budget in both places.
+	connKey, err := a.admitWebSocket(c, true)
 	if err != nil {
 		return nil, err
 	}
+	reserved := true
+	defer func() {
+		if reserved {
+			a.websockets.unreserve(connKey)
+		}
+	}()
 	subprotocol := wsSubprotocol(c.r, cfg.opts.Subprotocols)
 	conn, err := a.upgrade(c, cfg, accept, subprotocol)
 	if err != nil {
 		return nil, err
 	}
-	if a.websockets.add(conn, connKey) != admitted {
+	// Recording the connection gives the room back, whether or not it is kept.
+	reserved = false
+	if a.websockets.addReserved(conn, connKey) != admitted {
 		// coverage: this is the losing side of a race between a handshake and
-		// a shutdown or a full register, narrowed to the microseconds between
-		// the check above and the upgrade, so it is reasoned about rather than
+		// a shutdown, narrowed to the microseconds between the reservation
+		// above and the upgrade, so it is reasoned about rather than
 		// provoked. The connection is told to go away rather than left
 		// unaccounted for; there is no response left to refuse it with by now.
 		// It is not waited on for a close frame of its own, because nothing
@@ -610,16 +620,24 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 // returns the key the connection will be counted under.
 //
 // Refusing before the upgrade is what lets a client shut out by a draining or
-// a full server read an ordinary error response. It is only a check: the
-// connection is counted when it is recorded, under the register's own lock,
+// a full server read an ordinary error response. With reserve false it is only
+// a check, which is enough to turn a handshake away early. With reserve true
+// it takes the room the connection will occupy, under the register's own lock,
 // which is what keeps two handshakes arriving together from both passing a
-// limit of one.
-func (a *App) admitWebSocket(c *Context) (string, error) {
+// limit of one; the caller then owes the register either the connection or the
+// room back.
+func (a *App) admitWebSocket(c *Context, reserve bool) (string, error) {
 	connKey, err := perClientKey(c, a.websockets.perKeyLimit)
 	if err != nil {
 		return "", err
 	}
-	switch a.websockets.admits(connKey) {
+	var verdict admission
+	if reserve {
+		verdict = a.websockets.reserve(connKey)
+	} else {
+		verdict = a.websockets.admits(connKey)
+	}
+	switch verdict {
 	case registryDraining:
 		return "", errWSShuttingDown
 	case registryFull:
@@ -654,7 +672,7 @@ func (a *App) refuseWebSocket(c *Context, cfg *wsConfig) error {
 	if err := cfg.checkOrigin(c.r); err != nil {
 		return err
 	}
-	_, err := a.admitWebSocket(c)
+	_, err := a.admitWebSocket(c, false)
 	return err
 }
 

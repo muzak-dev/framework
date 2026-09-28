@@ -141,9 +141,10 @@ func (f failingSource) Lookup(string) (string, bool) { return "", false }
 // Each exported field is read from the variable named by its env tag, falling
 // back to the field name upper-cased with underscores between words. A default
 // tag supplies the value used when no source holds the variable, and
-// required:"true" turns an absent variable into an error. Field types are
-// converted with the same rules the request binder uses, so strings, booleans,
-// numbers, durations, slices and any [encoding.TextUnmarshaler] all work:
+// required:"true" turns an absent or empty variable into an error. Field
+// types are converted with the same rules the request binder uses, so strings,
+// booleans, numbers, durations, slices and any [encoding.TextUnmarshaler] all
+// work:
 //
 //	type Settings struct {
 //		AppName      string `env:"APP_NAME" default:"Awesome API"`
@@ -252,12 +253,21 @@ func (l *configLoader) assign(field reflect.StructField, name string, target ref
 		l.secretNames[name] = true
 	}
 	raw, found := l.lookup(name)
+	required := field.Tag.Get(tagRequired) == "true"
+	if required && found && raw == "" {
+		// A variable that is set to nothing is what a Compose or Kubernetes
+		// expansion of an unset one produces, so "API_KEY=" must not satisfy a
+		// setting that exists to be supplied: an empty signing key or token
+		// would load without a word. Anything else, a default included,
+		// treats it as absent.
+		found = false
+	}
 	if !found {
 		if def, hasDefault := field.Tag.Lookup(tagDefault); hasDefault {
 			raw = def
 		} else {
-			if field.Tag.Get(tagRequired) == "true" {
-				*problems = append(*problems, fmt.Errorf("muzak: %s is required but was not set in %s", name, l.sourceNames()))
+			if required {
+				*problems = append(*problems, fmt.Errorf("muzak: %s is required but was not set, or is empty, in %s", name, l.sourceNames()))
 			}
 			return
 		}

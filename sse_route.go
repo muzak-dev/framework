@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -88,6 +89,15 @@ type SSEOptions struct {
 	// goroutine, a connection and a growing socket buffer until something
 	// gives up, and this is what gives up. A negative value removes it, which
 	// is only appropriate when something else imposes one.
+	//
+	// It is enforced through the response's write deadline, which a response
+	// writer wrapped by middleware reaches only if every wrapper implements
+	// Unwrap() http.ResponseWriter. A stream whose response cannot carry
+	// deadlines is still served, because a writer supplied by a test cannot
+	// either, but its timeout is not enforced and the first such stream on a
+	// route logs a warning saying so. The bound covers one write: it says
+	// nothing about how long a stream may last, which is set by the client, by
+	// the handler and by [SSEOptions.MaxStreams] and MaxStreamsPerIP.
 	WriteTimeout time.Duration
 
 	// Retry is the reconnection delay advertised to the client at the start of
@@ -205,6 +215,10 @@ type SSEHandler[In, Out any] func(ctx *Context, in In, stream *SSEStream[Out]) e
 // sseConfig is an event stream route's resolved configuration.
 type sseConfig struct {
 	opts SSEOptions
+	// noDeadlines makes the warning about a response that cannot carry write
+	// deadlines a once-per-route one: it is the same fact for every stream the
+	// route serves, and a line for each would bury it.
+	noDeadlines sync.Once
 }
 
 // SSE registers a server-sent events handler for GET requests at the given
@@ -388,6 +402,17 @@ func (a *App) acceptSSE(c *Context, cfg *sseConfig) (*sseStream, error) {
 		stream.finish()
 		a.streams.remove(stream)
 		return nil, err
+	}
+	if cfg.opts.WriteTimeout > 0 && !stream.carriesDeadlines() {
+		// The write timeout is the bound that keeps a client that has stopped
+		// reading from pinning this stream, and it can only be enforced through
+		// the response's write deadline. Streaming without it works until the
+		// first such client, so this is the one moment anybody is told.
+		cfg.noDeadlines.Do(func() {
+			a.logger.WarnContext(c.Context(), "muzak: an event stream's response cannot carry write deadlines, so its write timeout is not enforced; a client that stops reading holds its stream until the server shuts down. A middleware that wraps the response writer must implement Unwrap() http.ResponseWriter",
+				slog.String("route", c.route.Path),
+				slog.String("writer", fmt.Sprintf("%T", innermostWriter(c.w))))
+		})
 	}
 	if cfg.opts.KeepAlive > 0 {
 		go stream.keepalive(cfg.opts.KeepAlive)

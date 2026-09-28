@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -254,4 +255,63 @@ func TestSSEOpenRefusesAStreamThatAlreadyEnded(t *testing.T) {
 		t.Error("the header of a stream that had already ended was written")
 	}
 	stream.finish()
+}
+
+// bareWriter is what a good deal of third-party middleware wraps a response in:
+// it forwards a flush, so the stream can be pushed to the client, and has no
+// Unwrap, so nothing behind it can be reached.
+type bareWriter struct{ http.ResponseWriter }
+
+func (w bareWriter) Flush() { w.ResponseWriter.(http.Flusher).Flush() }
+
+func TestSSEWarnsWhenItsWriteTimeoutCannotBeEnforced(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		wrap    bool
+		timeout time.Duration
+		warns   bool
+	}{
+		{"deadlines reachable", false, 0, false},
+		{"deadlines unreachable", true, 0, true},
+		{"deadlines unreachable and no timeout wanted", true, -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logger, logs := captureLogger(t)
+			opts := quietOptions()
+			opts.Logger = logger
+			app := New(opts)
+			if tc.wrap {
+				app.Use(func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						next.ServeHTTP(bareWriter{w}, r)
+					})
+				})
+			}
+			app.SSE("/stream", streamItems("one"), WithSSE(SSEOptions{WriteTimeout: tc.timeout}))
+			mustBuild(t, app)
+			srv := startSSEServer(t, app, false)
+
+			// Two streams: the warning is for the route, not for every client.
+			for range 2 {
+				reader, _, err := SSEDial(t.Context(), srv.URL+"/stream", SSEDialOptions{HTTPClient: srv.Client()})
+				if err != nil {
+					t.Fatalf("SSEDial() = %v", err)
+				}
+				if _, err := reader.Next(t.Context()); err != nil {
+					t.Fatalf("Next() = %v", err)
+				}
+				reader.Close()
+			}
+
+			const warning = "cannot carry write deadlines"
+			switch got := strings.Count(logs.String(), warning); {
+			case tc.warns && got != 1:
+				t.Errorf("the warning was logged %d times, want once:\n%s", got, logs.String())
+			case !tc.warns && got != 0:
+				t.Errorf("an unneeded warning was logged:\n%s", logs.String())
+			}
+		})
+	}
 }

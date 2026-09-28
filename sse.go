@@ -348,6 +348,28 @@ func (s *sseStream) probeDeadlines() {
 	s.deadlines = s.rc.SetWriteDeadline(time.Time{}) == nil
 }
 
+// carriesDeadlines reports whether the response accepts write deadlines, which
+// is what every bound on a write is made of.
+func (s *sseStream) carriesDeadlines() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deadlines
+}
+
+// innermostWriter follows a response writer's Unwrap chain to its end, which is
+// the writer that holds the connection, or the one that stops the chain short of
+// it.
+func innermostWriter(w http.ResponseWriter) http.ResponseWriter {
+	for range maxWriterChain {
+		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		w = unwrapper.Unwrap()
+	}
+	return w
+}
+
 // sseFlushable reports whether the response can be pushed to the client.
 //
 // The chain is walked here rather than asked through [http.ResponseController]
@@ -360,13 +382,7 @@ func (s *sseStream) probeDeadlines() {
 // broken streaming for every handler in the application, and no check here
 // could tell the two apart.
 func sseFlushable(w http.ResponseWriter) bool {
-	for range maxWriterChain {
-		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
-		if !ok {
-			break
-		}
-		w = unwrapper.Unwrap()
-	}
+	w = innermostWriter(w)
 	// Both spellings are accepted, for the same reason the controller accepts
 	// both: the newer one reports the write failures a flush can run into, and
 	// the older one is what most writers implement.

@@ -231,24 +231,6 @@ func TestSingletonResolvesOnce(t *testing.T) {
 	}
 }
 
-func TestSingletonCachesItsError(t *testing.T) {
-	t.Parallel()
-	var calls atomic.Int32
-	app := New(quietOptions())
-	app.Get("/x", okHandler, Singleton(func(ctx *Context) (diValue, error) {
-		calls.Add(1)
-		return diValue{}, NewHTTPError(http.StatusServiceUnavailable, "not today")
-	}))
-	mustBuild(t, app)
-
-	for range 3 {
-		assertStatus(t, do(t, app, "GET", "/x"), http.StatusServiceUnavailable)
-	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("a failing singleton was retried %d times, want it cached after 1", got)
-	}
-}
-
 func TestWithSingletonPublishesAValue(t *testing.T) {
 	t.Parallel()
 	app := New(quietOptions(), WithSingleton(diValue{Text: "prebuilt"}))

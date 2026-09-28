@@ -1,9 +1,11 @@
 package muzak
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
+	"sync/atomic"
 )
 
 // Guard is a dependency that validates or authorizes a request without
@@ -25,23 +27,78 @@ type provider struct {
 	typ     reflect.Type
 	resolve func(*Context) (any, error)
 
-	// once, val and err are used only by singletons. A singleton's value is
-	// computed on the first request that needs it and shared from then on;
-	// sync.Once supplies the happens-before edge that makes val and err safe
-	// to read from other goroutines afterwards.
-	once *sync.Once
-	val  any
-	err  error
+	// single is set only for a [Singleton] and is nil for every other
+	// provider, so the per-request path pays one nil check for the feature.
+	// Every route that inherits the singleton holds the same *provider and so
+	// shares one cached value.
+	single *singleton
 }
 
-// get returns the dependency's value for this request, resolving a singleton
-// at most once for the lifetime of the application.
+// singleton is the shared state behind a lazily resolved [Singleton].
+//
+// It deliberately does not use sync.Once. Once marks itself done even when the
+// function inside it panics or fails, which turned a single transient failure,
+// or a first client that simply disconnected, into an error every later
+// request received for the life of the process. Here only a successful value
+// is kept: done is set after val is written, so a reader that observes done
+// through the atomic load is guaranteed to observe val as well, and the fast
+// path after the first success is a single atomic load with no lock.
+type singleton struct {
+	mu   sync.Mutex
+	done atomic.Bool
+	val  any
+}
+
+// get returns the dependency's value for this request. A plain provider runs
+// every time. A singleton returns its cached value once one has been computed
+// and otherwise resolves under the mutex, so concurrent first requests do not
+// stampede the provider and a successful value is computed exactly once.
 func (p *provider) get(c *Context) (any, error) {
-	if p.once == nil {
+	if p.single == nil {
 		return p.resolve(c)
 	}
-	p.once.Do(func() { p.val, p.err = p.resolve(c) })
-	return p.val, p.err
+	if p.single.done.Load() {
+		return p.single.val, nil
+	}
+	return p.resolveSingleton(c)
+}
+
+// resolveSingleton is the slow path of get for a singleton that has not yet
+// produced a value. It is kept separate so that get stays small enough to
+// inline on the per-request path.
+func (p *provider) resolveSingleton(c *Context) (any, error) {
+	s := p.single
+	s.mu.Lock()
+	// The deferred unlock is what lets a panicking provider propagate to the
+	// current request's recovery middleware without leaving the lock held;
+	// done is still false, so the next request tries again.
+	defer s.mu.Unlock()
+	if s.done.Load() {
+		// Another request resolved it while this one waited for the lock.
+		return s.val, nil
+	}
+	v, err := p.resolveDetached(c)
+	if err != nil {
+		// Not cached: a failure may be transient, and caching it would let one
+		// unlucky or hostile request fail every request after it.
+		return nil, err
+	}
+	s.val = v
+	s.done.Store(true)
+	return v, nil
+}
+
+// resolveDetached runs the provider with a request whose context carries the
+// current request's values but not its cancellation or deadline. The value it
+// produces outlives the request that happened to trigger it, so the client
+// that request came from disconnecting must not be able to fail the
+// construction for everyone else. The original request is restored before
+// returning, including when the provider panics.
+func (p *provider) resolveDetached(c *Context) (any, error) {
+	original := c.r
+	c.r = original.WithContext(context.WithoutCancel(original.Context()))
+	defer func() { c.r = original }()
+	return p.resolve(c)
 }
 
 // WithDependencies attaches guard dependencies to an application, a router or
@@ -121,13 +178,23 @@ func Needs[T any](provide func(ctx *Context) (T, error)) SharedOption {
 // template set. The provider runs on the first request that needs the value,
 // receiving that request's [Context]; it must not retain that Context, read
 // request-specific state from it, or return a value that is unsafe for
-// concurrent use, because every later request shares the same value. An error
-// from the provider is cached too, so a failing singleton fails every request
-// rather than being retried.
+// concurrent use, because every later request shares the same value.
+//
+// Only a successful value is cached. An error, or a panic, fails the request
+// that triggered it (a panic reaches the recovery middleware as a 500 like any
+// other) and the next request that needs the value runs the provider again.
+// Concurrent first requests wait for one another rather than running the
+// provider in parallel, so a value is still constructed at most once. While
+// the provider runs, [Context.Context] returns a context that keeps the
+// triggering request's values but not its cancellation or deadline: the value
+// outlives that request, so its client disconnecting must not fail the
+// construction. A provider that does I/O should therefore apply its own
+// timeout with [context.WithTimeout], because nothing else will bound it and
+// every request needing the value waits while it runs.
 func Singleton[T any](provide func(ctx *Context) (T, error)) SharedOption {
 	p := &provider{
-		typ:  reflect.TypeFor[T](),
-		once: new(sync.Once),
+		typ:    reflect.TypeFor[T](),
+		single: new(singleton),
 		resolve: func(c *Context) (any, error) {
 			v, err := provide(c)
 			if err != nil {

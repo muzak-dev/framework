@@ -124,6 +124,17 @@ type SSEEvent[Out any] struct {
 // used after the handler returns. A send a producer goroutine still has in
 // progress at that moment writes nothing and reports [ErrSSEStreamEnded].
 //
+// Nothing limits how long a stream lasts. [SSEOptions.WriteTimeout] bounds one
+// write and the keepalive bounds how long a proxy sees silence, so a client
+// that keeps reading holds its stream, and its slot in [SSEOptions.MaxStreams]
+// and [SSEOptions.MaxStreamsPerIP], for as long as its handler runs. That suits
+// the streams that are meant to be open for hours, and a handler that wants a
+// ceiling, to shed clients that never reconnect or to pick up a rotated
+// credential, sets one itself: derive a context with a timeout from
+// [SSEStream.Context] and return when it ends. A browser's EventSource
+// reconnects on its own and resumes from the last event identifier, so ending a
+// stream on purpose costs it a moment.
+//
 // # Failure
 //
 // A stream is single use. The first failure ends it, and every later send

@@ -124,6 +124,12 @@ type frontend struct {
 	// kind names the mount in a message, so that a problem with a static file
 	// mount is not reported as a problem with a frontend.
 	kind string
+
+	// sandbox serves a document a browser would run, such as HTML or SVG,
+	// under a sandboxing Content-Security-Policy. A static mount sets it
+	// unless told otherwise, because its directory may hold files a client
+	// wrote; a frontend's documents are the application itself.
+	sandbox bool
 }
 
 // Frontend serves a built frontend at path.
@@ -518,12 +524,24 @@ func (f *frontend) write(c *Context, files fs.FS, name string, status int) {
 		content = bytes.NewReader(buffered)
 	}
 
+	header := c.w.Header()
+	// The type comes from the extension alone. ServeContent would otherwise
+	// sniff a file with no extension it knows, and a directory of uploads
+	// stored under generated names then serves whatever markup a client wrote
+	// as text/html, which nosniff cannot undo because it is the server that
+	// declared it. A file the extension says nothing about is only bytes.
+	setIfAbsent(header, "Content-Type", contentTypeFor(name))
+	if f.sandbox && isActiveContent(header.Get("Content-Type")) {
+		// Added rather than set: a browser enforces every policy it is sent,
+		// so a policy an earlier middleware chose is kept, and this one can
+		// only make it stricter.
+		header.Add("Content-Security-Policy", "sandbox")
+	}
+
 	if status != http.StatusOK {
 		// ServeContent always writes 200, and it sets its headers as it does,
 		// so writing the status first would send the body with none of them.
 		// An error page is described here instead.
-		header := c.w.Header()
-		setIfAbsent(header, "Content-Type", contentTypeFor(name))
 		header.Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 		c.w.WriteHeader(status)
 		if c.r.Method != http.MethodHead {
@@ -531,19 +549,37 @@ func (f *frontend) write(c *Context, files fs.FS, name string, status int) {
 		}
 		return
 	}
-	// ServeContent picks the content type from the extension, answers a range
-	// request, and turns If-Modified-Since into a 304 where the filesystem
-	// records a modification time.
+	// ServeContent answers a range request, and turns If-Modified-Since into a
+	// 304 where the filesystem records a modification time.
 	http.ServeContent(c.w, c.r, name, info.ModTime(), content)
 }
 
-// contentTypeFor names the media type of a file from its extension, which is
-// the same rule net/http applies when it serves one.
+// contentTypeFor names the media type of a file from its extension, and never
+// from its content: a file with no extension, or one the platform's type table
+// does not know, is application/octet-stream, which a browser saves rather
+// than renders.
 func contentTypeFor(name string) string {
 	if declared := mime.TypeByExtension(path.Ext(name)); declared != "" {
 		return declared
 	}
 	return "application/octet-stream"
+}
+
+// isActiveContent reports whether a media type is one a browser runs when it
+// is opened directly: HTML, and XML in any form, which covers SVG and XHTML
+// and anything that can carry an XSLT stylesheet or a script element.
+//
+// It is decided from the media type rather than the extension, because the
+// type table behind [mime.TypeByExtension] comes partly from the platform and
+// may give an unexpected extension one of these types.
+func isActiveContent(contentType string) bool {
+	media, _, _ := strings.Cut(contentType, ";")
+	media = strings.ToLower(strings.TrimSpace(media))
+	switch media {
+	case "text/html", "text/xml", "text/xsl", "application/xml":
+		return true
+	}
+	return strings.HasSuffix(media, "+xml")
 }
 
 // frontendFor finds the frontend that should answer a request path, which is
@@ -654,6 +690,21 @@ type StaticOptions struct {
 	// ".well-known" directory. See [FrontendOptions.AllowDotfiles] for what
 	// relaxing it costs.
 	AllowDotfiles bool
+
+	// AllowActiveContent serves HTML, SVG, XHTML and other XML files as
+	// ordinary documents. By default each is sent with
+	// "Content-Security-Policy: sandbox", so a browser that opens one directly
+	// shows it in an isolated origin with scripts, forms and plugins turned
+	// off. An image referenced from a page is not affected, because a policy
+	// on an image does nothing.
+	//
+	// Relaxing it costs whatever a client can put in the directory. A mount
+	// over uploads serves an attacker's HTML or SVG from the application's own
+	// origin, where its script reads the visitor's session and calls the API
+	// as them. Turn it on for a directory whose every such file is part of the
+	// site, such as a site of pages served with Index; a single page
+	// application belongs in [Router.Frontend], which does not sandbox.
+	AllowActiveContent bool
 }
 
 // Static serves a directory of files at path.
@@ -671,6 +722,14 @@ type StaticOptions struct {
 // listed, a dotfile is not served unless [StaticOptions.AllowDotfiles] says
 // so, a symbolic link cannot lead out of the directory, and a method other
 // than GET or HEAD on a file that exists is answered 405 rather than served.
+//
+// On both kinds of mount a file's type comes from its extension and never from
+// its content, so a file with no extension is application/octet-stream. One
+// thing differs, because a directory of files may hold files a client wrote:
+// an HTML, SVG or other XML file is served under
+// "Content-Security-Policy: sandbox" unless [StaticOptions.AllowActiveContent]
+// is set, so that markup a client uploaded cannot run script as the
+// application.
 func (r *Router) Static(mountPath string, opts StaticOptions) {
 	if !strings.HasPrefix(mountPath, "/") {
 		r.errs = append(r.errs, fmt.Errorf("muzak: static files at %q: path must begin with %q", mountPath, "/"))
@@ -681,9 +740,10 @@ func (r *Router) Static(mountPath string, opts StaticOptions) {
 		return
 	}
 	r.frontends = append(r.frontends, &frontend{
-		path:  mountPath,
-		index: opts.Index,
-		kind:  "static files",
+		path:    mountPath,
+		index:   opts.Index,
+		kind:    "static files",
+		sandbox: !opts.AllowActiveContent,
 		opts: FrontendOptions{
 			Dir:           opts.Dir,
 			FS:            opts.FS,

@@ -529,9 +529,16 @@
 //
 // Nothing stands in for a path with no file behind it, so a miss is a 404 and
 // stays one, and a directory is served by its index.html only when
-// [StaticOptions.Index] asks. That is the whole difference: reach for Static to
-// publish assets, and for Frontend to serve an application whose routing
-// happens in the browser.
+// [StaticOptions.Index] asks. Reach for Static to publish assets, and for
+// Frontend to serve an application whose routing happens in the browser.
+//
+// Because a directory of files may hold files a client wrote, Static serves an
+// HTML, SVG or other XML file under "Content-Security-Policy: sandbox", so
+// that uploaded markup opened in a browser cannot run script as the
+// application; [StaticOptions.AllowActiveContent] turns that off for a site of
+// pages. On either kind of mount a file's type comes from its extension alone,
+// and a file with no extension is application/octet-stream rather than
+// whatever its first bytes resemble.
 //
 // # What is generated
 //

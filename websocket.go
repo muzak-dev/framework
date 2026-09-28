@@ -269,6 +269,12 @@ type WSConn struct {
 	// to compare against.
 	lastPong monotonicStamp
 
+	// spent counts the frames that carried no message, and spentSince is when
+	// the count began; see [WSConn.chargeFrame]. Both are owned by the half of
+	// the connection that holds readSem.
+	spent      int
+	spentSince time.Time
+
 	// messages bounds how fast the peer may send, and is nil unless
 	// [WSOptions.MessageLimits] asked for a bound. It is written once, before
 	// the handler can reach the connection, and only read afterwards.
@@ -586,6 +592,24 @@ func (c *WSConn) abort(status WSStatus, reason string) error {
 // it and low enough that a dishonest one is cut off.
 const wsMaxFramesPerMessage = 1 << 16
 
+// wsMaxIdleFrames bounds how many pings, pongs and empty fragments a
+// connection may receive in [wsIdleFrameWindow], however many messages
+// complete in between.
+//
+// wsMaxFramesPerMessage starts over with every message, so on its own it lets a
+// peer that completes one empty message per 65535 frames keep the server
+// answering pings for as long as it likes while any message quota sees a
+// single message. These are the frames that cost a read, and for a ping a
+// write, without carrying anything, so they are counted for the life of the
+// connection instead. The limit is the same size as the per message one, which
+// no honest peer comes near: a keepalive sends one ping every few seconds.
+const wsMaxIdleFrames = wsMaxFramesPerMessage
+
+// wsIdleFrameWindow is how long the count of [wsMaxIdleFrames] runs before it
+// starts over, which bounds a peer to about a thousand such frames a second
+// for as long as it cares to keep the connection.
+const wsIdleFrameWindow = time.Minute
+
 // wsReadChunk bounds how much of a frame is committed to memory before the
 // bytes for it have actually arrived.
 //
@@ -616,10 +640,23 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 			return 0, nil, c.abort(WSStatusProtocolError, c.maskingRule())
 		}
 		if header.Opcode.IsControl() {
+			if header.Opcode != wsframe.Close {
+				if err := c.chargeFrame(); err != nil {
+					return 0, nil, err
+				}
+			}
 			if err := c.handleControl(ctx, header); err != nil {
 				return 0, nil, err
 			}
 			continue
+		}
+		if header.Length == 0 && (header.Opcode == wsframe.Continuation || !header.Fin) {
+			// An empty fragment adds nothing to the message it belongs to. An
+			// empty message of a frame's own is a message, which is what
+			// MessageLimits counts, and is not charged here.
+			if err := c.chargeFrame(); err != nil {
+				return 0, nil, err
+			}
 		}
 		if header.Opcode == wsframe.Continuation {
 			if !started {
@@ -659,6 +696,21 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 		return 0, nil, c.abort(WSStatusInvalidFramePayload, "the text message is not valid UTF-8")
 	}
 	return typ, message, nil
+}
+
+// chargeFrame counts a frame that carried no message against the connection's
+// budget, and ends the connection when the budget is spent. The read half must
+// be held.
+func (c *WSConn) chargeFrame() error {
+	now := time.Now()
+	if c.spentSince.IsZero() || now.Sub(c.spentSince) >= wsIdleFrameWindow {
+		c.spentSince, c.spent = now, 0
+	}
+	c.spent++
+	if c.spent > wsMaxIdleFrames {
+		return c.abort(WSStatusPolicyViolation, "too many frames arrived that carried no message")
+	}
+	return nil
 }
 
 // readPayload appends one frame's payload to the message being assembled,

@@ -395,7 +395,9 @@
 //   - A message fragmented endlessly, or interleaved with an endless run of
 //     pings, is closed once too many frames have arrived without one
 //     completing. Neither grows the message, so no size limit would ever catch
-//     them.
+//     them. The pings, pongs and empty fragments are also counted for the life
+//     of the connection, so a peer cannot start the count over by completing
+//     an empty message every so often.
 //   - A write to a peer that has stopped reading gives up after
 //     [WSOptions.WriteTimeout] rather than pinning a goroutine and a buffer.
 //   - The application holds at most [WSOptions.MaxConnections] connections at

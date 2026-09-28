@@ -201,7 +201,9 @@ type WSOptions struct {
 	//
 	// Messages are what is counted, one per message the handler reads, which
 	// bounds the scheduling a chatty peer costs; ReadLimit is what bounds the
-	// bytes. A peer that goes over is closed with
+	// bytes. Pings, pongs and empty fragments are not messages, and a
+	// connection is closed for sending more than 65536 of them in a minute
+	// whatever it does otherwise. A peer that goes over is closed with
 	// [WSStatusPolicyViolation] rather than left connected and ignored,
 	// because a message silently dropped is a protocol nobody can debug. The
 	// count happens after the message has been read, so the limit bounds a

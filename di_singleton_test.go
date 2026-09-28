@@ -113,11 +113,15 @@ func TestSingletonRestoresTheRequestAfterResolving(t *testing.T) {
 
 func TestSingletonConcurrentFirstRequestsConstructOnce(t *testing.T) {
 	t.Parallel()
-	var attempts, successes, inFlight, maxInFlight atomic.Int32
+	var attempts, successes, inFlight, maxInFlight, arrived atomic.Int32
+	release := make(chan struct{})
 	app := New(quietOptions())
 	app.Get("/x", func(ctx *Context, _ Empty) (diOut, error) {
 		return diOut{Text: From[diValue](ctx).Text}, nil
-	}, Singleton(func(*Context) (diValue, error) {
+	}, WithDependencies(func(*Context) error {
+		arrived.Add(1)
+		return nil
+	}), Singleton(func(*Context) (diValue, error) {
 		n := inFlight.Add(1)
 		defer inFlight.Add(-1)
 		for {
@@ -126,10 +130,10 @@ func TestSingletonConcurrentFirstRequestsConstructOnce(t *testing.T) {
 				break
 			}
 		}
-		// Hold the provider long enough for the other requests to pile up
-		// behind it, which is the moment a stampede would happen.
-		time.Sleep(5 * time.Millisecond)
 		if attempts.Add(1) == 1 {
+			// Hold the first attempt until the other requests have piled up
+			// behind it, which is the moment a stampede would happen.
+			<-release
 			return diValue{}, NewHTTPError(http.StatusServiceUnavailable, "warming up")
 		}
 		successes.Add(1)
@@ -139,14 +143,13 @@ func TestSingletonConcurrentFirstRequestsConstructOnce(t *testing.T) {
 
 	const requests = 32
 	var wg sync.WaitGroup
-	var ok, unavailable atomic.Int32
+	var unavailable atomic.Int32
 	for range requests {
 		wg.Go(func() {
 			rec := httptest.NewRecorder()
 			app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
 			switch rec.Code {
 			case http.StatusOK:
-				ok.Add(1)
 			case http.StatusServiceUnavailable:
 				unavailable.Add(1)
 			default:
@@ -154,18 +157,28 @@ func TestSingletonConcurrentFirstRequestsConstructOnce(t *testing.T) {
 			}
 		})
 	}
+	waitFor(t, func() bool { return arrived.Load() == requests }, "every request to reach the singleton")
+	time.Sleep(20 * time.Millisecond)
+	close(release)
 	wg.Wait()
 
-	if got := successes.Load(); got != 1 {
-		t.Errorf("the singleton value was constructed %d times, want 1", got)
-	}
-	if got := attempts.Load(); got != 2 {
-		t.Errorf("the provider ran %d times, want 2: one failure, one success", got)
+	// The failure of the attempt they waited on is shared, rather than every
+	// waiter running the provider again in turn.
+	if got := unavailable.Load(); got < 2 {
+		t.Errorf("%d requests saw the failed attempt, want it shared by the requests waiting on it", got)
 	}
 	if got := maxInFlight.Load(); got != 1 {
-		t.Errorf("%d provider calls overlapped, want them serialized", got)
+		t.Errorf("%d provider calls overlapped, want one attempt at a time", got)
 	}
-	if ok.Load() != requests-1 || unavailable.Load() != 1 {
-		t.Errorf("got %d successes and %d failures, want %d and 1", ok.Load(), unavailable.Load(), requests-1)
+	if got := attempts.Load(); got > 2 {
+		t.Errorf("the provider ran %d times, want at most one failure and one success", got)
+	}
+
+	// The failure was not cached: the next request builds the value, once.
+	for range 3 {
+		assertJSON(t, do(t, app, "GET", "/x"), `{"text":"built"}`)
+	}
+	if got := successes.Load(); got != 1 {
+		t.Errorf("the singleton value was constructed %d times, want 1", got)
 	}
 }

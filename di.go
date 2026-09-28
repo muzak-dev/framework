@@ -2,6 +2,7 @@ package muzak
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -43,16 +44,46 @@ type provider struct {
 // is kept: done is set after val is written, so a reader that observes done
 // through the atomic load is guaranteed to observe val as well, and the fast
 // path after the first success is a single atomic load with no lock.
+//
+// Nor does it hold a lock while the provider runs. It did once, and a provider
+// that failed slowly, a dial to a database that is down, then made every
+// waiting request take the lock in turn and run the provider again, so the
+// k-th request waited k full attempts, long after its client had gone. Now at
+// most one attempt is in flight, every request that arrives while it runs
+// waits for that attempt and shares its outcome, error included, and a waiter
+// whose own request is cancelled stops waiting.
 type singleton struct {
-	mu   sync.Mutex
 	done atomic.Bool
 	val  any
+
+	// mu guards inflight, and is never held while a provider runs.
+	mu       sync.Mutex
+	inflight *singletonCall
 }
+
+// singletonCall is one attempt at resolving a singleton, which the requests
+// that arrive while it runs wait on rather than starting one of their own.
+type singletonCall struct {
+	// finished is closed once the attempt is over; val and err are written
+	// before it is, and read only after.
+	finished chan struct{}
+	val      any
+	err      error
+}
+
+// errSingletonPanicked is what a request that was waiting for a singleton
+// receives when the attempt it waited on panicked. The panic itself belongs to
+// the request whose goroutine ran the provider, which reports it as a 500 with
+// the stack logged; a waiter is failed the same way, but the panic value is
+// not handed to it.
+var errSingletonPanicked = errors.New("muzak: the singleton provider this request waited on panicked; " +
+	"the panic and its stack are logged against the request that ran it")
 
 // get returns the dependency's value for this request. A plain provider runs
 // every time. A singleton returns its cached value once one has been computed
-// and otherwise resolves under the mutex, so concurrent first requests do not
-// stampede the provider and a successful value is computed exactly once.
+// and otherwise joins the attempt in flight or starts one, so concurrent first
+// requests do not stampede the provider and a successful value is computed
+// exactly once.
 func (p *provider) get(c *Context) (any, error) {
 	if p.single == nil {
 		return p.resolve(c)
@@ -66,26 +97,68 @@ func (p *provider) get(c *Context) (any, error) {
 // resolveSingleton is the slow path of get for a singleton that has not yet
 // produced a value. It is kept separate so that get stays small enough to
 // inline on the per-request path.
+//
+// The request that finds no attempt in flight runs the provider itself, on its
+// own goroutine, which is what keeps a panic the provider raises that
+// request's panic, recovered into a 500 like any other. Every request arriving
+// while that runs waits for the attempt's outcome or for its own request to
+// end, whichever comes first. A failure is handed to the waiters of the
+// attempt that produced it and to nobody else: the next request after the
+// attempt is over starts a new one, because a failure may be transient.
 func (p *provider) resolveSingleton(c *Context) (any, error) {
 	s := p.single
 	s.mu.Lock()
-	// The deferred unlock is what lets a panicking provider propagate to the
-	// current request's recovery middleware without leaving the lock held;
-	// done is still false, so the next request tries again.
-	defer s.mu.Unlock()
 	if s.done.Load() {
-		// Another request resolved it while this one waited for the lock.
+		// Another request resolved it while this one took the lock.
+		s.mu.Unlock()
 		return s.val, nil
 	}
+	if call := s.inflight; call != nil {
+		s.mu.Unlock()
+		return call.wait(c)
+	}
+	call := &singletonCall{finished: make(chan struct{})}
+	s.inflight = call
+	s.mu.Unlock()
+
+	returned := false
+	defer func() {
+		if !returned {
+			// The provider panicked. The panic carries on to this request's
+			// recovery; the waiters are failed rather than left waiting.
+			call.err = errSingletonPanicked
+		}
+		s.mu.Lock()
+		s.inflight = nil
+		s.mu.Unlock()
+		close(call.finished)
+	}()
 	v, err := p.resolveDetached(c)
+	returned = true
 	if err != nil {
 		// Not cached: a failure may be transient, and caching it would let one
 		// unlucky or hostile request fail every request after it.
+		call.err = err
 		return nil, err
 	}
+	call.val = v
 	s.val = v
 	s.done.Store(true)
 	return v, nil
+}
+
+// wait blocks until the attempt is over or the waiting request ends. A
+// request whose client has gone, or whose deadline passed, has no use for the
+// value, so it stops waiting rather than holding its goroutine and its
+// connection for however long the provider takes.
+func (call *singletonCall) wait(c *Context) (any, error) {
+	ctx := c.Context()
+	select {
+	case <-call.finished:
+		return call.val, call.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("muzak: the request ended while it waited for a singleton another request is resolving: %w", ctx.Err())
+	}
 }
 
 // resolveDetached runs the provider with a request whose context carries the
@@ -180,17 +253,24 @@ func Needs[T any](provide func(ctx *Context) (T, error)) SharedOption {
 // request-specific state from it, or return a value that is unsafe for
 // concurrent use, because every later request shares the same value.
 //
-// Only a successful value is cached. An error, or a panic, fails the request
-// that triggered it (a panic reaches the recovery middleware as a 500 like any
-// other) and the next request that needs the value runs the provider again.
-// Concurrent first requests wait for one another rather than running the
-// provider in parallel, so a value is still constructed at most once. While
-// the provider runs, [Context.Context] returns a context that keeps the
+// At most one attempt to run the provider is in flight at a time. Requests
+// that need the value while it runs wait for that attempt and share its
+// outcome, so a value is constructed at most once and a provider that fails
+// is not run again by every request that was queued behind it. A waiting
+// request stops waiting when its own context ends, and fails with that
+// context's error.
+//
+// Only a successful value is cached. An error fails the request that
+// triggered it and every request that waited on the same attempt, and the
+// next request after that runs the provider again. A panic reaches the
+// recovery middleware of the triggering request as a 500 like any other, and
+// the requests that waited on it fail with a 500 of their own. While the
+// provider runs, [Context.Context] returns a context that keeps the
 // triggering request's values but not its cancellation or deadline: the value
 // outlives that request, so its client disconnecting must not fail the
 // construction. A provider that does I/O should therefore apply its own
 // timeout with [context.WithTimeout], because nothing else will bound it and
-// every request needing the value waits while it runs.
+// the triggering request waits while it runs.
 func Singleton[T any](provide func(ctx *Context) (T, error)) SharedOption {
 	p := &provider{
 		typ:    reflect.TypeFor[T](),

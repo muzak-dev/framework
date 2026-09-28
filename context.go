@@ -120,9 +120,17 @@ func (c *Context) RawBody() ([]byte, bool) { return c.rawBody, c.rawBodyCaptured
 func (c *Context) ResponseWriter() http.ResponseWriter { return c.w }
 
 // Context returns the request's context.Context, which is cancelled when the
-// client disconnects or the server begins shutting down. It is shorthand for
+// client disconnects or the request ends. It is shorthand for
 // c.Request().Context() and is the correct value to hand to any operation that
 // may outlive the handler.
+//
+// Starting [App.Shutdown] does not cancel it: an ordinary request is left to
+// finish within [ServerOptions.ShutdownTimeout], and only when that deadline
+// passes are its connection closed and its context cancelled. A handler that
+// waits on the context alone therefore holds the shutdown for the whole
+// timeout. A long-lived response should be an event stream or a WebSocket
+// route, whose own context and connection are ended when shutdown begins, or
+// should watch a channel of its own that the application closes at that point.
 func (c *Context) Context() context.Context { return c.r.Context() }
 
 // Logger returns the structured logger associated with the application,

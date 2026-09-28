@@ -490,11 +490,17 @@ func (r *StringRules) LanguageTag() *StringRules {
 // Timezone requires the name of a time zone the host knows, as
 // "Europe/Istanbul".
 //
-// The name is resolved against the zone data the host or the binary carries, so
-// what passes here is exactly what time.LoadLocation will later accept. Names
-// that resolve are remembered, and a value that could not be one is rejected on
-// its shape first, so a client sending nonsense pays for a scan of the string
-// rather than for a search of the zone data.
+// The name has to be spelled exactly as the IANA zone database spells it, a
+// backward-compatible link such as "Asia/Calcutta" included, and has to load
+// from the zone data the host or the binary carries, so what passes here is
+// what time.LoadLocation will later accept. Spellings LoadLocation would also
+// take are refused: "Europe//Paris", which it cleans, and "europe/paris",
+// which it finds on a case-insensitive filesystem. So is "Local", which names
+// the server's own zone rather than one the client can mean. The names are
+// checked against a list built into this package, from the database Go 1.27
+// ships, so a zone created after that is refused until the list is updated;
+// each listed name is loaded from the zone data at most once, and anything
+// else costs a map lookup.
 //
 // # Zone data has to be there
 //

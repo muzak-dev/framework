@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -292,33 +293,71 @@ func isE164(value string) bool { return e164Pattern.MatchString(value) }
 // isLanguageTag reports whether a value is shaped like a BCP 47 language tag.
 func isLanguageTag(value string) bool { return languageTagPattern.MatchString(value) }
 
-// knownZones remembers the time zone names that turned out to be real.
+// zoneIndex finds a name's position in zoneNames, and zoneResolved records,
+// at that position, whether the host's zone data could load it.
 //
-// Loading a zone reads the tzdata the host or the binary carries, which is far
-// too much work to repeat on every request. Only successes are remembered, so
-// the map is bounded by the number of zones that exist rather than by the
-// number of strings a client is willing to send.
-var knownZones sync.Map
+// A value is looked up in a set fixed when the package was written, never in
+// one that grows with what clients send. The cache this replaced remembered
+// every spelling time.LoadLocation accepted, and that is more than the names
+// in the database: it cleans a path, so "Europe//Paris" loads, and on a
+// case-insensitive filesystem, which is what macOS and Windows have, so does
+// every one of the thousands of ways to capitalise "EUROPE/pArIs". Each was a
+// new entry kept for the life of the process, and each unknown name a fresh
+// search of the zone data. Now a name that is not spelled exactly as the
+// database spells it is refused for the cost of a map lookup, and each name
+// that is is loaded at most once.
+var (
+	zoneIndex = sync.OnceValue(func() map[string]int {
+		index := make(map[string]int, len(zoneNames))
+		for i, name := range zoneNames {
+			index[name] = i
+		}
+		return index
+	})
+	zoneResolved [len(zoneNames)]atomic.Uint32
+)
 
-// isTimezone reports whether a value names a time zone the host knows.
+// The states of an entry in zoneResolved. An entry starts out unknown, and two
+// requests racing to resolve the same name both reach the same answer, so the
+// last to store it changes nothing.
+const (
+	zoneUnknown uint32 = iota
+	zoneFound
+	zoneMissing
+)
+
+// isTimezone reports whether a value is the name of a time zone, spelled as the
+// zone database spells it, that the host's zone data can load.
 func isTimezone(value string) bool {
-	if value == "" || !isZoneShaped(value) {
+	if !isZoneShaped(value) {
 		return false
 	}
-	if _, known := knownZones.Load(value); known {
+	i, listed := zoneIndex()[value]
+	return listed && resolveZone(&zoneResolved[i], value, time.LoadLocation)
+}
+
+// resolveZone loads a listed zone the first time it is asked about and
+// remembers whether that worked. The loader is a parameter so that a host with
+// no zone data, where every load fails, can be stood in for.
+func resolveZone(state *atomic.Uint32, name string, load func(string) (*time.Location, error)) bool {
+	switch state.Load() {
+	case zoneFound:
 		return true
-	}
-	if _, err := time.LoadLocation(value); err != nil {
+	case zoneMissing:
 		return false
 	}
-	knownZones.Store(value, struct{}{})
+	if _, err := load(name); err != nil {
+		state.Store(zoneMissing)
+		return false
+	}
+	state.Store(zoneFound)
 	return true
 }
 
 // isZoneShaped reports whether a value could be a zone name at all.
 //
-// It runs before the zone is looked up, so that a client sending nonsense pays
-// for a scan of the string rather than for a search of the tzdata.
+// It runs before the name is looked up, so that a client sending nonsense pays
+// for a scan of at most 64 bytes rather than for hashing whatever it sent.
 func isZoneShaped(value string) bool {
 	if len(value) > 64 {
 		return false

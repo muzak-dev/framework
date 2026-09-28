@@ -8,10 +8,11 @@ import (
 // TestConcurrentChecks exercises the rules that keep state between calls.
 //
 // A rule set is built per request, but three things behind the rules are not:
-// the time zone names remembered as they are seen, the compiled expressions the
-// format rules share, and the code tables. All three are read from every
-// goroutine an instance is serving on. Run under the race detector, this is
-// what proves none of them is written to while being read.
+// what is known about whether each listed time zone loads, the compiled
+// expressions the format rules share, and the code tables. All three are read
+// from every goroutine an instance is serving on, and the first is written as
+// zones are loaded. Run under the race detector, this is what proves none of
+// them is written to unsafely while being read.
 func TestConcurrentChecks(t *testing.T) {
 	t.Parallel()
 

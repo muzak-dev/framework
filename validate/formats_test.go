@@ -1,8 +1,11 @@
 package validate
 
 import (
+	"errors"
 	"regexp"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // accepts runs a predicate over the values it should admit and the values it
@@ -251,21 +254,69 @@ func TestDescribedPatternsMatchTheChecks(t *testing.T) {
 	}
 }
 
-// TestTimezoneIsRemembered covers the cache behind the zone lookup: a name that
-// resolved once is not searched for again.
-func TestTimezoneIsRemembered(t *testing.T) {
+// TestTimezoneRefusesSpellingsTheDatabaseDoesNot is the regression test for a
+// cache of every spelling time.LoadLocation accepted. It cleans a path and, on
+// a case-insensitive filesystem, ignores case, so a client could add a new
+// entry per request for as long as the process lived.
+func TestTimezoneRefusesSpellingsTheDatabaseDoesNot(t *testing.T) {
 	t.Parallel()
-	for range 3 {
-		if !isTimezone("Europe/Istanbul") {
-			t.Fatal("a real zone was rejected")
+	for _, spelling := range []string{
+		"Europe//Paris", "EUROPE/pArIs", "europe/paris", "Europe/Paris/", "/Europe/Paris",
+		"Europe/./Paris", "Local", "posix/Europe/Paris", "Europe/X0000001",
+	} {
+		if isTimezone(spelling) {
+			t.Errorf("%q was accepted", spelling)
 		}
 	}
-	// A name that never resolves is not remembered, so it cannot be used to
-	// grow the cache without bound.
-	for range 3 {
-		if isTimezone("Europe/Nowhere") {
-			t.Fatal("a zone that does not exist was accepted")
+	if !TimezoneDataAvailable() {
+		t.Skip("this host has no time zone database to accept the correct spellings from")
+	}
+	for _, name := range []string{"Europe/Paris", "Asia/Calcutta", "Asia/Kolkata", "Etc/GMT-5", "UTC"} {
+		if !isTimezone(name) {
+			t.Errorf("%q was refused", name)
 		}
+	}
+}
+
+// TestZoneNamesAreSpelledAsTheyLoad checks the table itself: every entry is a
+// name the shape check lets through, none is listed twice, and on a host with
+// zone data every one of them loads, which is what catches a typo.
+func TestZoneNamesAreSpelledAsTheyLoad(t *testing.T) {
+	t.Parallel()
+	if len(zoneIndex()) != len(zoneNames) {
+		t.Errorf("the table lists %d names but indexes %d: one is listed twice", len(zoneNames), len(zoneIndex()))
+	}
+	available := TimezoneDataAvailable()
+	for _, name := range zoneNames {
+		if !isZoneShaped(name) {
+			t.Errorf("%q is not shaped like a zone name", name)
+		}
+		if available && !isTimezone(name) {
+			t.Errorf("%q does not load", name)
+		}
+	}
+}
+
+// TestResolveZoneLoadsEachNameOnce covers the memory behind a listed name: it
+// is loaded the first time and answered from what was learned after that,
+// whichever way the load went.
+func TestResolveZoneLoadsEachNameOnce(t *testing.T) {
+	t.Parallel()
+	loads := 0
+	found := func(string) (*time.Location, error) { loads++; return time.UTC, nil }
+	missing := func(string) (*time.Location, error) { loads++; return nil, errors.New("no zone data") }
+
+	var present, absent atomic.Uint32
+	for range 3 {
+		if !resolveZone(&present, "Europe/Istanbul", found) {
+			t.Fatal("a zone that loads was refused")
+		}
+		if resolveZone(&absent, "Europe/Istanbul", missing) {
+			t.Fatal("a zone that does not load was accepted")
+		}
+	}
+	if loads != 2 {
+		t.Errorf("the zone data was read %d times, want once per name", loads)
 	}
 }
 

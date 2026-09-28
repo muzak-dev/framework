@@ -83,7 +83,7 @@ func (r *SliceRules[E]) Evaluate() []Problem {
 		return nil
 	}
 	values := *r.target
-	if problems := run(&values, r.steps, isEmptySlice[E], r.required, applySliceStep[E]); len(problems) > 0 {
+	if problems := runSlice(&values, r.steps); len(problems) > 0 {
 		return problems
 	}
 	if r.element == nil {
@@ -102,8 +102,50 @@ func (r *SliceRules[E]) Evaluate() []Problem {
 	return problems
 }
 
-// isEmptySlice reports whether a collection counts as absent.
-func isEmptySlice[E any](values []E) bool { return len(values) == 0 }
+// runSlice is the collection counterpart to [run], written out for the one
+// thing a collection needs that no other family does: [SliceRules.Unique]
+// defers to a count bound, whatever order the two were declared in.
+//
+// Checks otherwise run in the order written and stop at the first failure,
+// and for most rules that order is only a matter of which message a client
+// reads first. For Unique it is a matter of cost. Its comparison is linear for
+// elements that can be hashed, but a collection of elements that cannot, such
+// as structs holding pointers or slices, is compared pair by pair, and a
+// quarter of a megabyte of JSON is enough elements to spend seconds of CPU on.
+// Unique().MaxItems(100) reads as bounded, so it has to be: a collection over
+// a MaxItems or Items bound is never searched for repeats, and the bound
+// reports it instead when its turn comes.
+func runSlice[E any](values *[]E, steps []step[[]E]) []Problem {
+	for i := range steps {
+		s := &steps[i]
+		if !runsOnEmpty(s.kind) && len(*values) == 0 {
+			// An optional collection that was not supplied has nothing to
+			// check, and a required one has already been reported.
+			continue
+		}
+		if s.kind == kindUnique && exceedsCountBound(steps, len(*values)) {
+			continue
+		}
+		if err := applySliceStep(s, values); err != nil {
+			return []Problem{problemFor(s, err)}
+		}
+	}
+	return nil
+}
+
+// exceedsCountBound reports whether a collection of n elements is longer than
+// a MaxItems or Items rule in the set allows.
+func exceedsCountBound[E any](steps []step[[]E], n int) bool {
+	for i := range steps {
+		switch steps[i].kind {
+		case kindMaxItems, kindItems:
+			if n > steps[i].n {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // add appends a step and returns the rule set for chaining.
 func (r *SliceRules[E]) add(s step[[]E]) *SliceRules[E] {
@@ -160,8 +202,19 @@ func (r *SliceRules[E]) MaxItems(n int) *SliceRules[E] {
 
 // Unique requires every element to differ from every other.
 //
-// Elements are compared with reflect.DeepEqual, so a slice of structs is
-// deduplicated by content rather than by identity.
+// Elements are compared the way reflect.DeepEqual compares them, so a slice of
+// structs is deduplicated by content rather than by identity. The failure names
+// the earliest element that appears again later.
+//
+// The cost depends on the element type. Strings, numbers, booleans, and arrays
+// and structs built only from those are hashed, so a collection of any length
+// is checked in linear time. Anything else, a struct holding a pointer, a
+// slice, a map or an interface, cannot be hashed the way DeepEqual compares
+// it and is compared pair by pair, which is quadratic: a few hundred kilobytes
+// of JSON is enough elements to cost seconds. Declare [SliceRules.MaxItems]
+// alongside Unique for such a collection. Unique defers to MaxItems and
+// [SliceRules.Items] in either order of declaration: a collection over the
+// bound is reported as too long and never searched for repeats.
 func (r *SliceRules[E]) Unique() *SliceRules[E] {
 	return r.add(step[[]E]{kind: kindUnique})
 }
@@ -223,7 +276,7 @@ func (r *SliceRules[E]) Must(check func([]E) error) *SliceRules[E] {
 
 // Check applies the rule set to a value and returns the first failure.
 func (r *SliceRules[E]) Check(values []E) error {
-	problems := run(&values, r.steps, isEmptySlice[E], r.required, applySliceStep[E])
+	problems := runSlice(&values, r.steps)
 	if len(problems) == 0 && r.element != nil {
 		for i := range values {
 			if elementProblems := r.element.applyTo(&values[i]); len(elementProblems) > 0 {
@@ -267,14 +320,10 @@ func applySliceStep[E any](s *step[[]E], values *[]E) error {
 		}
 	case kindUnique:
 		list := *values
-		for i := range list {
-			for j := i + 1; j < len(list); j++ {
-				if reflect.DeepEqual(list[i], list[j]) {
-					return element{
-						text:  fmt.Sprintf("must not repeat %v", list[i]),
-						value: fmt.Sprintf("%v", list[i]),
-					}
-				}
+		if i, repeated := firstRepeat(list); repeated {
+			return element{
+				text:  fmt.Sprintf("must not repeat %v", list[i]),
+				value: fmt.Sprintf("%v", list[i]),
 			}
 		}
 	case kindItems:
@@ -318,4 +367,71 @@ func holdsElement[E any](values []E, wanted []any) bool {
 		}
 	}
 	return false
+}
+
+// firstRepeat returns the index of the earliest element that appears again
+// later in the collection, which is the element Unique reports.
+//
+// The pairwise search this replaces found the same element, and the hashed
+// search is written to: a repeat found late may belong to an element earlier
+// than one found sooner, as in [a b b a], so the scan keeps the lowest first
+// occurrence it meets rather than stopping at the first repeat.
+func firstRepeat[E any](list []E) (int, bool) {
+	if len(list) < 2 {
+		return 0, false
+	}
+	if !hashable(reflect.TypeFor[E]()) {
+		for i := range list {
+			for j := i + 1; j < len(list); j++ {
+				if reflect.DeepEqual(list[i], list[j]) {
+					return i, true
+				}
+			}
+		}
+		return 0, false
+	}
+	seen := make(map[any]int, len(list))
+	first := -1
+	for j := range list {
+		key := any(list[j])
+		if i, found := seen[key]; found {
+			if first < 0 || i < first {
+				first = i
+			}
+			continue
+		}
+		seen[key] = j
+	}
+	return first, first >= 0
+}
+
+// hashable reports whether values of a type can be told apart with a map
+// lookup and get the answer reflect.DeepEqual would give.
+//
+// Being comparable is not enough. == on a pointer compares addresses where
+// DeepEqual compares what they point at, an interface compares its dynamic
+// value the same way, and == on a struct ignores blank fields that DeepEqual
+// reads. What is left is the types whose == and DeepEqual are the same
+// function: the basic kinds and arrays and structs made only of them. NaN is
+// consistent too, since it equals nothing under either.
+func hashable(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+		return true
+	case reflect.Array:
+		return hashable(t.Elem())
+	case reflect.Struct:
+		for i := range t.NumField() {
+			field := t.Field(i)
+			if field.Name == "_" || !hashable(field.Type) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }

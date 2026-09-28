@@ -335,9 +335,9 @@ type applier[T any] func(s *step[T], value *T) error
 // the client it is also too short and not an email address adds noise rather
 // than information.
 //
-// Only the collection, value and time families reach it; strings and numbers
-// take the written-out paths above. None of those three families declares a
-// transform, so there is no rewriting branch here.
+// Only the value and time families reach it; strings, numbers and collections
+// take written-out paths of their own. Neither of those two families declares
+// a transform, so there is no rewriting branch here.
 func run[T any](value *T, steps []step[T], isEmpty func(T) bool, required bool, apply applier[T]) []Problem {
 	for i := range steps {
 		s := &steps[i]

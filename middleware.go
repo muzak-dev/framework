@@ -3,6 +3,7 @@ package muzak
 import (
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -625,8 +626,20 @@ func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 // thing a stream cannot survive. The controller is used rather than a type
 // assertion so that a writer underneath which spells flushing either way is
 // reached.
+//
+// A flush before the first Write still commits the response: net/http sends
+// 200 and the headers on its own. That is recorded here, because everything
+// that decides whether a later failure may still be rendered as an error
+// response reads it, and one that believed nothing had been sent would append
+// the JSON envelope to a stream the client has already been told is a
+// success. A writer that cannot flush sent nothing, so nothing is recorded.
 func (w *responseWriter) FlushError() error {
-	return http.NewResponseController(w.ResponseWriter).Flush()
+	err := http.NewResponseController(w.ResponseWriter).Flush()
+	if !w.written && !errors.Is(err, http.ErrNotSupported) {
+		w.status = http.StatusOK
+		w.written = true
+	}
+	return err
 }
 
 // Flush is the older spelling of [responseWriter.FlushError], kept because a

@@ -75,6 +75,11 @@ func TestRegistrationErrors(t *testing.T) {
 			want: "conflicting parameter name",
 		},
 		{
+			name:  "parameter name declared twice in one path",
+			build: func(a *App) { a.Get("/orgs/{id}/users/{id}", okHandler) },
+			want:  "declared twice",
+		},
+		{
 			name: "duplicate operation id",
 			build: func(a *App) {
 				a.Get("/one", okHandler, OperationID("shared"))

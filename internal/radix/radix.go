@@ -3,6 +3,7 @@ package radix
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -173,7 +174,8 @@ func classify(seg string) (segKind, string, error) {
 // segment or a trailing "{name...}" to match everything that remains. Insert
 // returns an error wrapping [ErrInvalidPattern] for a malformed template,
 // including a static segment that is not validly percent-encoded or that
-// encodes a '/', neither of which a request could ever match,
+// encodes a '/', neither of which a request could ever match, and a
+// parameter name that the pattern declares more than once,
 // [ErrDuplicateRoute] if the same pattern was already inserted, and
 // [ErrParamConflict] if the pattern would place a differently named parameter
 // where an existing route already declares one.
@@ -184,12 +186,22 @@ func (t *Tree[T]) Insert(pattern string, value T) error {
 		return fmt.Errorf("%w: %q must begin with %q", ErrInvalidPattern, pattern, "/")
 	}
 	cur := t.root
+	var declared []string
 	for path := pattern; path != ""; {
 		seg, rest := splitSeg(path)
 		path = rest
 		kind, name, err := classify(seg)
 		if err != nil {
 			return fmt.Errorf("%w (in pattern %q)", err, pattern)
+		}
+		// Params.Get answers with the first capture of a name, so a second
+		// "{id}" in one template would be unreachable for a handler that
+		// binds it by name, and would silently hand it the wrong segment.
+		if kind != segStatic {
+			if slices.Contains(declared, name) {
+				return fmt.Errorf("%w: parameter %q is declared twice in %q", ErrInvalidPattern, name, pattern)
+			}
+			declared = append(declared, name)
 		}
 		switch kind {
 		case segStatic:

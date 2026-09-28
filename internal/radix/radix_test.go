@@ -507,3 +507,20 @@ func TestLookupRejectsUnrootedPath(t *testing.T) {
 		p.Reset()
 	}
 }
+
+func TestInsertRejectsDuplicateParamNames(t *testing.T) {
+	t.Parallel()
+	for _, pattern := range []string{
+		"/a/{id}/b/{id}",
+		"/a/{id}/b/{id...}",
+		"/orgs/{id}/users/{id}/x",
+	} {
+		err := New[int]().Insert(pattern, 1)
+		if !errors.Is(err, ErrInvalidPattern) {
+			t.Errorf("Insert(%q) = %v, want ErrInvalidPattern", pattern, err)
+		}
+	}
+	if err := New[int]().Insert("/a/{x}/b/{y}", 1); err != nil {
+		t.Errorf("distinct names rejected: %v", err)
+	}
+}

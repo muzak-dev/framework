@@ -287,6 +287,10 @@ type WSConn struct {
 	mu        sync.Mutex
 	err       error
 	sentClose bool
+
+	// ended cancels the handler's context when the connection ends; see
+	// [WSConn.cancelOnEnd]. It is guarded by mu and called at most once.
+	ended context.CancelCauseFunc
 }
 
 // newWSConn builds a connection over an already upgraded transport.
@@ -530,8 +534,31 @@ func (c *WSConn) record(err error) error {
 	if c.err == nil {
 		c.err = err
 		close(c.done)
+		if c.ended != nil {
+			c.ended(err)
+		}
 	}
 	return c.err
+}
+
+// cancelOnEnd arranges for cancel to be called with the connection's error
+// when the connection ends, or calls it at once if it already has.
+//
+// A served connection is hijacked, so net/http no longer cancels the request's
+// context when the client goes away: it does that only once the handler
+// returns. A handler that waits on ctx.Context() rather than on a read, for
+// events to forward from elsewhere for instance, would otherwise go on waiting
+// after its peer had left, after the server had closed the connection for
+// shutdown, and while the application's components were being stopped under
+// it.
+func (c *WSConn) cancelOnEnd(cancel context.CancelCauseFunc) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		cancel(c.err)
+		return
+	}
+	c.ended = cancel
 }
 
 // fail records a failure and closes the transport, which is what every path

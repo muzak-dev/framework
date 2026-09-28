@@ -3,6 +3,7 @@ package muzak
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha1" //nolint:gosec // RFC 6455 defines the handshake digest; see wsAcceptKey
 	"encoding/base64"
 	"errors"
@@ -350,6 +351,12 @@ func WithWebSocket(opts WSOptions) SharedOption {
 // rejects a peer on its own terms. Any other error closes the connection with
 // [WSStatusInternalError] and is logged, with nothing about it disclosed to the
 // peer.
+//
+// ctx.Context() ends when the connection does, whichever side ends it and
+// whether or not the handler is reading at the time, with the connection's
+// error as its cause. A handler that waits for events to forward from
+// elsewhere can therefore select on it and be released when its peer leaves or
+// the server shuts down.
 type WSHandler[In any] func(ctx *Context, in In, conn *WSConn) error
 
 // wsConfig is a WebSocket route's resolved configuration.
@@ -868,6 +875,13 @@ func wsHijackedReader(buffered *bufio.Reader, conn net.Conn) (*bufio.Reader, err
 // serveWebSocket runs a handler over an open connection and closes it
 // afterwards, whatever the handler did.
 func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error {
+	// The handler's context ends with the connection, not only when the
+	// handler returns; see [WSConn.cancelOnEnd].
+	handlerCtx, cancel := context.WithCancelCause(c.r.Context())
+	defer cancel(nil)
+	conn.cancelOnEnd(cancel)
+	c.r = c.r.WithContext(handlerCtx)
+
 	status, reason := WSStatusNormalClosure, ""
 	defer func() {
 		conn.stopWatching()

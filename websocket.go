@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -266,9 +265,9 @@ type WSConn struct {
 	control [wsframe.MaxControlPayload]byte
 	scratch []byte
 
-	// lastPong records when the peer last answered a ping, in Unix
-	// nanoseconds, for the keepalive to compare against.
-	lastPong atomic.Int64
+	// lastPong records when the peer last answered a ping, for the keepalive
+	// to compare against.
+	lastPong monotonicStamp
 
 	// messages bounds how fast the peer may send, and is nil unless
 	// [WSOptions.MessageLimits] asked for a bound. It is written once, before
@@ -309,7 +308,7 @@ func newWSConn(rwc io.ReadWriteCloser, br *bufio.Reader, client bool, subprotoco
 	if conn, ok := rwc.(net.Conn); ok {
 		c.nc = conn
 	}
-	c.lastPong.Store(time.Now().UnixNano())
+	c.lastPong.start()
 	return c
 }
 
@@ -730,7 +729,7 @@ func (c *WSConn) handleControl(ctx context.Context, header wsframe.Header) error
 		}
 		return err
 	case wsframe.Pong:
-		c.lastPong.Store(time.Now().UnixNano())
+		c.lastPong.mark()
 		return nil
 	default:
 		status, reason, err := wsframe.ParseClose(payload)
@@ -1183,7 +1182,7 @@ func (c *WSConn) keepalive(ctx context.Context, interval, timeout time.Duration)
 			return
 		case <-ticker.C:
 		}
-		sent := time.Now()
+		sent := c.lastPong.now()
 		if err := c.Ping(ctx); err != nil {
 			return
 		}
@@ -1197,7 +1196,7 @@ func (c *WSConn) keepalive(ctx context.Context, interval, timeout time.Duration)
 			return
 		case <-wait.C:
 		}
-		if c.lastPong.Load() < sent.UnixNano() {
+		if c.lastPong.last() < sent {
 			_ = c.Close(WSStatusPolicyViolation, "the peer did not answer a ping")
 			return
 		}

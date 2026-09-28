@@ -224,9 +224,9 @@ type sseStream struct {
 	// ssePayloads, for the reason given on send.
 	buf []byte
 
-	// lastWrite records when something was last written, in Unix nanoseconds,
-	// so that a keepalive says nothing on a stream that is already busy.
-	lastWrite atomic.Int64
+	// lastWrite records when something was last written, so that a keepalive
+	// says nothing on a stream that is already busy.
+	lastWrite monotonicStamp
 
 	// ctx governs the stream and is cancelled when it ends, whichever end
 	// ended it. unwatch undoes the arrangement that ends the stream with the
@@ -256,7 +256,7 @@ func newSSEStream(c *Context, opts SSEOptions) *sseStream {
 		ctx:          ctx,
 		cancel:       cancel,
 	}
-	s.lastWrite.Store(time.Now().UnixNano())
+	s.lastWrite.start()
 	return s
 }
 
@@ -576,7 +576,7 @@ func (s *sseStream) write(b []byte) error {
 	if err := s.rc.Flush(); err != nil {
 		return s.fail(endedBy("flushing an event failed", err))
 	}
-	s.lastWrite.Store(time.Now().UnixNano())
+	s.lastWrite.mark()
 	return nil
 }
 
@@ -753,7 +753,7 @@ func (s *sseStream) keepalive(interval time.Duration) {
 			return
 		case <-ticker.C:
 		}
-		if time.Since(time.Unix(0, s.lastWrite.Load())) < interval {
+		if s.lastWrite.since() < interval {
 			// The stream is busy, which is all a keepalive is there to prove.
 			continue
 		}
@@ -762,3 +762,44 @@ func (s *sseStream) keepalive(interval time.Duration) {
 		}
 	}
 }
+
+// monotonicStamp records a moment for a long-lived connection to measure an
+// interval from: when a stream last wrote, or when a peer last answered a
+// ping.
+//
+// It keeps the moment as an offset from a reading of the monotonic clock
+// rather than as a wall-clock time, because the wall clock can be stepped, by
+// NTP or by hand, and an interval measured across a step is wrong by the size
+// of it. Stored as Unix nanoseconds, a moment recorded before the clock went
+// back an hour would look an hour in the future: a keepalive would find the
+// stream busy for that hour and say nothing while a proxy closed it, and a
+// pong recorded after such a step would look older than the ping it
+// answered, closing a healthy connection. A [time.Time] from [time.Now]
+// carries a monotonic reading that [time.Since] uses in preference to the
+// wall clock, so offsets from one are immune to both.
+//
+// The offset is atomic so that it can be read from a goroutine other than
+// the one that marks it. The epoch is written once, by start, before either
+// can run.
+type monotonicStamp struct {
+	epoch time.Time
+	at    atomic.Int64
+}
+
+// start fixes the epoch and records the present as the last moment.
+func (m *monotonicStamp) start() {
+	m.epoch = time.Now()
+	m.at.Store(0)
+}
+
+// now returns the present as an offset from the epoch.
+func (m *monotonicStamp) now() time.Duration { return time.Since(m.epoch) }
+
+// mark records the present.
+func (m *monotonicStamp) mark() { m.at.Store(int64(m.now())) }
+
+// last returns the moment last recorded, as an offset from the epoch.
+func (m *monotonicStamp) last() time.Duration { return time.Duration(m.at.Load()) }
+
+// since returns how long ago the last moment was recorded.
+func (m *monotonicStamp) since() time.Duration { return m.now() - m.last() }

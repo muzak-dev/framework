@@ -195,9 +195,13 @@ func TestNumberClampWritesBack(t *testing.T) {
 		t.Errorf("Check = %v, want the clamped value accepted", err)
 	}
 
-	c := Number().Clamp(1, 100).Describe()
-	if c.Minimum == nil || *c.Minimum != 1 || c.Maximum == nil || *c.Maximum != 100 {
-		t.Errorf("Clamp did not describe its range: %+v", c)
+	// A clamp accepts every number and moves it, so describing its range as
+	// minimum and maximum would tell a client that 500 is refused.
+	if c := Number().Clamp(1, 100).Describe(); !c.IsZero() {
+		t.Errorf("Clamp described %+v, want nothing: it rejects no value", c)
+	}
+	if c := Number().Clamp(1, 100).Between(1, 100).Describe(); c.Minimum == nil || c.Maximum == nil {
+		t.Errorf("Between beside a Clamp did not describe its range: %+v", c)
 	}
 }
 

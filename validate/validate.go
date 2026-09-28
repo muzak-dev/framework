@@ -614,7 +614,10 @@ func describeAll[T any](steps []step[T]) Constraints {
 			c.Minimum = floatPtr(s.lo)
 		case kindMax:
 			c.Maximum = floatPtr(s.hi)
-		case kindBetween, kindClamp:
+		case kindBetween:
+			// A Clamp is left out on purpose: it moves a value into its range
+			// rather than refusing one outside it, so minimum and maximum
+			// would promise a rejection the server never makes.
 			c.Minimum, c.Maximum = floatPtr(s.lo), floatPtr(s.hi)
 		case kindPositive:
 			c.ExclusiveMinimum = floatPtr(0)

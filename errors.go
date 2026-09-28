@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -291,6 +292,21 @@ func (e *HTTPError) ErrorCode() string {
 // cause was attached.
 func (e *HTTPError) Unwrap() error { return e.cause }
 
+// with returns a copy of e that the caller may edit freely.
+//
+// Every builder below goes through it rather than editing e, because the
+// natural way to write a reusable error is a package-level value that each
+// request decorates with its own detail or cause. Editing that value in place
+// would hand one request's details to the next response, grow them with every
+// request, and race between concurrent ones. Details is cloned so that two
+// errors built from the same one never share a backing array.
+func (e *HTTPError) with(edit func(*HTTPError)) *HTTPError {
+	c := *e
+	c.Details = slices.Clone(e.Details)
+	edit(&c)
+	return &c
+}
+
 // WithMessageKey names a translation to render the message from, so that an
 // error raised by an application reads in the caller's language:
 //
@@ -298,34 +314,37 @@ func (e *HTTPError) Unwrap() error { return e.cause }
 //
 // The message already set is kept as the fallback, for a locale that has no
 // translation of the key and for an application with no store configured.
+//
+// Like the other builders it returns a modified copy and leaves e untouched,
+// so it is safe to call on a shared error value.
 func (e *HTTPError) WithMessageKey(key string, args ...any) *HTTPError {
-	e.MessageKey = key
-	e.MessageArgs = args
-	return e
+	return e.with(func(c *HTTPError) {
+		c.MessageKey = key
+		c.MessageArgs = args
+	})
 }
 
 // Wrap attaches an underlying cause that is recorded in logs and made visible
-// to [errors.Is] and [errors.As] but never sent to the client. It returns e so
-// it can be used inline in a return statement.
+// to [errors.Is] and [errors.As] but never sent to the client. It returns a
+// copy of e carrying the cause, so it can be used inline in a return statement
+// and on a shared error value; e itself is not changed.
 func (e *HTTPError) Wrap(err error) *HTTPError {
-	e.cause = err
-	return e
+	return e.with(func(c *HTTPError) { c.cause = err })
 }
 
 // WithCode overrides the machine-readable classifier, for cases where the
 // status alone is too coarse, such as telling "card_declined" from
-// "insufficient_funds" behind the same 402. It returns e for inline use.
+// "insufficient_funds" behind the same 402. It returns a modified copy for
+// inline use and leaves e untouched.
 func (e *HTTPError) WithCode(code string) *HTTPError {
-	e.Code = code
-	return e
+	return e.with(func(c *HTTPError) { c.Code = code })
 }
 
-// WithDetails attaches per-field details to the error and returns e for inline
-// use. Details appear in the "details" member of the response, so keep their
-// text free of internal state.
+// WithDetails attaches per-field details to the error and returns a copy for
+// inline use, leaving e untouched. Details appear in the "details" member of
+// the response, so keep their text free of internal state.
 func (e *HTTPError) WithDetails(details ...ErrorDetail) *HTTPError {
-	e.Details = append(e.Details, details...)
-	return e
+	return e.with(func(c *HTTPError) { c.Details = append(c.Details, details...) })
 }
 
 // ValidationError reports one or more fields that could not be bound from the

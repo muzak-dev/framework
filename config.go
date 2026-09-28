@@ -157,7 +157,8 @@ func (f failingSource) Lookup(string) (string, bool) { return "", false }
 // environment lists all the missing variables at once instead of one per
 // attempt. Mark a field secret:"true" to keep its value out of the error
 // messages produced when it fails to parse; the value is hidden from every
-// field that reads the same variable, not only the one marked.
+// field that reads the same variable, not only the one marked. On an embedded
+// struct, secret:"true" marks every field inside it, at any depth.
 func LoadConfig[T any](opts ...ConfigOption) (T, error) {
 	var out T
 	loader := &configLoader{}
@@ -182,7 +183,7 @@ func LoadConfig[T any](opts ...ConfigOption) (T, error) {
 		}
 	}
 	value := reflect.ValueOf(&out).Elem()
-	loader.fill(t, value, nil, &problems)
+	loader.fill(t, value, nil, false, &problems)
 	for _, bad := range loader.valueErrors {
 		if loader.secretNames[bad.name] {
 			bad.shared = true
@@ -211,7 +212,13 @@ func MustLoadConfig[T any](opts ...ConfigOption) T {
 
 // fill populates a struct from the configured sources, recursing into embedded
 // structs so that shared settings can be composed.
-func (l *configLoader) fill(t reflect.Type, value reflect.Value, prefix []int, problems *[]error) {
+//
+// secret reports that an enclosing embedded struct was marked secret, which
+// marks every field inside it. The tag used to be read only on the field that
+// is assigned, so one written on an embedded group of credentials, the
+// natural place to put it, hid nothing and a value that failed to parse was
+// echoed into the error.
+func (l *configLoader) fill(t reflect.Type, value reflect.Value, prefix []int, secret bool, problems *[]error) {
 	for i := range t.NumField() {
 		field := t.Field(i)
 		if !usableField(field) {
@@ -222,21 +229,22 @@ func (l *configLoader) fill(t reflect.Type, value reflect.Value, prefix []int, p
 		if name == "-" {
 			continue
 		}
+		marked := secret || field.Tag.Get(tagSecret) == "true"
 		if field.Anonymous && field.Type.Kind() == reflect.Struct && !tagged {
-			l.fill(field.Type, value, index, problems)
+			l.fill(field.Type, value, index, marked, problems)
 			continue
 		}
 		if !tagged {
 			name = deriveEnvName(field.Name)
 		}
-		l.assign(field, l.prefix+name, fieldByIndex(value, index), problems)
+		l.assign(field, l.prefix+name, fieldByIndex(value, index), marked, problems)
 	}
 }
 
 // assign resolves one field's value and writes it, recording a problem instead
-// of stopping when the value is missing or unusable.
-func (l *configLoader) assign(field reflect.StructField, name string, target reflect.Value, problems *[]error) {
-	secret := field.Tag.Get(tagSecret) == "true"
+// of stopping when the value is missing or unusable. secret reports that the
+// field, or an embedded struct enclosing it, is marked secret.
+func (l *configLoader) assign(field reflect.StructField, name string, target reflect.Value, secret bool, problems *[]error) {
 	if secret {
 		if l.secretNames == nil {
 			l.secretNames = map[string]bool{}

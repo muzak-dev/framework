@@ -56,7 +56,9 @@ type FrontendOptions struct {
 	// It is used only for a GET or HEAD that asks for HTML, which is what a
 	// navigation does. A missing script, stylesheet or image still answers
 	// 404, because handing those an HTML document only turns a missing file
-	// into a confusing parse error.
+	// into a confusing parse error. Since the answer then depends on Accept,
+	// every response of a mount with a fallback and no NotFound page carries
+	// "Vary: Accept", so that a cache does not hand one to the other.
 	Fallback string
 
 	// NotFound is the file served, with 404, when nothing else matched. It is
@@ -359,6 +361,16 @@ func (f *frontend) describe(header http.Header) {
 		// leak this prevents. no-cache still lets the browser keep the file
 		// and revalidate it with the modification time.
 		header.Set("Cache-Control", "private, no-cache")
+	}
+	if f.fallback != "" && f.notFound == "" {
+		// The fallback answers a path with the application document for a
+		// navigation and with a 404 for anything else, so the answer depends
+		// on Accept. It is declared on every response rather than only on a
+		// miss, because whether a path is a file or a miss is not something a
+		// cache can know, and a deployment that removes a file turns one into
+		// the other under the same URL. A NotFound page takes precedence over
+		// the fallback and is served whatever the request accepts.
+		addVary(header, "Accept")
 	}
 }
 

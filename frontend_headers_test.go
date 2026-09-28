@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -274,4 +275,78 @@ func TestAppGuardedMountIsPrivate(t *testing.T) {
 	rec := doRequest(t, app, withToken("/files/a.txt"))
 	assertStatus(t, rec, http.StatusOK)
 	assertCacheControl(t, "file behind an application guard", rec, "private, no-cache")
+}
+
+// varyValues returns every field a response's Vary headers name, in order.
+func varyValues(rec *httptest.ResponseRecorder) []string {
+	var fields []string
+	for _, value := range rec.Header().Values("Vary") {
+		for field := range strings.SplitSeq(value, ",") {
+			fields = append(fields, strings.TrimSpace(field))
+		}
+	}
+	return fields
+}
+
+// TestFallbackVariesOnAccept is the regression test for the single page
+// application fallback answering one URL with 200 HTML or a 404 depending on
+// Accept, without saying so: a cache that stored the 404 a script's request
+// got served it to the next navigation, and the other way round.
+func TestFallbackVariesOnAccept(t *testing.T) {
+	t.Parallel()
+	modified := time.Unix(1700000000, 0)
+	app := New(quietOptions())
+	app.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Has("declared") {
+				w.Header().Set("Vary", "Origin, accept")
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	app.Frontend("/", FrontendOptions{FS: fstest.MapFS{
+		"index.html": {Data: []byte("<h1>app</h1>"), ModTime: modified},
+		"app.js":     {Data: []byte("app()"), ModTime: modified},
+	}})
+	app.Frontend("/pages", FrontendOptions{FS: fstest.MapFS{
+		"index.html": {Data: []byte("<h1>home</h1>"), ModTime: modified},
+		"404.html":   {Data: []byte("<h1>missing</h1>"), ModTime: modified},
+	}})
+	app.Frontend("/plain", FrontendOptions{NoFallback: true, FS: fstest.MapFS{
+		"index.html": {Data: []byte("<h1>plain</h1>"), ModTime: modified},
+	}})
+	app.Static("/static", StaticOptions{FS: fstest.MapFS{"a.css": {Data: []byte("a{}")}}})
+	mustBuild(t, app)
+
+	for _, tc := range []struct {
+		target, accept string
+		status         int
+	}{
+		{"/account/settings", "text/html", http.StatusOK},
+		{"/account/settings", "*/*", http.StatusNotFound},
+		{"/", "text/html", http.StatusOK},
+		{"/app.js", "*/*", http.StatusOK},
+		{"/app.js", "text/html", http.StatusOK},
+	} {
+		rec := doRequest(t, app, withAccept(tc.target, tc.accept))
+		assertStatus(t, rec, tc.status)
+		if got := varyValues(rec); !slices.Equal(got, []string{"Accept"}) {
+			t.Errorf("GET %s with Accept %s: Vary %q, want Accept", tc.target, tc.accept, got)
+		}
+	}
+
+	// A field the response already names is not repeated.
+	rec := doRequest(t, app, withAccept("/account/settings?declared", "text/html"))
+	if got := varyValues(rec); !slices.Equal(got, []string{"Origin", "accept"}) {
+		t.Errorf("Vary %q, want the declared fields unchanged", got)
+	}
+
+	// A mount whose answer does not depend on Accept does not say it does.
+	for _, target := range []string{"/pages/", "/pages/missing", "/plain/", "/plain/missing", "/static/a.css"} {
+		for _, accept := range []string{"text/html", "*/*"} {
+			if got := varyValues(doRequest(t, app, withAccept(target, accept))); len(got) != 0 {
+				t.Errorf("GET %s with Accept %s: Vary %q, want none", target, accept, got)
+			}
+		}
+	}
 }

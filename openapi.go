@@ -617,6 +617,9 @@ type schemaBuilder struct {
 	schemas map[string]*Schema
 	byType  map[reflect.Type]*Schema
 	names   map[string]reflect.Type
+	// walking holds the named collection types being described, so that one
+	// containing itself is described once rather than for ever.
+	walking map[reflect.Type]bool
 }
 
 // newSchemaBuilder returns an empty builder.
@@ -625,6 +628,7 @@ func newSchemaBuilder() *schemaBuilder {
 		schemas: map[string]*Schema{},
 		byType:  map[reflect.Type]*Schema{},
 		names:   map[string]reflect.Type{},
+		walking: map[reflect.Type]bool{},
 	}
 }
 
@@ -784,6 +788,20 @@ func (b *schemaBuilder) schemaFor(t reflect.Type) *Schema {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct || t.Name() == "" || isWellKnown(t) {
+		switch t.Kind() {
+		case reflect.Slice, reflect.Array, reflect.Map:
+			// A collection type can only contain itself by being named, as in
+			// `type Tree map[string]Tree`, and is described inline, so the
+			// second visit is the recursion. It is left open, which is what a
+			// tree of any depth is in a schema with no component to point at.
+			if t.Name() != "" {
+				if b.walking[t] {
+					return &Schema{}
+				}
+				b.walking[t] = true
+				defer delete(b.walking, t)
+			}
+		}
 		return b.inline(t)
 	}
 	if existing, ok := b.byType[t]; ok {

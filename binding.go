@@ -380,9 +380,15 @@ func checkUnreachable(f reflect.StructField) error {
 //
 // Only fields encoding/json can reach are searched: exported ones and embedded
 // ones. The seen set stops a recursive type, such as a tree of nodes, from
-// being walked forever.
+// being walked forever. It has to be consulted for the types looked through as
+// well as for the structs, since `type Tree map[string]Tree` is a recursive
+// type with no struct in it, and unwrapping it never reaches anything else.
 func locatedWithin(t reflect.Type, seen map[reflect.Type]bool) (path, location string, found bool) {
 	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Map {
+		if seen[t] {
+			return "", "", false
+		}
+		seen[t] = true
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct || seen[t] {
@@ -497,6 +503,21 @@ func newParamBinder(f reflect.StructField, index []int, source paramSource, name
 // The returned setter is stored in the plan, so the reflection performed here
 // happens once per route rather than once per request.
 func setterFor(t reflect.Type) (setter, error) {
+	return setterAt(t, 0)
+}
+
+// maxSetterDepth is how many pointers and slices deep a parameter type may be
+// wrapped. Nothing a request parameter can carry goes past a slice of
+// pointers, so what is deeper is a type that contains itself, such as
+// `type List []List`, which would otherwise be followed until the stack ran
+// out.
+const maxSetterDepth = 8
+
+// setterAt is [setterFor] for a type reached through depth levels of wrapper.
+func setterAt(t reflect.Type, depth int) (setter, error) {
+	if depth > maxSetterDepth {
+		return nil, fmt.Errorf("type %s is wrapped in more than %d levels of pointers and slices, or contains itself, and cannot be bound from a request parameter", t, maxSetterDepth)
+	}
 	// time.Duration is an int64 underneath but developers expect "1500ms", so
 	// it is handled before the integer kinds claim it.
 	if t == durationType {
@@ -567,7 +588,7 @@ func setterFor(t reflect.Type) (setter, error) {
 			return nil
 		}, nil
 	case reflect.Pointer:
-		elem, err := setterFor(t.Elem())
+		elem, err := setterAt(t.Elem(), depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -580,7 +601,7 @@ func setterFor(t reflect.Type) (setter, error) {
 			return nil
 		}, nil
 	case reflect.Slice:
-		elem, err := setterFor(t.Elem())
+		elem, err := setterAt(t.Elem(), depth+1)
 		if err != nil {
 			return nil, err
 		}

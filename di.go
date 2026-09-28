@@ -412,9 +412,15 @@ func TryFrom[T any](ctx *Context) (T, bool) {
 	// declaration of a type is resolved rather than only the last one.
 	for i := len(ctx.deps) - 1; i >= 0; i-- {
 		if ctx.deps[i].typ == target {
-			// The assertion cannot fail: the value was stored by Needs or
-			// Singleton instantiated at this very type.
-			return ctx.deps[i].val.(T), true
+			// The value was stored by Needs or Singleton instantiated at this
+			// very type, so the assertion can only fail on a nil interface
+			// value, which is stored as a nil any and is a legitimate result:
+			// a provider of an interface type may return nil for an absent
+			// caller. The comma-ok form turns that into T's zero value, the
+			// nil the provider returned, rather than a panic in the one
+			// accessor documented not to panic.
+			v, _ := ctx.deps[i].val.(T)
+			return v, true
 		}
 	}
 	var zero T

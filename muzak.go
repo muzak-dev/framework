@@ -852,8 +852,9 @@ func (a *App) run(c *Context, route *Route) {
 // handler says otherwise; see [Route.isGuarded].
 const privateCacheControl = "private, no-cache"
 
-// isGuarded reports whether the route runs any guard or provider, declared on
-// it or inherited from a router or the application.
+// isGuarded reports whether the route runs any guard or request-scoped
+// provider, declared on it or inherited from a router or the application. A
+// singleton alone does not count; see [answersPerClient].
 //
 // Such a response is presumed to depend on who asked: a guard decides whether
 // this client may see it and a provider typically resolves the client's own
@@ -865,7 +866,7 @@ const privateCacheControl = "private, no-cache"
 // "no-cache, no-transform", which this would otherwise displace, and a
 // WebSocket upgrade is never cached, so both are left to their own headers.
 func (rt *Route) isGuarded() bool {
-	return len(rt.guards) > 0 || len(rt.providers) > 0
+	return answersPerClient(rt.guards, rt.providers)
 }
 
 // recoverRoute turns a panic inside a handler or a dependency into the normal

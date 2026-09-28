@@ -33,6 +33,34 @@ type provider struct {
 	// Every route that inherits the singleton holds the same *provider and so
 	// shares one cached value.
 	single *singleton
+
+	// shared marks a provider whose value is the same for every request, a
+	// [Singleton] or a [WithSingleton]. Such a value cannot depend on who is
+	// asking, so it is left out when deciding whether a response is
+	// per-client; see [answersPerClient].
+	shared bool
+}
+
+// answersPerClient reports whether a route or mount that runs these guards and
+// providers may answer one client differently from another, which is what
+// decides that its responses are marked private to caches.
+//
+// A guard decides who may see a response, and a request-scoped provider
+// typically resolves the client's own session or account, so either makes the
+// answer per-client. A singleton does not: it is built once and handed to
+// every request alike, and counting it would mark every route of an
+// application that shares a configuration or a connection pool as private,
+// which is noise that teaches people to override the header.
+func answersPerClient(guards []Guard, providers []*provider) bool {
+	if len(guards) > 0 {
+		return true
+	}
+	for _, p := range providers {
+		if !p.shared {
+			return true
+		}
+	}
+	return false
 }
 
 // singleton is the shared state behind a lazily resolved [Singleton].
@@ -275,6 +303,7 @@ func Singleton[T any](provide func(ctx *Context) (T, error)) SharedOption {
 	p := &provider{
 		typ:    reflect.TypeFor[T](),
 		single: new(singleton),
+		shared: true,
 		resolve: func(c *Context) (any, error) {
 			v, err := provide(c)
 			if err != nil {
@@ -322,6 +351,7 @@ func WithSingleton[T any](value T, opts ...SingletonOption) SharedOption {
 	p := &provider{
 		typ:     reflect.TypeFor[T](),
 		resolve: func(*Context) (any, error) { return value, nil },
+		shared:  true,
 	}
 	return sharedOption{
 		route: func(c *routeConfig) {

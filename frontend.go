@@ -355,7 +355,7 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 // They are set before anything is decided because they describe the mount
 // rather than the answer, and a cache has to see them on every answer.
 func (f *frontend) describe(header http.Header) {
-	if len(f.guards) > 0 || len(f.providers) > 0 {
+	if answersPerClient(f.guards, f.providers) {
 		// A mount behind a guard or a provider answers some clients and not
 		// others, so a cache shared between them must not keep what it sends.
 		// A file carries Last-Modified, which is all a shared cache needs to

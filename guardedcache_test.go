@@ -50,8 +50,10 @@ func TestGuardedRouteResponsesArePrivate(t *testing.T) {
 		"/account/stream": "private, no-cache",
 		"/account/public": "public, max-age=60",
 		"/guarded":        "private, no-cache",
-		"/singleton":      "private, no-cache",
-		"/open":           "",
+		// A singleton is the same for every client, so it alone does not
+		// make a response per-client.
+		"/singleton": "",
+		"/open":      "",
 	} {
 		req := httptest.NewRequest(http.MethodGet, target, nil)
 		req.AddCookie(&http.Cookie{Name: "session", Value: "alice-session"})

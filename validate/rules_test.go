@@ -2,6 +2,7 @@ package validate
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -506,5 +507,46 @@ func TestPlural(t *testing.T) {
 	}
 	if got := plural(2, "item"); got != "items" {
 		t.Errorf("plural(2) = %q", got)
+	}
+}
+
+// A decimal step is judged as the decimal it is written as. The tolerance the
+// rule once had was absolute, so it rejected 19.99 against 0.01, where the
+// remainder is nearly a whole step, and accepted anything against a factor
+// below its size.
+func TestMultipleOfJudgesDecimalSteps(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		value, factor float64
+		want          bool
+	}{
+		{19.99, 0.01, true},
+		{0.3, 0.1, true},
+		{0.15, 0.05, true},
+		{100.1, 0.1, true},
+		{1234567.89, 0.01, true},
+		{-19.99, 0.01, true},
+		{0, 0.01, true},
+		{15, 5, true},
+		{-15, 5, true},
+		{1e12, 3, false},
+		{5.0000000001, 5, false},
+		{19.995, 0.01, false},
+		{0.35, 0.1, false},
+		{16, 5, false},
+		{3e-12, 1e-12, true},
+		{3.5e-12, 1e-12, false},
+		{5, 0, false},
+		{5, math.Inf(1), false},
+		{0, math.Inf(1), true},
+		{math.MaxFloat64, 1e-300, false},
+	} {
+		if got := isMultiple(tc.value, tc.factor); got != tc.want {
+			t.Errorf("isMultiple(%v, %v) = %v, want %v", tc.value, tc.factor, got, tc.want)
+		}
+		got := Number().MultipleOf(tc.factor).Check(tc.value) == nil
+		if got != tc.want {
+			t.Errorf("MultipleOf(%v).Check(%v) accepted = %v, want %v", tc.factor, tc.value, got, tc.want)
+		}
 	}
 }

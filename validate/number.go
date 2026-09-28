@@ -227,11 +227,43 @@ func (r *NumberRules) Negative() *NumberRules {
 
 // MultipleOf requires the value to divide evenly by factor, for a quantity
 // that only makes sense in steps.
+//
+// A decimal step is judged as the decimal it is written as, not as the binary
+// fraction that holds it: 19.99 is a multiple of 0.01 although neither is
+// exact as a float64. The quotient may be off from a whole number by only the
+// few units in the last place that the arithmetic itself can account for, so
+// 5.0000000001 is not a multiple of 5.
 func (r *NumberRules) MultipleOf(factor float64) *NumberRules {
 	return r.add(step[float64]{
 		kind: kindMultipleOf,
 		lo:   factor,
 	})
+}
+
+// multipleTolerance is how far the quotient of a value and its factor may be
+// from a whole number, in units of the quotient's own precision, before the
+// value is not a multiple. A float64 is exact to about 1.1e-16 relative to
+// its magnitude, and the value, the factor and the division each contribute
+// half of that, so a few units cover every decimal step honestly written and
+// leave nothing for a value that is really off.
+const multipleTolerance = 8 * 0x1p-52
+
+// isMultiple reports whether value is a whole number of factors. A factor of
+// zero divides nothing, and one that is not finite divides only zero.
+func isMultiple(value, factor float64) bool {
+	if factor == 0 || math.IsNaN(factor) {
+		return false
+	}
+	if math.IsInf(factor, 0) {
+		return value == 0
+	}
+	quotient := value / factor
+	if math.IsInf(quotient, 0) {
+		// A value too many steps from zero for the quotient to be held is one
+		// for which only an exact remainder can be trusted.
+		return math.Mod(value, factor) == 0
+	}
+	return math.Abs(quotient-math.Round(quotient)) <= multipleTolerance*max(1, math.Abs(quotient))
 }
 
 // GreaterThan requires a value strictly above a bound.
@@ -343,7 +375,7 @@ func applyNumberStep(s *step[float64], value *float64) error {
 			return errors.New("must be less than zero")
 		}
 	case kindMultipleOf:
-		if s.lo == 0 || math.Abs(math.Mod(*value, s.lo)) > 1e-9 {
+		if !isMultiple(*value, s.lo) {
 			return fmt.Errorf("must be a multiple of %s", formatNumber(s.lo))
 		}
 	case kindGreaterThan:

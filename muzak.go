@@ -688,7 +688,7 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 			a.serveFrontend(c, mount, relative)
 			return
 		}
-		a.fail(c, NewHTTPErrorf(http.StatusNotFound, "no route matches %s %s", r.Method, r.URL.Path))
+		a.fail(c, noRouteError(r))
 		return
 	}
 
@@ -703,7 +703,7 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		// answers the version this request declared, which the framework
 		// treats exactly as it would a path nothing matches at all: see
 		// [selectVersion].
-		a.fail(c, NewHTTPErrorf(http.StatusNotFound, "no route matches %s %s", r.Method, r.URL.Path))
+		a.fail(c, noRouteError(r))
 		return
 	}
 	// Published for instrumentation, into the holder installed on the way in.
@@ -755,7 +755,7 @@ func (a *App) dispatchFallback(c *Context, entry *pathEntry) {
 		return
 	}
 	c.w.Header().Set("Allow", entry.allow)
-	a.fail(c, NewHTTPErrorf(http.StatusMethodNotAllowed, "%s is not allowed here; allowed methods are %s", c.r.Method, entry.allow))
+	a.fail(c, NewHTTPErrorf(http.StatusMethodNotAllowed, "%s is not allowed here; allowed methods are %s", quotableMethod(c.r.Method), entry.allow))
 }
 
 // run executes a matched route: percent-decoding its captured parameters,
@@ -922,6 +922,48 @@ func (a *App) acquire(w *responseWriter, r *http.Request) *Context {
 func (a *App) release(c *Context) {
 	c.reset()
 	a.ctxPool.Put(c)
+}
+
+// noRouteError reports a request nothing answers, naming it in a form the
+// error envelope can always carry.
+func noRouteError(r *http.Request) error {
+	return NewHTTPErrorf(http.StatusNotFound, "no route matches %s %s", quotableMethod(r.Method), quotablePath(r))
+}
+
+// quotablePath returns the request path as a message may quote it.
+//
+// The decoded path is whatever bytes the client percent-encoded, so GET /%ff
+// decodes to a byte that is not UTF-8. Quoting that in the message made the
+// JSON envelope unencodable: the client got a 500 in place of a 404, and the
+// fallback logged the path. A path of printable ASCII, which is nearly every
+// path, is quoted as it is; anything else is quoted in its escaped form, which
+// is ASCII by construction and is what the client put on the wire.
+func quotablePath(r *http.Request) string {
+	if isPrintableASCII(r.URL.Path) {
+		return r.URL.Path
+	}
+	return r.URL.EscapedPath()
+}
+
+// quotableMethod returns a request method as a message may quote it. net/http
+// only admits a token, so this matters solely for a request built by hand and
+// passed to ServeHTTP, which is still not allowed to turn a 404 into a 500.
+func quotableMethod(method string) string {
+	if isPrintableASCII(method) {
+		return method
+	}
+	return strconv.QuoteToASCII(method)
+}
+
+// isPrintableASCII reports whether s holds only printable ASCII, the text a
+// message can quote without escaping anything.
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < ' ' || s[i] > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 // unescapeParams percent-decodes the captured path parameters in place. The

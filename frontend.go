@@ -325,7 +325,7 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 			// answering 404 would say the opposite.
 			c.w.Header().Set("Allow", allowedOnFiles)
 			a.fail(c, NewHTTPErrorf(http.StatusMethodNotAllowed,
-				"%s is not allowed here; allowed methods are %s", c.r.Method, allowedOnFiles))
+				"%s is not allowed here; allowed methods are %s", quotableMethod(c.r.Method), allowedOnFiles))
 			return
 		}
 		f.write(c, files, name, http.StatusOK)
@@ -466,7 +466,7 @@ func (a *App) serveFrontendFallback(c *Context, f *frontend, files fs.FS) {
 // frontendNotFound reports a path the frontend does not serve, in the same
 // envelope every other failure uses.
 func frontendNotFound(r *http.Request) error {
-	return NewHTTPErrorf(http.StatusNotFound, "no route matches %s %s", r.Method, r.URL.Path)
+	return noRouteError(r)
 }
 
 // acceptsHTML reports whether a request is a browser navigation, which is what

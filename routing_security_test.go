@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 type encodedUserIn struct {
@@ -134,4 +135,49 @@ func TestPatternSpellingIsDecodedToo(t *testing.T) {
 	if msg := buildError(t, twice); !strings.Contains(msg, "duplicate") {
 		t.Errorf("two spellings of one path built, error %q", msg)
 	}
+}
+
+// TestNotFoundMessageSurvivesAnyPath is the regression test for a 404 that
+// became a 500: the message quoted the decoded path, GET /%ff decodes to a
+// byte that is not UTF-8, and the JSON envelope could not be encoded. Every
+// request nothing answers must get its 404, or its 405, in the envelope.
+func TestNotFoundMessageSurvivesAnyPath(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/things", func(*Context, Empty) (Empty, error) { return Empty{}, nil })
+	app.Get("/things/{id}", func(*Context, encodedUserIn) (Empty, error) { return Empty{}, nil })
+	app.Static("/static", StaticOptions{FS: fstest.MapFS{"a.txt": {Data: []byte("a")}}})
+	mustBuild(t, app)
+
+	for target, quoted := range map[string]string{
+		"/%ff":            "GET /%ff",
+		"/%FF%FE/x":       "GET /%FF%FE/x",
+		"/a%00b":          "GET /a%00b",
+		"/line%0Abreak":   "GET /line%0Abreak",
+		"/static/%ff":     "GET /static/%ff",
+		"/caf%C3%A9":      "GET /caf%C3%A9",
+		"/plain/path":     "GET /plain/path",
+		"/things/a/%ff/b": "GET /things/a/%ff/b",
+	} {
+		rec := do(t, app, "GET", target)
+		assertStatus(t, rec, http.StatusNotFound)
+		if got := decodeError(t, rec).Error.Message; got != "no route matches "+quoted {
+			t.Errorf("GET %s: message = %q, want it to quote %q", target, got, quoted)
+		}
+	}
+
+	// A method net/http would never admit, handed to ServeHTTP directly.
+	odd := httptest.NewRequest("GET", "/nothing", nil)
+	odd.Method = "G\xffT"
+	rec := doRequest(t, app, odd)
+	assertStatus(t, rec, http.StatusNotFound)
+	if got := decodeError(t, rec).Error.Message; got != `no route matches "G\xffT" /nothing` {
+		t.Errorf("message = %q, want the method quoted", got)
+	}
+	odd = httptest.NewRequest("GET", "/things", nil)
+	odd.Method = "P\x00ST"
+	assertStatus(t, doRequest(t, app, odd), http.StatusMethodNotAllowed)
+	odd = httptest.NewRequest("GET", "/static/a.txt", nil)
+	odd.Method = "P\x00ST"
+	assertStatus(t, doRequest(t, app, odd), http.StatusMethodNotAllowed)
 }

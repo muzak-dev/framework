@@ -313,6 +313,44 @@ func TestUploadRejectsABodyOverTheUploadLimit(t *testing.T) {
 	}
 }
 
+func TestMultipartFormWithoutFilesIsBoundedByTheBodyLimit(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/login/", func(ctx *Context, in formOnlyIn) (formOnlyOut, error) {
+		return formOnlyOut{}, nil
+	}, MaxBodySize(4<<10))
+	built := mustBuild(t, app)
+
+	// A route that binds no file is a login form: its multipart body is text
+	// the binder parses, so it is bounded like a JSON or urlencoded body, not
+	// by the much larger upload limit.
+	rec := doRequest(t, built, uploadRequest(t, "/login/",
+		[]string{"username", strings.Repeat("A", 64<<10), "password", "x"}))
+	assertStatus(t, rec, http.StatusRequestEntityTooLarge)
+	if message := decodeError(t, rec).Error.Message; !strings.Contains(message, "4096 byte limit") {
+		t.Errorf("message = %q, want it to name the 4096 byte limit", message)
+	}
+
+	rec = doRequest(t, built, uploadRequest(t, "/login/", []string{"username", "muzak", "password", "x"}))
+	assertStatus(t, rec, http.StatusOK)
+}
+
+func TestMultipartFormWithFilesKeepsTheUploadLimit(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/files/", func(ctx *Context, in fileBytesIn) (fileSizeOut, error) {
+		return fileSizeOut{FileSize: len(in.File)}, nil
+	}, MaxBodySize(1<<10), MaxUploadSize(64<<10))
+	built := mustBuild(t, app)
+
+	// A file is expected to outgrow the body limit; only the upload limit
+	// bounds a route that declares one.
+	rec := doRequest(t, built, uploadRequest(t, "/files/", nil,
+		part{field: "file", filename: "big.txt", content: strings.Repeat("x", 16<<10)}))
+	assertStatus(t, rec, http.StatusOK)
+	assertJSON(t, rec, `{"file_size":16384}`)
+}
+
 func TestUploadRejectsAFileOverTheFileLimit(t *testing.T) {
 	t.Parallel()
 	app := New(quietOptions())

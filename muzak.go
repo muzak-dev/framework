@@ -40,8 +40,7 @@ const (
 	// does not override it, at one mebibyte.
 	DefaultMaxBodySize int64 = 1 << 20
 	// DefaultMaxUploadSize is the largest multipart body accepted by a route
-	// that binds files or form values and does not override it, at 32
-	// mebibytes.
+	// that binds files and does not override it, at 32 mebibytes.
 	DefaultMaxUploadSize int64 = 32 << 20
 	// DefaultMaxHeaderBytes is the largest request header block accepted, at
 	// one mebibyte.
@@ -80,9 +79,10 @@ type AppOptions struct {
 
 	// MaxUploadSize is the default limit in bytes on a multipart body,
 	// overridable per route with [MaxUploadSize]. It applies to every route
-	// that binds `form` or `file` fields, in place of MaxBodySize, and
-	// defaults to [DefaultMaxUploadSize]. A urlencoded body, which carries no
-	// file, is bounded by MaxBodySize instead. A negative value removes the limit, which is
+	// that binds `file` fields, in place of MaxBodySize, and defaults to
+	// [DefaultMaxUploadSize]. A route that binds only `form` values, whether it
+	// is sent a urlencoded or a multipart body, carries no file and is bounded
+	// by MaxBodySize instead. A negative value removes the limit, which is
 	// only appropriate behind a proxy that imposes its own.
 	MaxUploadSize int64
 

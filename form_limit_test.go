@@ -11,7 +11,8 @@ import (
 // A urlencoded body carries no file and is held in memory whole, so it is
 // bounded by the route's body limit rather than by its upload limit: under
 // the upload limit a form-only route buffered 32 MiB, three times what
-// net/http allows on its own.
+// net/http allows on its own. A multipart body to a route that declares no
+// file is bounded the same way.
 func TestURLEncodedFormIsBoundedByMaxBodySize(t *testing.T) {
 	t.Parallel()
 	type in struct {
@@ -37,9 +38,11 @@ func TestURLEncodedFormIsBoundedByMaxBodySize(t *testing.T) {
 	assertStatus(t, post("/default", 1<<10), http.StatusOK)
 	assertStatus(t, post("/raised", 2<<20), http.StatusOK)
 
-	// A multipart body to the same route is still bounded by the upload
-	// limit, which is what lets a file be larger than a JSON document.
+	// A multipart body to the same route carries no file either, so it is
+	// bounded the same way.
 	req := uploadRequest(t, "/default", []string{"s", strings.Repeat("a", 2<<20)})
+	assertStatus(t, doRequest(t, built, req), http.StatusRequestEntityTooLarge)
+	req = uploadRequest(t, "/raised", []string{"s", strings.Repeat("a", 2<<20)})
 	assertStatus(t, doRequest(t, built, req), http.StatusOK)
 }
 

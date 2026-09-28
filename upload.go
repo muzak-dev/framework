@@ -261,7 +261,7 @@ func (p *bindPlan) bindMultipart(c *Context, dst reflect.Value, route *Route, ve
 
 	switch {
 	case mediaType == "multipart/form-data":
-		if err := parseMultipart(c, route); err != nil {
+		if err := parseMultipart(c, route, len(p.files) > 0); err != nil {
 			return err
 		}
 	case mediaType == "application/x-www-form-urlencoded" && len(p.files) == 0:
@@ -331,16 +331,33 @@ func checkFileSizes(b *fileBinder, headers []*multipart.FileHeader, route *Route
 	return nil
 }
 
-// parseMultipart reads and parses a multipart body, bounding it by the route's
-// upload limit.
-func parseMultipart(c *Context, route *Route) error {
+// parseMultipart reads and parses a multipart body. A route that declares a
+// file is bounded by its upload limit; one that declares none is bounded by
+// its [MaxBodySize].
+//
+// The upload limit exists because a file is expected to be large. A route
+// that binds only form values, a login or a sign-up, receives nothing but text
+// the binder parses, so it is a JSON body in all but syntax and is bounded
+// like one, as its urlencoded encoding already is. Bounding it by the upload
+// limit let it buffer the 10 MiB net/http allows for values beyond its memory
+// budget twice over, some 49 MiB of heap per in-flight request, before any
+// rule on the value could run; a file sent to it, which nothing reads, was
+// also spooled to disk first. Capping the memory budget to the same limit
+// keeps a body that fits from being held any larger than it is.
+func parseMultipart(c *Context, route *Route, hasFiles bool) error {
+	limit := route.maxUploadSize
+	what := "upload"
+	if !hasFiles {
+		limit = route.maxBodySize
+		what = "form"
+	}
 	memory := maxMultipartMemory
-	if route.maxUploadSize > 0 {
-		c.r.Body = http.MaxBytesReader(c.w, c.r.Body, route.maxUploadSize)
-		memory = min(memory, route.maxUploadSize)
+	if limit > 0 {
+		c.r.Body = http.MaxBytesReader(c.w, c.r.Body, limit)
+		memory = min(memory, limit)
 	}
 	if err := c.r.ParseMultipartForm(memory); err != nil {
-		return uploadReadError(err, route.maxUploadSize, "upload")
+		return uploadReadError(err, limit, what)
 	}
 	return nil
 }

@@ -147,7 +147,9 @@ type frontend struct {
 // handler: their rate limit, then their guards, then every [Needs] and
 // [Singleton] provider they declare. An error from any of them is rendered
 // exactly as it would be for a route, which is what lets a frontend sit behind
-// the same authentication and the same budget as everything else.
+// the same authentication and the same budget as everything else. A mount that
+// inherits any guard or provider sends "Cache-Control: private, no-cache" on
+// every response, so that a cache shared between clients keeps none of them.
 //
 // A request for a path with no file behind it falls back to one, resolved from
 // the build unless the options say otherwise: a 404.html in the frontend's root
@@ -302,6 +304,7 @@ func (f *frontend) matches(requestPath string) (string, bool) {
 
 // serve answers a request from the frontend's files.
 func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
+	f.describe(c.w.Header())
 	if err := f.admit(c); err != nil {
 		a.fail(c, err)
 		return
@@ -338,6 +341,25 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 		return
 	}
 	a.serveFrontendFallback(c, f, files)
+}
+
+// describe sets the headers every response of the mount carries, whichever
+// one it turns out to be: a file, an error page, the fallback, or a refusal.
+// They are set before anything is decided because they describe the mount
+// rather than the answer, and a cache has to see them on every answer.
+func (f *frontend) describe(header http.Header) {
+	if len(f.guards) > 0 || len(f.providers) > 0 {
+		// A mount behind a guard or a provider answers some clients and not
+		// others, so a cache shared between them must not keep what it sends.
+		// A file carries Last-Modified, which is all a shared cache needs to
+		// store it heuristically, and a cookie, unlike an Authorization
+		// header, does not stop it. The answer is the one the documentation
+		// gets when it is guarded, and it replaces a value a middleware set,
+		// because a long-lived public value on a guarded file is exactly the
+		// leak this prevents. no-cache still lets the browser keep the file
+		// and revalidate it with the modification time.
+		header.Set("Cache-Control", "private, no-cache")
+	}
 }
 
 // admit runs everything a route of the same routers would run before its

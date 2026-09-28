@@ -494,7 +494,9 @@
 // the same router would run before its handler: its rate limit, its guards and
 // its [Needs] and [Singleton] providers, whose errors are rendered as they
 // would be for a route. That is what lets a frontend sit behind the same
-// authentication and the same budget as everything else.
+// authentication and the same budget as everything else, and a mount behind
+// any guard or provider answers with "Cache-Control: private, no-cache" so
+// that a shared cache does not hand one client's files to another.
 //
 // A path with no file behind it falls back to one, chosen from what the build
 // produced: a 404.html is served with 404, and failing that an index.html is

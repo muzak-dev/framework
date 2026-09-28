@@ -184,3 +184,94 @@ func withAccept(target, accept string) *http.Request {
 	req.Header.Set("Accept", accept)
 	return req
 }
+
+// assertCacheControl fails the test unless the response carries exactly the
+// Cache-Control value given, where the empty string means none.
+func assertCacheControl(t *testing.T, what string, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	if got := rec.Header().Values("Cache-Control"); (want == "" && len(got) != 0) || (want != "" && !slices.Equal(got, []string{want})) {
+		t.Errorf("%s: Cache-Control %q, want %q", what, got, want)
+	}
+}
+
+// TestGuardedMountIsPrivate is the regression test for a guarded mount whose
+// files a shared cache could keep: they were sent with Last-Modified and no
+// Cache-Control, and a request authenticated by a cookie is not one a shared
+// cache is told to leave alone.
+func TestGuardedMountIsPrivate(t *testing.T) {
+	t.Parallel()
+	modified := time.Now().Add(-30 * 24 * time.Hour)
+	files := fstest.MapFS{
+		"index.html":  {Data: []byte("<p>app</p>"), ModTime: modified},
+		"invoice.pdf": {Data: []byte("%PDF alice"), ModTime: modified},
+	}
+	pages := fstest.MapFS{"404.html": {Data: []byte("<p>missing</p>"), ModTime: modified}}
+
+	// A provider inherited from the router the mounts are registered on.
+	account := NewRouter(Needs(currentMountUser))
+	account.Static("/files", StaticOptions{FS: files})
+	account.Frontend("/app", FrontendOptions{FS: files})
+	account.Frontend("/pages", FrontendOptions{FS: pages})
+	// A guard inherited from the router's options.
+	keyed := NewRouter(WithDependencies(RequireHeaderToken("X-API-Key", "k3y")))
+	keyed.Static("/files", StaticOptions{FS: files})
+
+	app := New(quietOptions())
+	app.Include(account, WithPrefix("/account"))
+	app.Include(keyed, WithPrefix("/keyed"))
+	app.Static("/public", StaticOptions{FS: files})
+	app.Frontend("/", FrontendOptions{FS: files})
+	mustBuild(t, app)
+
+	for _, tc := range []struct {
+		target string
+		status int
+	}{
+		{"/account/files/invoice.pdf", http.StatusOK},
+		{"/account/app/", http.StatusOK},
+		{"/account/app/settings", http.StatusOK},
+		{"/account/pages/missing", http.StatusNotFound},
+	} {
+		req := withToken(tc.target)
+		req.Header.Set("Accept", "text/html")
+		rec := doRequest(t, app, req)
+		assertStatus(t, rec, tc.status)
+		assertCacheControl(t, "GET "+tc.target, rec, "private, no-cache")
+	}
+
+	req := withToken("/keyed/files/invoice.pdf")
+	req.Header.Set("X-API-Key", "k3y")
+	rec := doRequest(t, app, req)
+	assertStatus(t, rec, http.StatusOK)
+	assertCacheControl(t, "file behind a guard", rec, "private, no-cache")
+	if rec.Header().Get("Last-Modified") == "" {
+		t.Error("guarded file lost its Last-Modified, which no-cache revalidates with")
+	}
+
+	// A mount nothing guards leaves caching to the application.
+	for _, target := range []string{"/public/invoice.pdf", "/index.html", "/elsewhere"} {
+		rec := doRequest(t, app, withAccept(target, "text/html"))
+		assertStatus(t, rec, http.StatusOK)
+		assertCacheControl(t, "GET "+target, rec, "")
+	}
+}
+
+// TestAppGuardedMountIsPrivate checks a guard declared on the application
+// itself, which every mount registered on it inherits, and that a public
+// value a middleware chose does not survive on a guarded file.
+func TestAppGuardedMountIsPrivate(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions(), Needs(currentMountUser))
+	app.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000")
+			next.ServeHTTP(w, r)
+		})
+	})
+	app.Static("/files", StaticOptions{FS: fstest.MapFS{"a.txt": {Data: []byte("a")}}})
+	mustBuild(t, app)
+
+	rec := doRequest(t, app, withToken("/files/a.txt"))
+	assertStatus(t, rec, http.StatusOK)
+	assertCacheControl(t, "file behind an application guard", rec, "private, no-cache")
+}

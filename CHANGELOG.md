@@ -9,6 +9,203 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+This release is the result of an adversarial review of the framework, run as
+an attacker would against a service built on it. Every finding below was
+reproduced with a test before it was fixed, and each of those tests is now a
+regression test. Several fixes tighten a default; each one is listed under
+**Changed** with its migration.
+
+### Changed
+
+- **A JSON body sent without a `Content-Type` is refused with 415.** Accepting
+  it let any page drive a JSON route cross-site without a CORS preflight, by
+  posting an untyped `Blob`. A request with no body and no `Content-Type` is
+  unaffected. Migration: send `Content-Type: application/json` (or a `+json`
+  type) with every JSON body.
+
+- **A location tag the binder cannot reach is a build error.** A `path`,
+  `query`, `header`, `cookie`, `form` or `file` tag inside an embedded
+  pointer, a named nested struct, or a slice, map or pointer of one was
+  silently ignored, so the field became JSON body content and a request could
+  set, for example, the user ID a gateway puts in a header. A location tag on
+  an unexported field is refused the same way. Migration: embed the struct by
+  value, move the field to the top level of the input, or export it.
+
+- **Guards and providers given to `muzak.New` also cover the documentation.**
+  `/openapi.json`, `/docs` and its assets used to be served before any guard,
+  so an application-wide guard left every non-hidden route, header and schema
+  readable by anyone. They now run the application's guards and providers
+  first, and guarded docs are sent `Cache-Control: private, no-cache`. Router
+  and route guards do not apply to the docs. Migration: to keep the docs
+  public while the API is private, declare the guard where routers are
+  included rather than on `New` (the example does this now), or set
+  `AppOptions.DisableDocs`.
+
+- **Frontend and Static mounts run their routers' providers and rate limits.**
+  A mount ran only inherited guards, so a router authenticated with
+  `Needs(...)` served its files to anyone, and no quota counted a file
+  request. Mounts now apply the rate limit, guards and every inherited `Needs`
+  and `Singleton` provider in route order. Migration: move assets meant to be
+  public onto a router without those options, and use `SkipRateLimit()` to
+  keep a mount outside a quota.
+
+- **Frontend and Static mounts no longer serve dotfiles.** A path with any
+  segment starting with `.` (`/.env`, `/.git/config`) answers 404, with no SPA
+  fallback. A leading `/.well-known/` is still served. Migration: set
+  `FrontendOptions.AllowDotfiles` or `StaticOptions.AllowDotfiles` for a
+  directory whose dotfiles are meant to be public.
+
+- **Every provider along a route's chain runs.** Declaring the same type twice
+  (`app.Include(admin, Needs(RequireAdmin))` with the admin router declaring
+  `Needs(CurrentUser)` of that type) kept only the innermost provider, so the
+  outer authorization never ran. Every provider now runs, outermost first, and
+  the first error aborts the request; `From` and `TryFrom` return the
+  innermost value. Migration: an outer provider that was deliberately replaced
+  now also runs and can fail the request; declare it only where it applies, or
+  give the two values distinct types.
+
+- **An IPv6 client is counted by its /64.** `IPTracker` and the per-client
+  connection caps (`MaxConnectionsPerIP`, `MaxStreamsPerIP`) keyed on the
+  exact address, so one /64 got a fresh budget from every address in it. IPv4
+  is still counted exactly and its keys are unchanged; IPv6 tracker keys are
+  now `ip:<prefix>/64`. Migration: clients sharing a /64 now share a budget.
+  Raise the limit, or set `Tracker: IPPrefixTracker(32, 128)` if a proxy in
+  front already bounds per-address traffic.
+
+- **A request that fails after its response has started aborts the
+  connection.** A panic, or an error returned after the first byte, was logged
+  and the response then ended cleanly, so a truncated export looked complete.
+  Muzak now logs the failure and panics with `http.ErrAbortHandler`, which
+  `net/http` turns into an aborted connection without logging it again.
+  Hijacked connections, WebSocket and SSE routes are unchanged. The access log
+  marks such requests `aborted=true`, and now also records a middleware panic
+  as a 500. Migration: code that calls `App.ServeHTTP` or `Recovery` directly
+  should expect `http.ErrAbortHandler` in this case.
+
+- **A status coder error renders only its own message.** Below 500 the client
+  gets the `StatusCoder`'s own `Error()` text; from 500 up it gets the standard
+  internal message and the error is logged. Migration: put a 4xx explanation
+  in the `StatusCoder`'s own `Error()`, and use an `*HTTPError` for a 5xx whose
+  message is meant for the client.
+
+- **A singleton caches only a successful value.** An error or a panic fails
+  the request that triggered it and the next request retries. The provider now
+  sees a context without the triggering request's cancellation or deadline.
+  Migration: a provider that relied on the request deadline to bound its I/O
+  should apply its own with `context.WithTimeout`.
+
+- **A static route pattern must be validly encoded.** A static segment that is
+  not (`/50%off`) or that encodes a `/` (`/a%2Fb`) could never match and is now
+  a build error, and two spellings of one path (`/a`, `/%61`) conflict.
+  Migration: write `%25` for a literal percent sign, and use a parameter for a
+  value that may contain `/`.
+
+### Security
+
+- **A WebSocket message can no longer slip past the read limit.** The limit
+  check added the bytes already received to the length the next frame
+  declared, so one byte followed by a continuation frame declaring
+  `0x7FFFFFFFFFFFFFFF` wrapped negative and passed, and the peer could stream
+  as much as it liked into one message. With the default configuration and one
+  unauthenticated connection this could exhaust the server's memory. The check
+  cannot overflow now, and such a frame is refused with 1009 from its header
+  alone. `WSDial` connections were affected the same way and are fixed too.
+
+- **Percent-encoding can no longer route a request around a static route's
+  guards.** `GET /users/%61dmin` missed a guarded `/users/admin` and was
+  answered by a public `/users/{id}` with `id` set to `admin`. Static segments
+  are now compared percent-decoded, as `net/http.ServeMux` does, for prefixes,
+  versions, HEAD, OPTIONS, 405, WebSocket and SSE routes alike. An encoded
+  `%2F` still never matches a static segment.
+
+- **A request can no longer set a located field from its body.** See the build
+  error under **Changed**: a tag the binder silently ignored left the field to
+  the JSON body.
+
+- **`Unique` is linear for hashable elements, and defers to a count bound.**
+  It compared every pair with `reflect.DeepEqual`, so a 228 KB body cost 24
+  seconds of CPU, and `.Unique().MaxItems(100)` still paid it because rules
+  ran in declaration order. Strings, numbers, booleans and arrays or structs
+  of them now use a hash set, and a collection over a `MaxItems` or `Items`
+  bound is never searched for repeats. Other element types keep the pairwise
+  search and should carry a `MaxItems` bound.
+
+- **A status coder error no longer sends its wrapped cause to the client.**
+  `DefaultErrorRenderer` rendered the outermost `err.Error()` whenever a
+  `StatusCoder` was anywhere in the chain, so context added with
+  `fmt.Errorf("...: %w")` -- queries, connection strings, tokens -- reached the
+  response, 5xx included.
+
+- **A singleton can no longer be poisoned for the life of the process.** A
+  provider that panicked once, or that failed because the first client
+  disconnected and cancelled the request context, failed every later request
+  until restart, which one aborted request could trigger.
+
+- **A float parameter refuses `NaN` and infinity.** Query, path, header,
+  cookie and form fields accepted `NaN`, `Inf` and `Infinity`, which pass
+  comparisons such as `amount > balance`. They now fail as "must be a valid
+  number". The 0.2.6 fix covered only `validate.Number`.
+
+- **`IP` and `IPv6` refuse an address with a zone.** The zone is free text to
+  the parser, so `fe80::1%` followed by CRLF and a header, or by markup,
+  passed as a valid address.
+
+- **One rate limit quota can no longer evict another's counters.** When the
+  in-memory storage was full, eviction was global, so flooding one quota with
+  new keys -- easily done from a single IPv6 /64 with the default tracker --
+  evicted and so reset a per-account login limit. It now evicts from the quota
+  holding the most counters.
+
+- **Localized responses vary on the header or cookie that chose their
+  language.** With `LocaleFromHeader` or `LocaleFromCookie` only
+  `Vary: Accept-Language` was added, so a shared cache could be made to serve
+  an attacker-chosen language to everyone. A `LocaleFromCustom` extractor
+  should add its own `Vary`.
+
+- **CORS adds `Vary: Origin` to every response under a named-origin policy.**
+  It was added only when the origin was allowed, so a shared cache could serve
+  the allowed origin a response without CORS headers. OPTIONS responses also
+  vary on `Access-Control-Request-Method` and `Access-Control-Request-Headers`.
+
+- **Every console log record is exactly one line.** The console format, the
+  default when stderr is a terminal, wrote the message (which carries the
+  decoded request path) and attribute values as they were, so `%0a` forged log
+  lines and ESC drove the operator's terminal. Control characters, DEL, C1
+  controls, U+2028, U+2029, bidi controls and invalid UTF-8 are now escaped.
+
+- **A panic below `Compress` is answered with a 500 instead of an empty 200.**
+  Its deferred finish sent the pending header while the panic unwound, so
+  Recovery could no longer write its error.
+
+- **A less specific mount no longer serves a path inside a more specific one
+  by case.** On a case-insensitive filesystem `GET /ADMIN/secret.txt` was
+  served by a public `Static("/")` instead of the guarded `/admin` mount. Such
+  requests, and ones using `\` as a separator, now answer 404.
+
+- **`Email` refuses invisible characters.** Runes in Unicode categories Cc and
+  Cf and U+2028, U+2029 -- bidi overrides, zero-width characters, C1 controls
+  -- were accepted. Internationalised addresses are still accepted.
+
+- **`WSDial` connections apply `ReadTimeout` and `WriteTimeout`.** The
+  transport `net/http` hands back is not a `net.Conn`, so no deadline was ever
+  set, and a server that stopped reading or stalled mid-message held the
+  client forever.
+
+- **An env file parse error no longer repeats the offending line.** A malformed
+  line, often part of an unquoted multi-line PEM key or a `KEY: value` typo,
+  was quoted into the error. Errors now name the file, the line number and,
+  when it looks like one, the key. A value read by any `secret:"true"` field is
+  also hidden from every other field reading the same variable.
+
+- **A path that is not valid UTF-8 gets its 404 instead of a 500.** The "no
+  route matches" message quoted the decoded path, so `GET /%ff` made the error
+  envelope impossible to encode. The path is quoted in its escaped form when
+  it is not printable ASCII, and the method likewise in 404 and 405 messages.
+
+- **`json:"-"` on a located field no longer disables its binding.** The header
+  or query value, its default and its required check were all dropped; the
+  tag now only keeps the field out of the JSON body and schema.
+
 ## [0.2.7] - 2026-09-03
 
 ### Fixed

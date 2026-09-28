@@ -699,7 +699,7 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.dispatchFallback(c, entry)
 		return
 	}
-	route := a.matchVersion(candidates, r)
+	route := a.matchVersion(c, candidates)
 	if route == nil {
 		// The path and method both exist, but nothing registered for them
 		// answers the version this request declared, which the framework
@@ -731,11 +731,23 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 // left to extract from the request itself. Every other type keeps more than
 // one candidate at one path and resolves the version from the request to
 // choose between them; see [selectVersion].
-func (a *App) matchVersion(candidates []*Route, r *http.Request) *Route {
-	if !a.opts.Versioning.enabled() || a.opts.Versioning.Type == VersioningURI {
+//
+// Choosing by a request header makes the response depend on that header, so
+// it is added to Vary first: a shared cache that stored the answer for one
+// version without it would hand it to a client asking for another. It is
+// added before a candidate is chosen, because the 404 for a version nothing
+// answers depends on the header just as much. The one exception is a path
+// whose only candidate is version-neutral, which answers every request the
+// same way.
+func (a *App) matchVersion(c *Context, candidates []*Route) *Route {
+	versioning := a.opts.Versioning
+	if !versioning.enabled() || versioning.Type == VersioningURI {
 		return candidates[0]
 	}
-	return selectVersion(candidates, a.opts.Versioning.requestedVersions(r))
+	if field := versioning.varyField(); field != "" && (len(candidates) > 1 || !candidates[0].isVersionNeutral()) {
+		addVary(c.w.Header(), field)
+	}
+	return selectVersion(candidates, versioning.requestedVersions(c.r))
 }
 
 // dispatchFallback answers a request whose path exists but whose method has no
@@ -744,7 +756,7 @@ func (a *App) dispatchFallback(c *Context, entry *pathEntry) {
 	switch c.r.Method {
 	case http.MethodHead:
 		if candidates, ok := entry.methods[http.MethodGet]; ok {
-			if route := a.matchVersion(candidates, c.r); route != nil && route.answersHead() {
+			if route := a.matchVersion(c, candidates); route != nil && route.answersHead() {
 				// net/http discards the body of a HEAD response, so running
 				// the GET handler yields correct headers with no body.
 				a.run(c, route)

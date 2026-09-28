@@ -250,7 +250,10 @@
 // never overlap, which is checked when the application is built.
 // [VersioningCustom] alone can offer several versions in order of
 // preference, matched from most to least preferred against whatever a route
-// actually answers.
+// actually answers. A response chosen by a header names that header in Vary,
+// the 404 for a version nothing answers included, so a shared cache keeps one
+// answer per version; [VersioningCustom] cannot know what its extractor reads,
+// so there the application adds it to Vary itself.
 //
 // # Internationalization
 //

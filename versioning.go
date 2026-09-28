@@ -93,6 +93,15 @@ type VersioningOptions struct {
 
 	// Extractor pulls the version(s) a request carries, for
 	// [VersioningCustom]. It is required for that type.
+	//
+	// The response to a versioned path depends on whatever the extractor
+	// reads, and a shared cache has to be told so with Vary, or it hands the
+	// answer for one version to a client asking for another. [VersioningHeader]
+	// and [VersioningMediaType] add their header to Vary on their own, but an
+	// extractor may read anything, so under [VersioningCustom] the application
+	// declares it: a middleware installed with [App.Use] that adds the header
+	// the extractor reads to Vary on every response, for example
+	// w.Header().Add("Vary", "X-Api-Version") before calling the next handler.
 	Extractor VersionExtractor
 
 	// DefaultVersion is used for a route or router that declares none of its
@@ -285,6 +294,24 @@ func (o VersioningOptions) requestedVersions(r *http.Request) []Version {
 		return o.extractedVersions(r)
 	default:
 		return nil
+	}
+}
+
+// varyField names the request header a response depends on when a route is
+// chosen by version, for [App.matchVersion] to add to Vary: the configured
+// header for [VersioningHeader], and Accept for [VersioningMediaType]. It is
+// empty for [VersioningCustom], whose extractor may read anything and has to
+// declare it itself (see [VersioningOptions.Extractor]), and for
+// [VersioningURI], where the version is part of the URL a cache already keys
+// on.
+func (o VersioningOptions) varyField() string {
+	switch o.Type {
+	case VersioningHeader:
+		return http.CanonicalHeaderKey(o.Header)
+	case VersioningMediaType:
+		return "Accept"
+	default:
+		return ""
 	}
 }
 

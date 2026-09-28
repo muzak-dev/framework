@@ -551,6 +551,16 @@ func (a *App) build() {
 	a.resolveRateLimiting(state)
 	a.lifecycle.components = state.lifecycles
 	a.frontends = state.frontends
+	// Two mounts at one path cannot both answer, and the one registered first
+	// would take every request, whatever guards the second was given. That is
+	// a mistake to report rather than a precedence to apply quietly.
+	mounted := make(map[string]bool, len(a.frontends))
+	for _, f := range a.frontends {
+		if mounted[f.path] {
+			state.errs = append(state.errs, fmt.Errorf("muzak: %s at %q: a mount is registered at this path more than once", f.kind, f.mountPath()))
+		}
+		mounted[f.path] = true
+	}
 	slices.SortStableFunc(a.frontends, func(x, y *frontend) int {
 		return len(y.path) - len(x.path)
 	})

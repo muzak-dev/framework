@@ -420,3 +420,26 @@ func TestStaticSymlinkContainmentNeedsARoot(t *testing.T) {
 		}
 	}
 }
+
+// TestTwoMountsAtOnePathAreRefused is the regression test for a second mount
+// at a path silently losing to the first, guards and all: the request was
+// answered by the mount the operator registered first, whatever its guards
+// were, and the second never served anything.
+func TestTwoMountsAtOnePathAreRefused(t *testing.T) {
+	t.Parallel()
+	files := fstest.MapFS{"a.txt": {Data: []byte("a")}}
+	app := New(quietOptions())
+	app.Static("/assets", StaticOptions{FS: files})
+	guarded := NewRouter(Needs(currentMountUser))
+	guarded.Static("/assets", StaticOptions{FS: files})
+	app.Include(guarded)
+	app.Frontend("/", FrontendOptions{FS: files})
+	app.Frontend("/", FrontendOptions{FS: files})
+
+	msg := buildError(t, app)
+	for _, want := range []string{`"/assets"`, `"/"`, "more than once"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("build error %q does not mention %s", msg, want)
+		}
+	}
+}

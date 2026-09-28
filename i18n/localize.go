@@ -20,6 +20,12 @@ import (
 // duration becomes the phrase at datetime.distance_in_words, and a number is
 // grouped and separated the way number.format says.
 //
+// A format name with no pattern under it is used as the pattern itself, so
+// what a caller passes as "format" is read as a strftime pattern. Expansion is
+// bounded (see [Store.Strftime]), which is what makes that safe to reach with
+// a value the caller did not write, though a name from a client is still best
+// checked against the formats the application offers.
+//
 // Arguments are alternating names and values, as everywhere else here:
 //
 //	format     names the pattern, defaulting to "default"

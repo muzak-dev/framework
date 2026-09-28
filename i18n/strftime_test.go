@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // moment is the instant every strftime case is formatted at. It is chosen so
@@ -301,5 +302,57 @@ func TestStrftimeNestedDirectivesStillExpand(t *testing.T) {
 	}
 	if got, want := store.Localize("en", moment), "07/03/2026 09:05:03"; got != want {
 		t.Errorf("Localize = %q, want %q", got, want)
+	}
+}
+
+// TestStrftimeWidthIsCapped is the regression test for a width that was read
+// as written and padded with a loop: "%500000000Y" is eleven bytes and made
+// half a gigabyte.
+func TestStrftimeWidthIsCapped(t *testing.T) {
+	t.Parallel()
+	store := Builtin()
+	for _, pattern := range []string{
+		"%500000000Y", "%99999999999999999999999Y", "%_1000000d", "%0999999999N", "%1000000e",
+	} {
+		got := store.Strftime("en", pattern, moment)
+		if len(got) > maxStrftimeWidth+16 {
+			t.Errorf("Strftime(%q) = %d bytes, want it padded to at most %d", pattern, len(got), maxStrftimeWidth)
+		}
+	}
+	if got, want := store.Strftime("en", "%64Y", moment), strings.Repeat("0", 60)+"2026"; got != want {
+		t.Errorf("a width at the cap = %q, want %q", got, want)
+	}
+	if got := store.Strftime("en", "%65Y", moment); len(got) != maxStrftimeWidth {
+		t.Errorf("a width past the cap is %d bytes, want the cap of %d", len(got), maxStrftimeWidth)
+	}
+	if got, want := store.Strftime("en", "%4d", moment), "0007"; got != want {
+		t.Errorf("an ordinary width = %q, want %q", got, want)
+	}
+}
+
+// TestStrftimeOutputIsCapped covers the result growing past what any width
+// allows: many directives, each writing text the locale supplies. The cut is at
+// a character boundary, so a multi-byte name is not split.
+func TestStrftimeOutputIsCapped(t *testing.T) {
+	t.Parallel()
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("é", 500)
+	doc := "en:\n  date:\n    month_names: [~, " + long + ", " + long + ", " + long + ", " + long + "]\n"
+	if err := store.LoadFile("x.yml", []byte(doc)); err != nil {
+		t.Fatal(err)
+	}
+	pattern := strings.Repeat("%B", 4000)
+	got := store.Strftime("en", pattern, time.Date(2026, time.March, 7, 0, 0, 0, 0, time.UTC))
+	if len(got) > maxStrftimeOutput {
+		t.Errorf("Strftime produced %d bytes, want at most %d", len(got), maxStrftimeOutput)
+	}
+	if !utf8.ValidString(got) {
+		t.Error("the cut split a multi-byte character")
+	}
+	if len(got) < maxStrftimeOutput-4 {
+		t.Errorf("Strftime produced %d bytes, want the output cut at the cap and not sooner", len(got))
 	}
 }

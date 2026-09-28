@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Strftime formats a time with a pattern written the way locale files write
@@ -28,8 +29,9 @@ import (
 // write one that reaches itself. Expansion is therefore bounded: a directive
 // that would nest more than [maxStrftimeDepth] patterns deep is written out as
 // it stands, and one pattern, however it expands, is read for no more than
-// [maxStrftimeSteps] characters. Neither bound is reached by a pattern that
-// means what it says.
+// [maxStrftimeSteps] characters. A width is at most [maxStrftimeWidth], and the
+// result at most [maxStrftimeOutput] bytes, cut at a character boundary. None
+// of these bounds is reached by a pattern that means what it says.
 func (s *Store) Strftime(locale, pattern string, t time.Time) string {
 	if layout, isGo := strings.CutPrefix(pattern, "go:"); isGo {
 		return t.Format(layout)
@@ -43,6 +45,13 @@ func (s *Store) Strftime(locale, pattern string, t time.Time) string {
 
 	steps := maxStrftimeSteps
 	b := s.appendStrftime((*buf)[:0], locale, pattern, t, 0, &steps)
+	if len(b) > maxStrftimeOutput {
+		cut := maxStrftimeOutput
+		for cut > 0 && !utf8.RuneStart(b[cut]) {
+			cut--
+		}
+		b = b[:cut]
+	}
 
 	*buf = b
 	return string(b)
@@ -58,9 +67,18 @@ func (s *Store) Strftime(locale, pattern string, t time.Time) string {
 // Depth alone is not enough: a pattern of a thousand "%c" whose expansion is a
 // thousand more would take a thousand to the fourth power steps, so the total
 // work is bounded as well.
+//
+// Widths and the length of the result need bounds of their own, because
+// neither is limited by the length of the pattern: "%500000000Y" is eleven
+// bytes and asks for half a gigabyte of padding, and a few thousand directives
+// that each write a long month name from the locale add up as fast. An
+// application that formats with a format name a client chose reaches all of
+// this, since a name that is not a defined format is used as the pattern.
 const (
-	maxStrftimeDepth = 4
-	maxStrftimeSteps = 1 << 14
+	maxStrftimeDepth  = 4
+	maxStrftimeSteps  = 1 << 14
+	maxStrftimeWidth  = 64
+	maxStrftimeOutput = 1 << 14
 )
 
 // appendStrftime appends a pattern expanded for a time, at the given nesting
@@ -75,7 +93,7 @@ func (s *Store) appendStrftime(b []byte, locale, pattern string, t time.Time, de
 	}
 
 	for i := 0; i < len(pattern); i++ {
-		if *steps--; *steps < 0 {
+		if *steps--; *steps < 0 || len(b) >= maxStrftimeOutput {
 			return b
 		}
 		if pattern[i] != '%' || i+1 >= len(pattern) {
@@ -116,12 +134,11 @@ func readFlags(pattern string, i *int) flags {
 			f.upper = true
 		default:
 			// A run of digits after the flags is the width the field pads to.
-			start := *i
+			// It is clamped as it is read, so that a run of digits too long
+			// for an int cannot wrap around to a small or negative width.
 			for *i < len(pattern) && pattern[*i] >= '0' && pattern[*i] <= '9' {
+				f.width = min(f.width*10+int(pattern[*i]-'0'), maxStrftimeWidth)
 				*i++
-			}
-			if *i > start {
-				f.width, _ = strconv.Atoi(pattern[start:*i])
 			}
 			return f
 		}

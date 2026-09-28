@@ -413,6 +413,17 @@ type CORSOptions struct {
 // browsers reject that pairing anyway and accepting it here would suggest it
 // works.
 //
+// Every response a policy that names its origins produces carries
+// "Vary: Origin", including the ones to a request with no Origin or a denied
+// one, because those are exactly the responses that lack the
+// Access-Control-Allow-Origin an allowed origin would get: a shared cache
+// that stored one of them without the Vary would hand it to the allowed
+// origin's browser, which would then refuse to read it. Only a wildcard
+// policy, whose answer to every origin is the same "*", leaves it out. Every
+// OPTIONS response varies on Access-Control-Request-Method, which decides
+// whether it is answered as a preflight, and a preflight answer on
+// Access-Control-Request-Headers as well.
+//
 // The error returned describes a policy that cannot be served safely. A valid
 // policy returns a nil error.
 func CORS(opts CORSOptions) (Middleware, error) {
@@ -449,12 +460,25 @@ func CORS(opts CORSOptions) (Middleware, error) {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := w.Header()
+			if !wildcard {
+				addVary(header, "Origin")
+			}
+			preflight := false
+			if r.Method == http.MethodOptions {
+				addVary(header, "Access-Control-Request-Method")
+				if r.Header.Get("Access-Control-Request-Method") != "" {
+					preflight = true
+					addVary(header, "Access-Control-Request-Headers")
+				}
+			}
+
 			origin := r.Header.Get("Origin")
 			if origin == "" || !allowed(origin) {
 				// Same-origin requests and denied origins are served without
 				// any CORS header, which is what makes the browser refuse to
 				// expose the response.
-				if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+				if preflight {
 					w.WriteHeader(http.StatusForbidden)
 					return
 				}
@@ -462,12 +486,12 @@ func CORS(opts CORSOptions) (Middleware, error) {
 				return
 			}
 
-			header := w.Header()
-			if wildcard && !opts.AllowCredentials {
+			// A wildcard can only be served without credentials, which CORS
+			// refused to be built with above.
+			if wildcard {
 				header.Set("Access-Control-Allow-Origin", "*")
 			} else {
 				header.Set("Access-Control-Allow-Origin", origin)
-				header.Add("Vary", "Origin")
 			}
 			if opts.AllowCredentials {
 				header.Set("Access-Control-Allow-Credentials", "true")
@@ -475,12 +499,10 @@ func CORS(opts CORSOptions) (Middleware, error) {
 			if exposeHeaders != "" {
 				header.Set("Access-Control-Expose-Headers", exposeHeaders)
 			}
-			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+			if preflight {
 				header.Set("Access-Control-Allow-Methods", allowMethods)
 				header.Set("Access-Control-Allow-Headers", allowHeaders)
 				header.Set("Access-Control-Max-Age", maxAge)
-				header.Add("Vary", "Access-Control-Request-Method")
-				header.Add("Vary", "Access-Control-Request-Headers")
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}

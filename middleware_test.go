@@ -582,3 +582,94 @@ func TestAccessLogLevelOption(t *testing.T) {
 		t.Errorf("the configured level was not used:\n%s", logs.String())
 	}
 }
+
+// TestCORSAlwaysVariesOnOrigin is the regression test for a policy that added
+// "Vary: Origin" only when it allowed the origin, so the response to a request
+// with no Origin, or a denied one, was cacheable as if it were the same for
+// everyone. A shared cache could then serve that header-less variant to the
+// allowed origin, breaking it. Every response under a named-origin policy now
+// varies on Origin, and an OPTIONS response on what makes it a preflight.
+func TestCORSAlwaysVariesOnOrigin(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.CORS = CORSOptions{AllowedOrigins: []string{"https://app.example.com"}}
+	app := New(opts)
+	app.Get("/x", okHandler)
+	mustBuild(t, app)
+
+	varies := func(rec *httptest.ResponseRecorder, field string) bool {
+		for _, value := range rec.Header().Values("Vary") {
+			for listed := range strings.SplitSeq(value, ",") {
+				if strings.EqualFold(strings.TrimSpace(listed), field) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	request := func(method, origin string, preflight bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "/x", nil)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		if preflight {
+			req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+		}
+		return doRequest(t, app, req)
+	}
+
+	tests := []struct {
+		name      string
+		method    string
+		origin    string
+		preflight bool
+		status    int
+		want      []string
+	}{
+		{"no Origin", http.MethodGet, "", false, http.StatusOK, []string{"Origin"}},
+		{"a denied Origin", http.MethodGet, "https://evil.example", false, http.StatusOK, []string{"Origin"}},
+		{"the allowed Origin", http.MethodGet, "https://app.example.com", false, http.StatusOK, []string{"Origin"}},
+		{"a plain OPTIONS", http.MethodOptions, "https://app.example.com", false, http.StatusNoContent,
+			[]string{"Origin", "Access-Control-Request-Method"}},
+		{"an allowed preflight", http.MethodOptions, "https://app.example.com", true, http.StatusNoContent,
+			[]string{"Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"}},
+		{"a denied preflight", http.MethodOptions, "https://evil.example", true, http.StatusForbidden,
+			[]string{"Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := request(tc.method, tc.origin, tc.preflight)
+			assertStatus(t, rec, tc.status)
+			for _, field := range tc.want {
+				if !varies(rec, field) {
+					t.Errorf("Vary = %q, want it to name %s", rec.Header().Values("Vary"), field)
+				}
+			}
+			if n := strings.Count(strings.Join(rec.Header().Values("Vary"), ","), "Origin"); n != 1 {
+				t.Errorf("Vary = %q names Origin %d times, want once", rec.Header().Values("Vary"), n)
+			}
+		})
+	}
+}
+
+// TestCORSWildcardDoesNotVaryOnOrigin pins the one policy that leaves Origin
+// out: its answer to every origin is the same "*".
+func TestCORSWildcardDoesNotVaryOnOrigin(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.CORS = CORSOptions{AllowedOrigins: []string{"*"}}
+	app := New(opts)
+	app.Get("/x", okHandler)
+	mustBuild(t, app)
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Origin", "https://anywhere.example")
+	rec := doRequest(t, app, req)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+	}
+	if vary := rec.Header().Values("Vary"); len(vary) != 0 {
+		t.Errorf("Vary = %q, want none for a wildcard policy", vary)
+	}
+}

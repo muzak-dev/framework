@@ -492,20 +492,24 @@ func (p *compressorPool) put(encoding string, compressor io.WriteCloser) {
 
 // addVaryAcceptEncoding records that the response depends on Accept-Encoding,
 // unless the handler has already said so.
+func addVaryAcceptEncoding(header http.Header) { addVary(header, "Accept-Encoding") }
+
+// addVary records that the response depends on the named request header,
+// unless the Vary list already says so.
 //
-// It appends rather than sets, because Vary is a list and a handler that
-// declared its own fields is describing something this middleware knows
-// nothing about.
-func addVaryAcceptEncoding(header http.Header) {
+// It appends rather than sets, because Vary is a list and a handler or
+// middleware that declared its own fields is describing something the caller
+// knows nothing about.
+func addVary(header http.Header, field string) {
 	for _, value := range header.Values("Vary") {
-		for field := range strings.SplitSeq(value, ",") {
-			field = strings.TrimSpace(field)
+		for listed := range strings.SplitSeq(value, ",") {
+			listed = strings.TrimSpace(listed)
 			// "*" already says the response varies by everything, and adding to
 			// it would only make the header longer.
-			if field == "*" || strings.EqualFold(field, "Accept-Encoding") {
+			if listed == "*" || strings.EqualFold(listed, field) {
 				return
 			}
 		}
 	}
-	header.Add("Vary", "Accept-Encoding")
+	header.Add("Vary", field)
 }

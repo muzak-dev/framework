@@ -1,6 +1,7 @@
 package i18n
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -215,5 +216,90 @@ func TestStrftimeRemainingDirectives(t *testing.T) {
 		if got := store.Strftime("en", "%G", when); got != want {
 			t.Errorf("%%G on %s = %q, want %q", day, got, want)
 		}
+	}
+}
+
+// TestStrftimeSurvivesAPatternThatNamesItself is the regression test for a
+// locale whose default time format is "%c", or whose date and time formats
+// name each other: expansion recursed until the stack was exhausted, which Go
+// reports as a fatal error that ends the process and that no recover can
+// catch, on the first request to localize a time in that locale.
+func TestStrftimeSurvivesAPatternThatNamesItself(t *testing.T) {
+	t.Parallel()
+	load := func(t *testing.T, doc string) *Store {
+		t.Helper()
+		store, err := New(StoreOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.LoadFile("x.yml", []byte(doc)); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	for name, doc := range map[string]string{
+		"a format that is %c":           "en:\n  time:\n    formats:\n      default: \"%c\"\n",
+		"a date format that is %x":      "en:\n  date:\n    formats:\n      default: \"%x\"\n",
+		"two formats naming each other": "en:\n  date:\n    formats:\n      default: \"%c\"\n  time:\n    formats:\n      default: \"%x\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := load(t, doc)
+			// Reaching the assertions is the test: before the fix the process
+			// died on the way here.
+			for _, pattern := range []string{"%c", "%x", "%c and %x"} {
+				if got := store.Strftime("en", pattern, moment); len(got) > 64 {
+					t.Errorf("Strftime(%q) = %d bytes, want a short answer", pattern, len(got))
+				}
+			}
+			_ = store.Localize("en", moment)
+			_ = store.Localize("en", moment, "as", "date")
+		})
+	}
+}
+
+// TestStrftimeWorkIsBounded covers the recursion a depth limit alone does not
+// stop: a pattern that names itself many times over expands to the many-th
+// power of that, in time, without ever producing any output.
+func TestStrftimeWorkIsBounded(t *testing.T) {
+	t.Parallel()
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := "en:\n  time:\n    formats:\n      default: \"" + strings.Repeat("%c", 1000) + "\"\n"
+	if err := store.LoadFile("x.yml", []byte(doc)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = store.Localize("en", moment)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a pattern of a thousand percent-c did not finish: expansion work is not bounded")
+	}
+}
+
+// TestStrftimeNestedDirectivesStillExpand pins what the bounds must not touch:
+// the compound directives reaching the locale's own patterns, one level and
+// several.
+func TestStrftimeNestedDirectivesStillExpand(t *testing.T) {
+	t.Parallel()
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := "en:\n  date:\n    formats:\n      default: \"%d/%m/%Y\"\n  time:\n    formats:\n      default: \"%x %X\"\n"
+	if err := store.LoadFile("x.yml", []byte(doc)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := store.Strftime("en", "%c", moment), "07/03/2026 09:05:03"; got != want {
+		t.Errorf("%%c = %q, want %q", got, want)
+	}
+	if got, want := store.Localize("en", moment), "07/03/2026 09:05:03"; got != want {
+		t.Errorf("Localize = %q, want %q", got, want)
 	}
 }

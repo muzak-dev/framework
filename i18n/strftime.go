@@ -22,6 +22,14 @@ import (
 //
 //	formats:
 //	  iso: "go:2006-01-02T15:04:05Z07:00"
+//
+// The compound directives %c and %x are the locale's own patterns, so a
+// pattern may reach another pattern through them, and a locale file is free to
+// write one that reaches itself. Expansion is therefore bounded: a directive
+// that would nest more than [maxStrftimeDepth] patterns deep is written out as
+// it stands, and one pattern, however it expands, is read for no more than
+// [maxStrftimeSteps] characters. Neither bound is reached by a pattern that
+// means what it says.
 func (s *Store) Strftime(locale, pattern string, t time.Time) string {
 	if layout, isGo := strings.CutPrefix(pattern, "go:"); isGo {
 		return t.Format(layout)
@@ -32,9 +40,44 @@ func (s *Store) Strftime(locale, pattern string, t time.Time) string {
 		*buf = (*buf)[:0]
 		buffers.Put(buf)
 	}()
-	b := (*buf)[:0]
+
+	steps := maxStrftimeSteps
+	b := s.appendStrftime((*buf)[:0], locale, pattern, t, 0, &steps)
+
+	*buf = b
+	return string(b)
+}
+
+// The bounds on expanding a pattern; see [Store.Strftime].
+//
+// A locale file is the one input here the framework did not write, and %c and
+// %x read their pattern from it. Without a depth bound a file whose default
+// time format is "%c" recurses until the stack is exhausted, which Go reports
+// as a fatal error no recover can catch, and it does so on the first request
+// to localize a time in that locale rather than when the file is loaded.
+// Depth alone is not enough: a pattern of a thousand "%c" whose expansion is a
+// thousand more would take a thousand to the fourth power steps, so the total
+// work is bounded as well.
+const (
+	maxStrftimeDepth = 4
+	maxStrftimeSteps = 1 << 14
+)
+
+// appendStrftime appends a pattern expanded for a time, at the given nesting
+// depth of compound directives, spending from a budget of characters shared by
+// the whole expansion.
+func (s *Store) appendStrftime(b []byte, locale, pattern string, t time.Time, depth int, steps *int) []byte {
+	if layout, isGo := strings.CutPrefix(pattern, "go:"); isGo {
+		return append(b, t.Format(layout)...)
+	}
+	if depth > maxStrftimeDepth {
+		return append(b, pattern...)
+	}
 
 	for i := 0; i < len(pattern); i++ {
+		if *steps--; *steps < 0 {
+			return b
+		}
 		if pattern[i] != '%' || i+1 >= len(pattern) {
 			b = append(b, pattern[i])
 			continue
@@ -45,11 +88,9 @@ func (s *Store) Strftime(locale, pattern string, t time.Time) string {
 			b = append(b, '%')
 			break
 		}
-		b = s.appendDirective(b, locale, pattern[i], t, f)
+		b = s.appendDirective(b, locale, pattern[i], t, f, depth, steps)
 	}
-
-	*buf = b
-	return string(b)
+	return b
 }
 
 // flags are the modifiers written between a percent and the field it names.
@@ -94,7 +135,7 @@ func readFlags(pattern string, i *int) flags {
 // directive this package does not know is written out as it stands rather than
 // swallowed, so that an unfamiliar pattern degrades into visible text instead
 // of into a gap.
-func (s *Store) appendDirective(b []byte, locale string, directive byte, t time.Time, f flags) []byte {
+func (s *Store) appendDirective(b []byte, locale string, directive byte, t time.Time, f flags, depth int, steps *int) []byte {
 	switch directive {
 	case '%':
 		return append(b, '%')
@@ -176,23 +217,23 @@ func (s *Store) appendDirective(b []byte, locale string, directive byte, t time.
 
 	// The compound directives, each of which is the pattern it stands for.
 	case 'D':
-		return append(b, s.Strftime(locale, "%m/%d/%y", t)...)
+		return s.appendStrftime(b, locale, "%m/%d/%y", t, depth+1, steps)
 	case 'F':
-		return append(b, s.Strftime(locale, "%Y-%m-%d", t)...)
+		return s.appendStrftime(b, locale, "%Y-%m-%d", t, depth+1, steps)
 	case 'T':
-		return append(b, s.Strftime(locale, "%H:%M:%S", t)...)
+		return s.appendStrftime(b, locale, "%H:%M:%S", t, depth+1, steps)
 	case 'R':
-		return append(b, s.Strftime(locale, "%H:%M", t)...)
+		return s.appendStrftime(b, locale, "%H:%M", t, depth+1, steps)
 	case 'r':
-		return append(b, s.Strftime(locale, "%I:%M:%S %p", t)...)
+		return s.appendStrftime(b, locale, "%I:%M:%S %p", t, depth+1, steps)
 	case 'v':
-		return append(b, s.Strftime(locale, "%e-%b-%Y", t)...)
+		return s.appendStrftime(b, locale, "%e-%b-%Y", t, depth+1, steps)
 	case 'x':
-		return append(b, s.Strftime(locale, s.format(locale, "date.formats.default", "%Y-%m-%d"), t)...)
+		return s.appendStrftime(b, locale, s.format(locale, "date.formats.default", "%Y-%m-%d"), t, depth+1, steps)
 	case 'X':
-		return append(b, s.Strftime(locale, "%H:%M:%S", t)...)
+		return s.appendStrftime(b, locale, "%H:%M:%S", t, depth+1, steps)
 	case 'c':
-		return append(b, s.Strftime(locale, s.format(locale, "time.formats.default", "%a %b %e %H:%M:%S %Y"), t)...)
+		return s.appendStrftime(b, locale, s.format(locale, "time.formats.default", "%a %b %e %H:%M:%S %Y"), t, depth+1, steps)
 
 	default:
 		// Unknown to this package, so written out rather than dropped.

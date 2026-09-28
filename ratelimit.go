@@ -179,15 +179,26 @@ type QuotaResolver func(ctx *Context) ([]Quota, error)
 // that does not name a tracker uses.
 //
 // The address is the one [Context.ClientIP] resolves, so it is the peer's
-// unless the application names a trusted proxy. A request whose address cannot
-// be parsed is refused rather than counted anonymously, because counting every
-// such request under one key would give them all a single shared budget.
+// unless the application names a trusted proxy. An IPv4 address is counted
+// exactly, under a key such as "ip:192.0.2.7". An IPv6 address is counted by
+// its /64, under a key such as "ip:2001:db8:1:2::/64", because a client
+// holding a /64 can use a different address on every request and would
+// otherwise get a fresh budget each time; see [IPPrefixTracker] for the
+// reasoning, and for other lengths. It is the same as
+// IPPrefixTracker(32, 64) except for how an IPv4 key is spelled, which stays
+// the bare address it has always been so that counters in a shared storage
+// carry over. Use IPPrefixTracker(32, 128) to count every IPv6 address on its
+// own, which is only safe where something in front has already bounded them.
+//
+// A request whose address cannot be parsed is refused rather than counted
+// anonymously, because counting every such request under one key would give
+// them all a single shared budget.
 func IPTracker(ctx *Context) (string, error) {
-	ip := ctx.ClientIP()
-	if ip == "" {
+	addr := ctx.ClientAddr()
+	if !addr.IsValid() {
 		return "", errRateLimitNoAddress
 	}
-	return "ip:" + ip, nil
+	return "ip:" + clientIdentity(addr), nil
 }
 
 // errRateLimitNoAddress reports a request that cannot be attributed to an
@@ -199,17 +210,17 @@ var errRateLimitNoAddress = errors.New("muzak: the rate limiter could not determ
 // IPPrefixTracker keys a rate limit on a prefix of the client's address rather
 // than the whole of it.
 //
-// [IPTracker] keys on the exact address, which stops fitting the address
-// families it counts as soon as one of them is cheap to change: an IPv6 /64 is
-// the block size most providers hand out, so a client holding one can present
-// a different address on every request while never leaving a range only they
-// hold, and each address is a fresh budget to IPTracker. Keying on a shorter
-// prefix instead puts every address in that range back under one budget.
-// ipv4Bits and ipv6Bits are the prefix lengths kept for each family; 32 and 64
-// keep IPv4 addresses exact while collapsing an IPv6 source down to the
-// allocation it actually came from:
+// Keying on the exact address stops fitting the address families it counts
+// as soon as one of them is cheap to change: an IPv6 /64 is the block size
+// most providers hand out, so a client holding one can present a different
+// address on every request while never leaving a range only they hold, and
+// each address would be a fresh budget. Keying on a prefix instead puts every
+// address in that range back under one budget. [IPTracker] already does this
+// with a /64; this is for a different length, such as a /48 for a network
+// where whole sites are handed out, or a /24 of IPv4. ipv4Bits and ipv6Bits
+// are the prefix lengths kept for each family:
 //
-//	muzak.RateLimitOptions{Tracker: muzak.IPPrefixTracker(32, 64)}
+//	muzak.RateLimitOptions{Tracker: muzak.IPPrefixTracker(32, 48)}
 //
 // It panics if either length is out of range for its family (0 to 32 for
 // IPv4, 0 to 128 for IPv6), which is a mistake worth catching where the
@@ -226,11 +237,7 @@ func IPPrefixTracker(ipv4Bits, ipv6Bits int) RateLimitTracker {
 		if !addr.IsValid() {
 			return "", errRateLimitNoAddress
 		}
-		bits := ipv4Bits
-		if addr.Is6() {
-			bits = ipv6Bits
-		}
-		prefix, err := addr.Prefix(bits)
+		prefix, err := clientPrefix(addr, ipv4Bits, ipv6Bits)
 		if err != nil {
 			// coverage: bits is validated above and addr is always exactly one
 			// of the two families Prefix accepts a length for, so Prefix itself

@@ -208,13 +208,18 @@ var errConnectionLimitNoAddress = errors.New("muzak: a per-client connection lim
 // skips the per-client check for entirely, whenever limit is not positive, so
 // an application that never configures a per-client limit resolves no
 // address and pays nothing for a dimension it does not use.
+//
+// A client is its IPv4 address, or its IPv6 /64, the same identity the default
+// rate limit tracker counts; see clientIPv6PrefixBits. Keying on the exact
+// IPv6 address would let a client holding a /64 open a fresh allowance of
+// connections from every address in it, which is to say without limit.
 func perClientKey(c *Context, limit int) (string, error) {
 	if limit <= 0 {
 		return "", nil
 	}
-	ip := c.ClientIP()
-	if ip == "" {
+	addr := c.ClientAddr()
+	if !addr.IsValid() {
 		return "", errConnectionLimitNoAddress
 	}
-	return ip, nil
+	return clientIdentity(addr), nil
 }

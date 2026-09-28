@@ -244,3 +244,44 @@ func (c *Context) ClientAddr() netip.Addr {
 	}
 	return resolver.resolve(c.r)
 }
+
+// clientIPv6PrefixBits is the length of the IPv6 prefix Muzak counts as one
+// client wherever it bounds what a single client may do: the default rate
+// limit tracker, [IPTracker], and the per-client connection caps,
+// [WSOptions.MaxConnectionsPerIP] and [SSEOptions.MaxStreamsPerIP].
+//
+// A /64 is the block size an IPv6 network is built from and the smallest most
+// providers hand to a subscriber, so a client holding one can present a new
+// address on every request without ever leaving a range that is theirs alone.
+// Counting by exact address would give each of those a fresh budget. An IPv4
+// address is still counted exactly, since one is neither cheap nor plentiful.
+const clientIPv6PrefixBits = 64
+
+// clientPrefix truncates an address to the prefix length kept for its family.
+// It is the arithmetic [IPPrefixTracker] is made of, and [clientIdentity]
+// applies it with the lengths Muzak uses by default.
+func clientPrefix(addr netip.Addr, ipv4Bits, ipv6Bits int) (netip.Prefix, error) {
+	bits := ipv4Bits
+	if addr.Is6() {
+		bits = ipv6Bits
+	}
+	return addr.Prefix(bits)
+}
+
+// clientIdentity renders the key a valid client address is counted under by
+// default: an IPv4 address as itself, and an IPv6 one as its
+// clientIPv6PrefixBits prefix, such as "2001:db8:1:2::/64".
+//
+// The IPv4 form is kept bare, the same string [Context.ClientIP] returns, so
+// that a counter held in a shared storage under the previous key format is
+// still the one counted after an upgrade. An IPv4-mapped IPv6 address never
+// reaches this as an IPv6 one, because the resolver has already unmapped it.
+func clientIdentity(addr netip.Addr) string {
+	if addr.Is4() {
+		return addr.String()
+	}
+	// The length is within range for an IPv6 address by construction, so the
+	// only error Prefix can report cannot happen here.
+	prefix, _ := clientPrefix(addr, 32, clientIPv6PrefixBits)
+	return prefix.String()
+}

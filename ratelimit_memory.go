@@ -25,9 +25,14 @@ const (
 type MemoryRateLimitOptions struct {
 	// MaxEntries is how many counters the storage holds at once, defaulting to
 	// [DefaultRateLimitMaxEntries]. Once it is full, admitting a counter
-	// discards the one closest to expiring, which is the one whose loss costs
-	// least. A negative value removes the bound, which is only appropriate
-	// when the set of keys is known to be small and closed.
+	// discards one from the quota holding the most counters, and within that
+	// quota the one closest to expiring, which is the one whose loss costs
+	// least. Taking it from the largest quota is what keeps a client who can
+	// mint keys under one quota (an address per request from an IPv6 range,
+	// say) from pushing out another quota's counters, such as a per-account
+	// login limit, and so resetting them. A negative value removes the bound,
+	// which is only appropriate when the set of keys is known to be small and
+	// closed.
 	MaxEntries int
 
 	// SweepInterval is how often expired counters are discarded, defaulting to
@@ -49,8 +54,12 @@ type MemoryRateLimitOptions struct {
 // The table is bounded in two ways, because it is keyed by something the
 // client influences and an unbounded one would be a memory leak with a name.
 // Expired counters are swept periodically, and a table at
-// [MemoryRateLimitOptions.MaxEntries] discards the counter closest to expiring
-// to make room for a new one.
+// [MemoryRateLimitOptions.MaxEntries] makes room for a new counter by
+// discarding the one closest to expiring from whichever quota holds the most.
+// Flooding one quota with fresh keys therefore only ever displaces that
+// quota's own counters. Within a single quota it still can, which is why a
+// quota whose keys a client chooses freely (a username on a login form) is
+// best paired with one it cannot, such as its address.
 //
 // It implements [Lifecycle], so an application that uses it starts and stops
 // it as part of its own start-up and shutdown. Stopping releases every counter
@@ -64,7 +73,10 @@ type MemoryRateLimitStorage struct {
 
 	mu      sync.Mutex
 	entries map[string]*memoryCounter
-	expiry  memoryExpiryHeap
+	// partitions holds each quota's counters in the order they expire, so
+	// that eviction can be confined to one quota. A quota with no counters
+	// has no entry, so names a resolver stops producing do not accumulate.
+	partitions map[string]*memoryExpiryHeap
 	// stop is closed to end the sweeper and done is closed once it has ended,
 	// so that Stop returns only when nothing of this storage is still running.
 	stop chan struct{}
@@ -74,6 +86,7 @@ type MemoryRateLimitStorage struct {
 // memoryCounter is one client's count within one quota's window.
 type memoryCounter struct {
 	key       string
+	quota     string
 	count     int
 	expiresAt time.Time
 	// index is where this counter sits in the expiry heap, maintained by the
@@ -107,6 +120,7 @@ func NewMemoryRateLimitStorage(opts MemoryRateLimitOptions) *MemoryRateLimitStor
 		sweepEvery: orDefaultDuration(opts.SweepInterval, DefaultRateLimitSweepInterval),
 		now:        time.Now,
 		entries:    make(map[string]*memoryCounter),
+		partitions: make(map[string]*memoryExpiryHeap),
 	}
 }
 
@@ -144,7 +158,7 @@ func (s *MemoryRateLimitStorage) Stop(context.Context) error {
 	stop, done := s.stop, s.done
 	s.stop, s.done = nil, nil
 	s.entries = make(map[string]*memoryCounter)
-	s.expiry = nil
+	s.partitions = make(map[string]*memoryExpiryHeap)
 	s.mu.Unlock()
 
 	if stop != nil {
@@ -181,14 +195,19 @@ func (s *MemoryRateLimitStorage) Increment(_ context.Context, quota, key string,
 		}
 		counter.count = 1
 		counter.expiresAt = now.Add(window)
-		heap.Fix(&s.expiry, counter.index)
+		heap.Fix(s.partitions[quota], counter.index)
 		return 1, window, nil
 	}
 
 	s.makeRoom(now)
-	counter := &memoryCounter{key: stored, count: 1, expiresAt: now.Add(window)}
+	counter := &memoryCounter{key: stored, quota: quota, count: 1, expiresAt: now.Add(window)}
 	s.entries[stored] = counter
-	heap.Push(&s.expiry, counter)
+	partition := s.partitions[quota]
+	if partition == nil {
+		partition = &memoryExpiryHeap{}
+		s.partitions[quota] = partition
+	}
+	heap.Push(partition, counter)
 	return 1, window, nil
 }
 
@@ -202,30 +221,53 @@ func memoryKey(quota, key string) string {
 
 // makeRoom discards counters until there is space for another, taking the
 // expired ones first and then, if the table is still full, the one closest to
-// expiring.
+// expiring in the quota that holds the most counters.
 //
 // Discarding a counter that has not expired means its client is counted from
 // zero again, which is a real loss of enforcement. It happens only when the
 // table is full, which takes more distinct keys than an application usually
 // sees, and the alternative is holding every key an attacker cares to invent.
+// Choosing the largest quota puts that loss on whoever filled the table: a
+// flood of fresh keys under one quota evicts its own, and a small quota whose
+// counters matter one by one, a per-account login limit, keeps them. The
+// quotas are few, so finding the largest is a short scan, and it only runs
+// once the table is full.
 func (s *MemoryRateLimitStorage) makeRoom(now time.Time) {
 	if s.maxEntries <= 0 {
 		return
 	}
 	s.expireLocked(now)
 	for len(s.entries) >= s.maxEntries {
-		next := s.expiry[0]
-		heap.Pop(&s.expiry)
-		delete(s.entries, next.key)
+		var largest string
+		for name, partition := range s.partitions {
+			// Ties go to the lexically first name, so which quota loses a
+			// counter does not depend on map iteration order.
+			if held, most := partition.Len(), s.partitions[largest].Len(); held > most || (held == most && name < largest) {
+				largest = name
+			}
+		}
+		s.discardFirst(largest)
 	}
 }
 
 // expireLocked discards every counter whose window has run out.
 func (s *MemoryRateLimitStorage) expireLocked(now time.Time) {
-	for len(s.expiry) > 0 && !now.Before(s.expiry[0].expiresAt) {
-		next := s.expiry[0]
-		heap.Pop(&s.expiry)
-		delete(s.entries, next.key)
+	for name, partition := range s.partitions {
+		for partition.Len() > 0 && !now.Before((*partition)[0].expiresAt) {
+			s.discardFirst(name)
+		}
+	}
+}
+
+// discardFirst removes the counter closest to expiring from one quota, and the
+// quota itself once it holds nothing, so that a quota name that is no longer
+// in use costs nothing.
+func (s *MemoryRateLimitStorage) discardFirst(quota string) {
+	partition := s.partitions[quota]
+	next := heap.Pop(partition).(*memoryCounter)
+	delete(s.entries, next.key)
+	if partition.Len() == 0 {
+		delete(s.partitions, quota)
 	}
 }
 
@@ -250,7 +292,15 @@ func (s *MemoryRateLimitStorage) sweep(stop, done chan struct{}, every time.Dura
 // to discard first is always at the front.
 type memoryExpiryHeap []*memoryCounter
 
-func (h memoryExpiryHeap) Len() int { return len(h) }
+// Len implements [container/heap.Interface]. It is defined on the pointer, as
+// every other use of a partition is, so that a quota with no partition yet
+// reads as empty rather than as a nil dereference.
+func (h *memoryExpiryHeap) Len() int {
+	if h == nil {
+		return 0
+	}
+	return len(*h)
+}
 
 func (h memoryExpiryHeap) Less(i, j int) bool { return h[i].expiresAt.Before(h[j].expiresAt) }
 

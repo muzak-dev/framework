@@ -258,7 +258,7 @@ func TestMemoryStorageIsSafeForConcurrentUse(t *testing.T) {
 	if got := storage.Len(); got > 32 {
 		t.Errorf("Len() = %d, want the table never to exceed its bound of 32", got)
 	}
-	if got := len(storage.expiry); got != storage.Len() {
+	if got := storage.partitions["q"].Len(); got != storage.Len() {
 		t.Errorf("the expiry heap holds %d counters and the table holds %d; they must agree", got, storage.Len())
 	}
 }
@@ -313,10 +313,67 @@ func TestMemoryExpiryHeapClearsDiscardedSlots(t *testing.T) {
 	// The slice the heap grew to still has room for the counter that was
 	// discarded, and holding a reference there would keep a key alive that
 	// nothing can reach.
-	heapSlice := storage.expiry[:cap(storage.expiry)]
-	for i := len(storage.expiry); i < len(heapSlice); i++ {
+	partition := *storage.partitions["q"]
+	heapSlice := partition[:cap(partition)]
+	for i := len(partition); i < len(heapSlice); i++ {
 		if heapSlice[i] != nil {
 			t.Errorf("slot %d of the expiry heap still holds a discarded counter", i)
 		}
+	}
+}
+
+// TestMemoryStorageEvictsFromTheQuotaThatFilledIt is the regression test for a
+// table that, once full, discarded the counter closest to expiring whichever
+// quota it belonged to. A client able to mint keys under one quota (an address
+// per request from its IPv6 range) could fill the table and push out another
+// quota's counter, resetting a per-account login limit mid-window. The flood
+// now only ever displaces counters of the quota it is flooding.
+func TestMemoryStorageEvictsFromTheQuotaThatFilledIt(t *testing.T) {
+	t.Parallel()
+	storage, _ := newTestStorage(t, MemoryRateLimitOptions{MaxEntries: 8})
+
+	// The login counter expires first, which is exactly what used to make it
+	// the one discarded.
+	for range 3 {
+		increment(t, storage, "login", "user:alice", time.Minute)
+	}
+	for i := range 100 {
+		increment(t, storage, "global", "ip:flood-"+strconv.Itoa(i), time.Hour)
+	}
+	if storage.Len() != 8 {
+		t.Fatalf("Len() = %d, want the table held at its bound", storage.Len())
+	}
+	if count, _ := increment(t, storage, "login", "user:alice", time.Minute); count != 4 {
+		t.Errorf("alice's login count = %d after the flood, want 4: another quota's keys evicted it", count)
+	}
+	if held := storage.partitions["login"].Len() + storage.partitions["global"].Len(); held != storage.Len() {
+		t.Errorf("the partitions hold %d counters and the table %d; they must agree", held, storage.Len())
+	}
+
+	// With two quotas equally large, the tie is settled by name rather than by
+	// map order, so the outcome is the same on every run.
+	tied, _ := newTestStorage(t, MemoryRateLimitOptions{MaxEntries: 4})
+	increment(t, tied, "b", "1", time.Hour)
+	increment(t, tied, "b", "2", time.Hour)
+	increment(t, tied, "a", "1", time.Hour)
+	increment(t, tied, "a", "2", time.Hour)
+	increment(t, tied, "c", "1", time.Hour)
+	if tied.partitions["a"].Len() != 1 || tied.partitions["b"].Len() != 2 {
+		t.Errorf("partitions a=%d b=%d, want the tie broken against a",
+			tied.partitions["a"].Len(), tied.partitions["b"].Len())
+	}
+}
+
+// TestMemoryStorageForgetsAQuotaWithNoCounters covers the partition cleanup:
+// a quota whose counters have all gone leaves nothing behind, so the names a
+// resolver produces cannot accumulate.
+func TestMemoryStorageForgetsAQuotaWithNoCounters(t *testing.T) {
+	t.Parallel()
+	storage, clock := newTestStorage(t, MemoryRateLimitOptions{MaxEntries: 4})
+	increment(t, storage, "gone", "k", time.Minute)
+	clock.advance(2 * time.Minute)
+	increment(t, storage, "kept", "k", time.Minute)
+	if _, held := storage.partitions["gone"]; held {
+		t.Error("a quota with no live counters still has a partition")
 	}
 }

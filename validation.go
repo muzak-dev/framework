@@ -95,6 +95,10 @@ type Validation struct {
 	// Validation keeps it, so a pooled one brings its report along.
 	run   *validationRun
 	state validationRun
+	// dry records the models nested while the route is compiled, for
+	// checkRulesBindToFields to vet. It is nil on every Validation a request
+	// uses.
+	dry *dryRun
 	// start is where this Validation's own failures belong in the report:
 	// ahead of those of the models nested in it, which are evaluated first.
 	start int
@@ -416,6 +420,12 @@ func (c *Condition) RejectKey(target any, key string, args ...any) *Condition {
 // nil pointer is skipped, so an optional nested model needs no guard of its
 // own.
 //
+// The argument has to be a pointer, and the model's Validate has to be
+// declared on the pointer. A value would be skipped, and a Validate with a
+// value receiver would bind its rules to a copy, so a route whose model does
+// either is refused when it is compiled, in the way a rule bound to a value
+// is.
+//
 // A collection of models is validated by nesting each element, by its address
 // in the collection:
 //
@@ -438,7 +448,13 @@ func (c *Condition) RejectKey(target any, key string, args ...any) *Condition {
 // failures are still listed after the outer model's own. A model nested more
 // than [MaxNestedDepth] levels deep is refused rather than validated.
 func (v *Validation) Nested(model Validatable) {
-	if model == nil || v.run == nil || v.run.truncated {
+	if model == nil {
+		return
+	}
+	if v.dry != nil {
+		v.dry.record(model)
+	}
+	if v.run == nil || v.run.truncated {
 		return
 	}
 	pointer := reflect.ValueOf(model)
@@ -978,7 +994,66 @@ func (p *bindPlan) checkRulesBindToFields() error {
 	if p.validation == nil {
 		return nil
 	}
-	scratch := reflect.New(p.typ)
+	return checkModelRules(p.typ, p.validation, map[reflect.Type]bool{})
+}
+
+// dryRun collects what the models nested by one model's Validate looked like
+// when it was called against a zero value.
+type dryRun struct {
+	nested []reflect.Type
+	// problem is the first misuse of Nested seen, worded for the developer.
+	problem string
+}
+
+// record notes a call to Nested, and what is wrong with it if anything is.
+//
+// Nested only ever validates the model a pointer leads to, and does nothing
+// for anything else, which is how a mistake in it looks like working: it
+// compiles, the request is accepted, and the rules that were meant to run
+// never did.
+//
+//   - A model handed over by value, `v.Nested(in.Address)`, is a value
+//     rather than a pointer, and is skipped without a word. That compiles
+//     only because a Validate declared with a value receiver is in the method
+//     set of the value too.
+//   - A pointer to a model whose Validate has a value receiver is validated,
+//     but the rules bind to the receiver, which is a copy: their failures are
+//     reported against the parent field rather than the one that failed, and
+//     their transforms never reach the request.
+func (d *dryRun) record(model Validatable) {
+	rv := reflect.ValueOf(model)
+	if rv.Kind() != reflect.Pointer {
+		if d.problem == "" {
+			d.problem = fmt.Sprintf(
+				"v.Nested was given a %s rather than a pointer to one, so the model is never validated; "+
+					"pass its address (v.Nested(&in.Field))", rv.Type())
+		}
+		return
+	}
+	elem := rv.Type().Elem()
+	if elem.Implements(reflect.TypeFor[Validatable]()) {
+		if d.problem == "" {
+			d.problem = fmt.Sprintf(
+				"the Validate method of %s has a value receiver, so the rules it declares bind to a copy of the model: "+
+					"their failures would be reported against the wrong field and their transforms would be lost; "+
+					"declare it on the pointer, func (m *%s) Validate", elem, elem.Name())
+		}
+		return
+	}
+	d.nested = append(d.nested, elem)
+}
+
+// checkModelRules is [bindPlan.checkRulesBindToFields] for one model type, and
+// then for each model that one nests, since a model is nested by the same
+// mistakes as a request is. seen keeps a model that nests its own type from
+// being followed for ever.
+func checkModelRules(typ reflect.Type, plan *validationPlan, seen map[reflect.Type]bool) error {
+	if seen[typ] {
+		return nil
+	}
+	seen[typ] = true
+
+	scratch := reflect.New(typ)
 	model, ok := scratch.Interface().(Validatable)
 	if !ok {
 		// coverage: the caller only reaches this for a type implementing it.
@@ -986,10 +1061,11 @@ func (p *bindPlan) checkRulesBindToFields() error {
 	}
 
 	v := &Validation{
-		plan:  p.validation,
+		plan:  plan,
 		base:  scratch.Pointer(),
-		size:  p.typ.Size(),
+		size:  typ.Size(),
 		value: scratch.Elem(),
+		dry:   &dryRun{},
 	}
 	model.Validate(v)
 
@@ -1004,7 +1080,15 @@ func (p *bindPlan) checkRulesBindToFields() error {
 			"a %s rule is bound to a value rather than to a field of %s, so its failures would name no field "+
 				"and its constraints would be missing from the generated document; "+
 				"pass the field's address (v.Rule(&in.Field), not v.Rule(in.Field)), or name it with As()",
-			ruleSetKind(rules), p.typ)
+			ruleSetKind(rules), typ)
+	}
+	if v.dry.problem != "" {
+		return fmt.Errorf("%s: %s", typ, v.dry.problem)
+	}
+	for _, nested := range v.dry.nested {
+		if err := checkModelRules(nested, planForType(nested), seen); err != nil {
+			return err
+		}
 	}
 	return nil
 }

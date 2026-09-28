@@ -461,3 +461,75 @@ func TestRequiredRejectsAMissingPointerField(t *testing.T) {
 	}
 	assertStatus(t, do(t, app, "POST", "/p", `{"name":"a"}`), http.StatusOK)
 }
+
+// valueReceiver declares its rules on a copy, which is what a value receiver
+// gives it.
+type valueReceiver struct {
+	City string `json:"city"`
+}
+
+func (a valueReceiver) Validate(v *Validation) { v.String(&a.City).Required() }
+
+type nestedByValue struct {
+	Addr valueReceiver `json:"addr"`
+}
+
+func (in *nestedByValue) Validate(v *Validation) { v.Nested(in.Addr) }
+
+type nestedByPointer struct {
+	Ptr *valueReceiver `json:"ptr"`
+}
+
+func (in *nestedByPointer) Validate(v *Validation) { v.Nested(in.Ptr) }
+
+// deeplyWrong is right itself and nests a model that nests one wrongly, which
+// the check follows.
+type deeplyWrong struct {
+	Inner nestedByValue `json:"inner"`
+}
+
+func (in *deeplyWrong) Validate(v *Validation) { v.Nested(&in.Inner) }
+
+// selfNesting nests its own type, which the check must not follow for ever.
+type selfNesting struct {
+	Next *selfNesting `json:"next"`
+	Name string       `json:"name"`
+}
+
+func (in *selfNesting) Validate(v *Validation) {
+	v.String(&in.Name).MaxLen(4)
+	v.Nested(in.Next)
+}
+
+// TestNestedMisuseIsRefusedWhenTheRouteIsCompiled: a Nested that validates
+// nothing, or validates a copy, used to be accepted and to let through what
+// the model's rules were written to reject.
+func TestNestedMisuseIsRefusedWhenTheRouteIsCompiled(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		model reflect.Type
+		want  string
+	}{
+		"a model passed by value":           {reflect.TypeFor[nestedByValue](), "rather than a pointer"},
+		"a value receiver behind a pointer": {reflect.TypeFor[nestedByPointer](), "has a value receiver"},
+		"a mistake in a nested model":       {reflect.TypeFor[deeplyWrong](), "rather than a pointer"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := newBindPlan(tc.model, "POST", "/x")
+			if err == nil {
+				t.Fatal("the route was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+
+	if _, err := newBindPlan(reflect.TypeFor[selfNesting](), "POST", "/x"); err != nil {
+		t.Errorf("a model nesting its own type was refused: %v", err)
+	}
+	if _, err := newBindPlan(reflect.TypeFor[delivery](), "POST", "/x"); err != nil {
+		t.Errorf("a correctly nested model was refused: %v", err)
+	}
+}

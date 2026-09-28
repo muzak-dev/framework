@@ -13,23 +13,29 @@ func TestClientIdentity(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ in, want string }{
 		{"192.0.2.7", "192.0.2.7"},
-		{"2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"},
-		{"2001:db8:1:2::1", "2001:db8:1:2::/64"},
-		{"2001:db8:1:3::1", "2001:db8:1:3::/64"},
-		{"fe80::1%eth0", "fe80::/64"},
+		{"2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1::/56"},
+		{"2001:db8:1:2::1", "2001:db8:1::/56"},
+		{"2001:db8:1:3::1", "2001:db8:1::/56"},
+		{"2001:db8:1:100::1", "2001:db8:1:100::/56"},
+		{"fe80::1%eth0", "fe80::/56"},
 	}
 	for _, tc := range tests {
-		if got := clientIdentity(netip.MustParseAddr(tc.in)); got != tc.want {
+		if got := clientIdentity(netip.MustParseAddr(tc.in), DefaultConnectionIPv6Prefix); got != tc.want {
 			t.Errorf("clientIdentity(%s) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
+	if got := clientIdentity(netip.MustParseAddr("2001:db8:1:2::1"), 64); got != "2001:db8:1:2::/64" {
+		t.Errorf("clientIdentity with a /64 = %q, want the /64", got)
+	}
 }
 
-// TestIPTrackerCountsAnIPv6ClientByItsSlash64 is the regression test for a
+// TestIPTrackerCountsAnIPv6ClientByItsSlash56 is the regression test for a
 // default tracker that keyed on the exact address, so a client holding an IPv6
-// /64 (the block most providers hand out) got a fresh budget from every one of
-// its 2^64 addresses. IPv4 keys, including an IPv4-mapped peer, are unchanged.
-func TestIPTrackerCountsAnIPv6ClientByItsSlash64(t *testing.T) {
+// /64 got a fresh budget from every one of its 2^64 addresses, and then on the
+// /64, so a client holding the /56 most providers delegate to one subscriber
+// got a fresh budget from each of its 256 /64s. IPv4 keys, including an
+// IPv4-mapped peer, are unchanged.
+func TestIPTrackerCountsAnIPv6ClientByItsSlash56(t *testing.T) {
 	t.Parallel()
 	opts := quietOptions()
 	opts.RateLimit = RateLimitOptions{Quotas: []Quota{{Name: "q", Window: time.Minute, Limit: 1}}}
@@ -50,8 +56,11 @@ func TestIPTrackerCountsAnIPv6ClientByItsSlash64(t *testing.T) {
 			t.Fatalf("another address in the same /64 got %d, want 429 from the shared budget", code)
 		}
 	}
-	if code := from("[2001:db8:1:3::1]:443"); code != http.StatusOK {
-		t.Errorf("a neighbouring /64 = %d, want a budget of its own", code)
+	if code := from("[2001:db8:1:3::1]:443"); code != http.StatusTooManyRequests {
+		t.Errorf("a neighbouring /64 in the same /56 = %d, want the budget the /56 already spent", code)
+	}
+	if code := from("[2001:db8:1:100::1]:443"); code != http.StatusOK {
+		t.Errorf("a neighbouring /56 = %d, want a budget of its own", code)
 	}
 	if code := from("192.0.2.1:1"); code != http.StatusOK {
 		t.Errorf("an IPv4 client = %d, want 200", code)
@@ -214,5 +223,61 @@ func TestIPPrefixTracker(t *testing.T) {
 		if recovered := catchPanic(func() { IPPrefixTracker(bits[0], bits[1]) }); recovered == nil {
 			t.Errorf("IPPrefixTracker(%d, %d) was built, want a panic", bits[0], bits[1])
 		}
+	}
+}
+
+// TestIPTrackerIPv6PrefixIsConfigurable keeps the operator in charge of the
+// grouping: ClientIPOptions.ConnectionIPv6Prefix moves the default tracker's
+// prefix along with the connection caps, and IPPrefixTracker still picks any
+// length for one route.
+func TestIPTrackerIPv6PrefixIsConfigurable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		bits int
+		want map[string]string
+	}{
+		{"a /48 for sites", 48, map[string]string{"[2001:db8:1:2::7]:1": "ip:2001:db8:1::/48", "[2001:db8:1:ffff::1]:1": "ip:2001:db8:1::/48"}},
+		{"a /64 for shared networks", 64, map[string]string{"[2001:db8:1:2::7]:1": "ip:2001:db8:1:2::/64", "[2001:db8:1:3::1]:1": "ip:2001:db8:1:3::/64"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts := quietOptions()
+			opts.ClientIP = ClientIPOptions{ConnectionIPv6Prefix: tc.bits}
+			app := New(opts)
+			app.Get("/x", okHandler)
+			mustBuild(t, app)
+			for remote, want := range tc.want {
+				ctx := &Context{app: app, r: httptest.NewRequest(http.MethodGet, "/", nil)}
+				ctx.r.RemoteAddr = remote
+				if key, err := IPTracker(ctx); err != nil || key != want {
+					t.Errorf("IPTracker for %s = %q, %v; want %q", remote, key, err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestIPTrackerOneSubscriberOneBudget is the property the default has to
+// keep: every /64 of one /56 shares a single budget.
+func TestIPTrackerOneSubscriberOneBudget(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.RateLimit = RateLimitOptions{Quotas: []Quota{{Name: "login", Window: time.Minute, Limit: 5}}}
+	app := New(opts)
+	app.Post("/login", okHandler)
+	mustBuild(t, app)
+	served := 0
+	for n := range 256 { // every /64 inside 2001:db8:0:ab00::/56
+		for range 20 {
+			req := httptest.NewRequest(http.MethodPost, "/login", nil)
+			req.RemoteAddr = fmt.Sprintf("[2001:db8:0:ab%02x::1]:4000", n)
+			if doRequest(t, app, req).Code == http.StatusOK {
+				served++
+			}
+		}
+	}
+	if served != 5 {
+		t.Errorf("one /56 was served %d requests against a limit of 5", served)
 	}
 }

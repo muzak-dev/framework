@@ -181,14 +181,20 @@ type QuotaResolver func(ctx *Context) ([]Quota, error)
 // The address is the one [Context.ClientIP] resolves, so it is the peer's
 // unless the application names a trusted proxy. An IPv4 address is counted
 // exactly, under a key such as "ip:192.0.2.7". An IPv6 address is counted by
-// its /64, under a key such as "ip:2001:db8:1:2::/64", because a client
-// holding a /64 can use a different address on every request and would
-// otherwise get a fresh budget each time; see [IPPrefixTracker] for the
-// reasoning, and for other lengths. It is the same as
-// IPPrefixTracker(32, 64) except for how an IPv4 key is spelled, which stays
-// the bare address it has always been so that counters in a shared storage
-// carry over. Use IPPrefixTracker(32, 128) to count every IPv6 address on its
-// own, which is only safe where something in front has already bounded them.
+// its prefix, a /56 unless [ClientIPOptions.ConnectionIPv6Prefix] says
+// otherwise, under a key such as "ip:2001:db8:1::/56". A client is delegated a
+// whole range of IPv6 addresses, and would otherwise get a fresh budget from
+// every address in it: a /56 is what most providers hand to one home or small
+// site (RFC 6177), so counting by the /64 would still give that one subscriber
+// 256 budgets, and it is the length the per-client connection caps already
+// use. Set ConnectionIPv6Prefix to 48 where sites are delegated a /48 or the
+// deployment is hostile to begin with, or to 64 where many unrelated users
+// share one /56, and see [IPPrefixTracker] for a length on one route only. It
+// is the same as IPPrefixTracker(32, 56) except for how an IPv4 key is
+// spelled, which stays the bare address it has always been so that counters
+// in a shared storage carry over. Use IPPrefixTracker(32, 128) to count every
+// IPv6 address on its own, which is only safe where something in front has
+// already bounded them.
 //
 // A request whose address cannot be parsed is refused rather than counted
 // anonymously, because counting every such request under one key would give
@@ -198,7 +204,7 @@ func IPTracker(ctx *Context) (string, error) {
 	if !addr.IsValid() {
 		return "", errRateLimitNoAddress
 	}
-	return "ip:" + clientIdentity(addr), nil
+	return "ip:" + clientIdentity(addr, ctx.clientIPResolver().connIPv6Bits), nil
 }
 
 // errRateLimitNoAddress reports a request that cannot be attributed to an
@@ -216,7 +222,8 @@ var errRateLimitNoAddress = errors.New("muzak: the rate limiter could not determ
 // address on every request while never leaving a range only they hold, and
 // each address would be a fresh budget. Keying on a prefix instead puts every
 // address in that range back under one budget. [IPTracker] already does this
-// with a /64; this is for a different length, such as a /48 for a network
+// with a /56 (see [ClientIPOptions.ConnectionIPv6Prefix]); this is for a length
+// that only one route needs, such as a /48 for a network
 // where whole sites are handed out, or a /24 of IPv4. ipv4Bits and ipv6Bits
 // are the prefix lengths kept for each family:
 //

@@ -214,7 +214,7 @@
 // counters live, defaulting to a bounded in-process table that is right for one
 // process and wrong for several. [RateLimitTracker] says whose budget a request
 // is spent from, defaulting to [IPTracker], which counts an IPv4 address on
-// its own and an IPv6 address by its /64, so that a client cannot mint a fresh
+// its own and an IPv6 address by its /56, so that a client cannot mint a fresh
 // budget from its own range; it is where an API key, a tenant or a resolved
 // user identity belongs instead. [ClientIPOptions] says which
 // address a request is attributed to, believing no forwarding header until a

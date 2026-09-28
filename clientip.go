@@ -82,7 +82,8 @@ type ClientIPOptions struct {
 
 	// ConnectionIPv6Prefix is the length, in bits, of the IPv6 prefix that
 	// the per-client connection caps, [WSOptions.MaxConnectionsPerIP] and
-	// [SSEOptions.MaxStreamsPerIP], count as one client. It defaults to
+	// [SSEOptions.MaxStreamsPerIP], and the default rate limit tracker,
+	// [IPTracker], count as one client. It defaults to
 	// [DefaultConnectionIPv6Prefix], a /56.
 	//
 	// A client is handed a whole range of IPv6 addresses rather than one, and
@@ -92,9 +93,10 @@ type ClientIPOptions struct {
 	// to each site, or 64 where many unrelated users share one /56, such as
 	// a campus or a carrier that hands each device a single /64; any length
 	// from 32 to 128 is accepted, and a value outside that is reported when
-	// the application is built. It changes nothing but these two caps: the
-	// rate limiter's [IPTracker] keeps its own grouping, and
-	// [IPPrefixTracker] is how that one is changed.
+	// the application is built. It is also the prefix the rate limiter's
+	// default tracker, [IPTracker], counts as one client, so that one
+	// subscriber has one budget however it is limited; [IPPrefixTracker] is
+	// how a single route counts a different length.
 	ConnectionIPv6Prefix int
 
 	// ConnectionIPv4Prefix is the same for IPv4, defaulting to
@@ -361,18 +363,6 @@ func (r *clientIPResolver) connectionKey(addr netip.Addr) string {
 	return prefix.String()
 }
 
-// clientIPv6PrefixBits is the length of the IPv6 prefix the default rate
-// limit tracker, [IPTracker], counts as one client. The per-client connection
-// caps group more widely by default and can be configured; see
-// [ClientIPOptions.ConnectionIPv6Prefix].
-//
-// A /64 is the block size an IPv6 network is built from and the smallest most
-// providers hand to a subscriber, so a client holding one can present a new
-// address on every request without ever leaving a range that is theirs alone.
-// Counting by exact address would give each of those a fresh budget. An IPv4
-// address is still counted exactly, since one is neither cheap nor plentiful.
-const clientIPv6PrefixBits = 64
-
 // clientPrefix truncates an address to the prefix length kept for its family.
 // It is the arithmetic [IPPrefixTracker] is made of, and [clientIdentity]
 // applies it with the lengths Muzak uses by default.
@@ -385,19 +375,23 @@ func clientPrefix(addr netip.Addr, ipv4Bits, ipv6Bits int) (netip.Prefix, error)
 }
 
 // clientIdentity renders the key a valid client address is counted under by
-// default: an IPv4 address as itself, and an IPv6 one as its
-// clientIPv6PrefixBits prefix, such as "2001:db8:1:2::/64".
+// default: an IPv4 address as itself, and an IPv6 one as its ipv6Bits prefix,
+// such as "2001:db8:1::/56". [IPTracker] passes the application's
+// [ClientIPOptions.ConnectionIPv6Prefix], a /56 unless it is configured, so
+// that one subscriber is one client for the rate limit as it is for the
+// connection caps.
 //
 // The IPv4 form is kept bare, the same string [Context.ClientIP] returns, so
 // that a counter held in a shared storage under the previous key format is
 // still the one counted after an upgrade. An IPv4-mapped IPv6 address never
 // reaches this as an IPv6 one, because the resolver has already unmapped it.
-func clientIdentity(addr netip.Addr) string {
+func clientIdentity(addr netip.Addr, ipv6Bits int) string {
 	if addr.Is4() {
 		return addr.String()
 	}
-	// The length is within range for an IPv6 address by construction, so the
-	// only error Prefix can report cannot happen here.
-	prefix, _ := clientPrefix(addr, 32, clientIPv6PrefixBits)
+	// The length was validated when the resolver was built, and is within
+	// range for an IPv6 address, so the only error Prefix can report cannot
+	// happen here.
+	prefix, _ := clientPrefix(addr, 32, ipv6Bits)
 	return prefix.String()
 }

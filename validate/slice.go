@@ -77,7 +77,31 @@ func (r *SliceRules[E]) DescribeElement() Constraints {
 }
 
 // Evaluate implements [Evaluator].
+//
+// It reports every element that fails, so the length of what it returns is
+// chosen by whoever chose the length of the collection. Muzak itself evaluates
+// through [SliceRules.EvaluateUpTo], and a caller running rule sets against a
+// client's input on its own should do the same.
 func (r *SliceRules[E]) Evaluate() []Problem {
+	return r.evaluate(0)
+}
+
+// EvaluateUpTo is [SliceRules.Evaluate] with a ceiling. It stops at the
+// limit'th problem and leaves the remaining elements unchecked, so the work as
+// well as the report is bounded by what the caller is prepared to send back
+// rather than by how many elements a client sent: a megabyte of empty strings
+// is a third of a million failures under Each(String().Required()), and
+// without the ceiling every one of them is found, described and returned.
+//
+// A limit below one is treated as one. Asking for one more problem than will
+// be reported is how a caller learns that there was more to say without paying
+// to find out how much.
+func (r *SliceRules[E]) EvaluateUpTo(limit int) []Problem {
+	return r.evaluate(max(limit, 1))
+}
+
+// evaluate is the body of both, with a limit of zero meaning none.
+func (r *SliceRules[E]) evaluate(limit int) []Problem {
 	if r.target == nil {
 		// coverage: the entry point always binds a non-nil field pointer.
 		return nil
@@ -97,6 +121,9 @@ func (r *SliceRules[E]) Evaluate() []Problem {
 		for _, problem := range r.element.applyTo(&values[i]) {
 			problem.Path = "[" + strconv.Itoa(i) + "]" + problem.Path
 			problems = append(problems, problem)
+			if len(problems) == limit {
+				return problems
+			}
 		}
 	}
 	return problems

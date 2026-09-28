@@ -3,6 +3,7 @@ package muzak
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -73,7 +74,17 @@ type Validation struct {
 	prefix   string
 	rules    []validate.Evaluator
 	rejected []rejection
-	children []*Validation
+
+	// run is the report every Validation of one request writes into, the
+	// model's own and each nested one's alike, so that one ceiling covers
+	// them all. It is nil while a model is only being described, which is
+	// what tells Nested not to descend. state is where the outermost
+	// Validation keeps it, so a pooled one brings its report along.
+	run   *validationRun
+	state validationRun
+	// start is where this Validation's own failures belong in the report:
+	// ahead of those of the models nested in it, which are evaluated first.
+	start int
 
 	// The free lists below hold the rule sets this Validation has already
 	// built. A model declares the same shape on every request, so handing a
@@ -105,8 +116,75 @@ func (v *Validation) reset() {
 		v.rejected[i] = rejection{}
 	}
 	v.rejected = v.rejected[:0]
-	v.children = v.children[:0]
+	v.run = nil
+	v.state = validationRun{}
+	v.start = 0
 	v.usedStrings, v.usedNumbers, v.usedTimes = 0, 0, 0
+}
+
+// MaxValidationDetails is the most failures the validation of one request
+// reports.
+//
+// A rule over a collection reports each element that fails, and a model nested
+// once per element does the same, so without a ceiling the length of the report
+// is chosen by the client: a megabyte of empty strings against
+// Each(validate.String().Required()) was a 22 megabyte response and more than
+// half a gigabyte of allocation to build it. A report that reaches the ceiling
+// ends with one further detail, of kind "too_many_problems" and with an empty
+// field, saying that more was found than is listed. Nothing is evaluated after
+// that point, not the rest of a collection and not a model nested after it, so
+// the ceiling bounds the work as well as the response.
+//
+// A hundred is far more than a person corrects in one pass, and a client that
+// sends more mistakes than that learns about the rest by sending again.
+const MaxValidationDetails = 100
+
+// validationRun is the report of one request's validation.
+type validationRun struct {
+	out []ErrorDetail
+	// failed names the fields that already failed to bind, whose validation
+	// failures are left out because an unparseable value has nothing further
+	// to say.
+	failed map[string]bool
+	// truncated records that a failure was found after the report was full,
+	// and is what stops everything that would have been evaluated after it.
+	truncated bool
+}
+
+// room is how many more failures the report takes.
+func (r *validationRun) room() int {
+	return MaxValidationDetails - len(r.out)
+}
+
+// add records one failure, or notes that there was no room for it.
+func (r *validationRun) add(detail ErrorDetail) {
+	switch {
+	case r.truncated, r.failed[detail.Field]:
+	case len(r.out) >= MaxValidationDetails:
+		r.truncated = true
+	default:
+		r.out = append(r.out, detail)
+	}
+}
+
+// report returns what was found, closed by the marker when there was more.
+func (r *validationRun) report() []ErrorDetail {
+	if !r.truncated {
+		return r.out
+	}
+	return append(r.out, ErrorDetail{
+		Location: "body",
+		Issue: fmt.Sprintf("has more problems than the %d listed; correct these and send it again to see the rest",
+			MaxValidationDetails),
+		Kind: "too_many_problems",
+		Args: []any{"count", MaxValidationDetails},
+	})
+}
+
+// boundedEvaluator is a rule set that can stop partway, which is what
+// [validate.SliceRules] offers for a collection a client chose the length of.
+type boundedEvaluator interface {
+	EvaluateUpTo(limit int) []validate.Problem
 }
 
 // nextString hands out a recycled string rule set, building one only the first
@@ -221,7 +299,17 @@ func (v *Validation) Value[T any](ptr *T) *validate.ValueRules[T] {
 //		v.Reject(&in.End, "must not be before the start")
 //	}
 func (v *Validation) Reject(target any, issue string) {
-	v.rejected = append(v.rejected, rejection{target: target, issue: issue})
+	v.reject(rejection{target: target, issue: issue})
+}
+
+// reject records a rejection, keeping no more than the report could use: a
+// check written once per element of a collection rejects as often as the client
+// sent elements, and past [MaxValidationDetails] and the one more that says the
+// report is incomplete, another would only be discarded.
+func (v *Validation) reject(r rejection) {
+	if len(v.rejected) <= MaxValidationDetails {
+		v.rejected = append(v.rejected, r)
+	}
 }
 
 // RejectKey records a failure against a field and names a translation to render
@@ -236,7 +324,7 @@ func (v *Validation) Reject(target any, issue string) {
 // translation. When nothing translates the key, the key itself is reported,
 // which names what has to be added and where.
 func (v *Validation) RejectKey(target any, key string, args ...any) {
-	v.rejected = append(v.rejected, rejection{target: target, issue: key, key: key, args: args})
+	v.reject(rejection{target: target, issue: key, key: key, args: args})
 }
 
 // Condition is a pending cross-field check produced by [Validation.When].
@@ -284,8 +372,14 @@ func (c *Condition) RejectKey(target any, key string, args ...any) *Condition {
 // A failure on the nested model's City field is reported as "address.city". A
 // nil pointer is skipped, so an optional nested model needs no guard of its
 // own.
+//
+// The nested model is validated there and then, transforms included, rather
+// than after the outer model's Validate returns: that is what lets a report
+// that has reached [MaxValidationDetails] stop nesting, so a model nested once
+// per element of a long collection costs nothing past the ceiling. Its
+// failures are still listed after the outer model's own.
 func (v *Validation) Nested(model Validatable) {
-	if model == nil {
+	if model == nil || v.run == nil || v.run.truncated {
 		return
 	}
 	pointer := reflect.ValueOf(model)
@@ -299,9 +393,11 @@ func (v *Validation) Nested(model Validatable) {
 		size:   pointer.Type().Elem().Size(),
 		value:  pointer.Elem(),
 		prefix: joinPath(v.prefix, v.nameOfNested(model, pointer)),
+		run:    v.run,
+		start:  len(v.run.out),
 	}
 	model.Validate(child)
-	v.children = append(v.children, child)
+	child.evaluate()
 }
 
 // nameOfNested works out which field of this model holds a nested one.
@@ -332,15 +428,44 @@ func (v *Validation) nameOfNested(model Validatable, pointer reflect.Value) stri
 	return ""
 }
 
-// details turns everything collected into error details, naming each field the
-// way the binder named it and saying where it came from.
+// details evaluates the outermost model's own rules, after everything nested in
+// it already has been, and returns the whole report.
 func (v *Validation) details() []ErrorDetail {
-	var out []ErrorDetail
+	if v.run == nil {
+		v.run = &v.state
+	}
+	v.evaluate()
+	return v.run.report()
+}
+
+// evaluate turns this Validation's own rules and rejections into error
+// details, naming each field the way the binder named it and saying where it
+// came from, and moves them ahead of the failures of the models nested in it.
+//
+// Each rule is asked for one failure more than the report has room for, so a
+// full report learns that it is incomplete without evaluating the rest of a
+// collection to find out by how much.
+func (v *Validation) evaluate() {
+	run := v.run
+	own := len(run.out)
 	for _, rules := range v.rules {
+		if run.truncated {
+			break
+		}
+		var problems []validate.Problem
+		if bounded, ok := rules.(boundedEvaluator); ok {
+			problems = bounded.EvaluateUpTo(run.room() + 1)
+		} else {
+			problems = rules.Evaluate()
+		}
+		if len(problems) == 0 {
+			continue
+		}
 		name, location := v.describe(rules.Target(), rules.Label())
-		for _, problem := range rules.Evaluate() {
-			out = append(out, ErrorDetail{
-				Field:    joinPath(v.prefix, name) + problem.Path,
+		field := joinPath(v.prefix, name)
+		for _, problem := range problems {
+			run.add(ErrorDetail{
+				Field:    field + problem.Path,
 				Location: location,
 				Issue:    problem.Issue,
 				Kind:     string(problem.Kind),
@@ -351,7 +476,7 @@ func (v *Validation) details() []ErrorDetail {
 	}
 	for _, rejected := range v.rejected {
 		name, location := v.describe(rejected.target, "")
-		out = append(out, ErrorDetail{
+		run.add(ErrorDetail{
 			Field:    joinPath(v.prefix, name),
 			Location: location,
 			Issue:    rejected.issue,
@@ -359,10 +484,12 @@ func (v *Validation) details() []ErrorDetail {
 			Args:     rejected.args,
 		})
 	}
-	for _, child := range v.children {
-		out = append(out, child.details()...)
-	}
-	return out
+	// Rotating the two runs in place keeps the report in the order it has
+	// always had, a model's own failures before its nested models', at a cost
+	// bounded by the ceiling rather than by the depth of the nesting.
+	slices.Reverse(run.out[v.start:own])
+	slices.Reverse(run.out[own:])
+	slices.Reverse(run.out[v.start:])
 }
 
 // describe resolves a field pointer to the name and location it should be
@@ -633,19 +760,10 @@ func (p *bindPlan) runValidation(dst reflect.Value, failed map[string]bool) []Er
 	v.base = dst.Addr().Pointer()
 	v.size = p.typ.Size()
 	v.value = dst
+	v.run = &v.state
+	v.run.failed = failed
 	model.Validate(v)
-
-	details := v.details()
-	if len(failed) == 0 {
-		return details
-	}
-	kept := details[:0]
-	for _, detail := range details {
-		if !failed[detail.Field] {
-			kept = append(kept, detail)
-		}
-	}
-	return kept
+	return v.details()
 }
 
 // checkRulesBindToFields refuses a model whose rules are bound to something

@@ -211,7 +211,9 @@ type sseStream struct {
 
 	// deadlines records whether the response writer carries deadlines at all.
 	// net/http's does; a writer supplied by a test or by middleware that does
-	// not forward to it may not, and a stream is served either way.
+	// not forward to it may not, and a stream is served either way. It is set
+	// by open, under mu, because the stream is already in the register by then
+	// and a shutdown may be interrupting it.
 	deadlines bool
 
 	// writeSem serializes the writers. It is a channel rather than a mutex so
@@ -291,7 +293,7 @@ func (s *sseStream) open(c *Context) error {
 	// does not, so they are cleared here and every write from now on carries a
 	// deadline of its own. Without this the whole stream would die at
 	// WriteTimeout no matter how healthy it was.
-	s.deadlines = s.rc.SetWriteDeadline(time.Time{}) == nil
+	s.probeDeadlines()
 	// The read half is cleared for a different reason. The request has been
 	// read in full, and the only read left is the one net/http makes in the
 	// background to notice a client going away. If that read hits a deadline
@@ -299,11 +301,21 @@ func (s *sseStream) open(c *Context) error {
 	// ReadTimeout and blame the client for it.
 	_ = s.rc.SetReadDeadline(time.Time{})
 
+	// The header is a write like any other, so it is armed like one: a client
+	// that will not even take the header is as much a stalled writer as one
+	// that stops taking events, and a shutdown that lands while it is being
+	// written has to be able to stop it. A stream that has already ended never
+	// writes it.
+	if err := s.arm(); err != nil {
+		return NewHTTPError(http.StatusInternalServerError,
+			"the event stream could not be started").Wrap(err)
+	}
 	s.w.WriteHeader(http.StatusOK)
 	if err := s.rc.Flush(); err != nil {
 		return NewHTTPError(http.StatusInternalServerError,
 			"the event stream could not be started").Wrap(err)
 	}
+	s.disarm()
 
 	// The request's cancellation is watched once here rather than once per
 	// event, and only for what cancelling has to do beyond ending the stream:
@@ -319,6 +331,21 @@ func (s *sseStream) open(c *Context) error {
 		}
 	}
 	return nil
+}
+
+// probeDeadlines finds out whether the response carries deadlines, and clears
+// the ones it arrived with.
+//
+// It takes the lock because the stream has been in the register since before
+// it was opened, and a shutdown that ends it in the meantime reads what is
+// decided here. Clearing under the same lock also puts the two in order: an
+// interrupt either finds no deadlines yet, and is refused by [sseStream.arm]
+// on the stream's recorded end instead, or finds them and moves a deadline
+// that this has already cleared.
+func (s *sseStream) probeDeadlines() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deadlines = s.rc.SetWriteDeadline(time.Time{}) == nil
 }
 
 // sseFlushable reports whether the response can be pushed to the client.

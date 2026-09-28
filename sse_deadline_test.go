@@ -211,3 +211,47 @@ func TestSSEInterruptStopsAWriteInProgress(t *testing.T) {
 		t.Fatalf("the deadline of a write in progress is %v, want a moment already past", got)
 	}
 }
+func TestSSEOpenAndShutdownDoNotRace(t *testing.T) {
+	t.Parallel()
+	// A stream is in the register before its header is written, so a shutdown
+	// can end it while it is still being opened. Run under -race this is what
+	// shows whether the two agree about the state they share.
+	for range 300 {
+		writer := &deadlineLog{deadlineWriter: deadlineWriter{recorder: httptest.NewRecorder()}}
+		c := &Context{
+			w: asResponseWriter(writer),
+			r: httptest.NewRequest(http.MethodGet, "/stream", nil),
+		}
+		stream := newSSEStream(c, SSEOptions{Retry: time.Second}.withDefaults())
+		done := make(chan struct{})
+		go func() {
+			stream.shuttingDown()
+			close(done)
+		}()
+		_ = stream.open(c)
+		<-done
+		stream.finish()
+		stream.cancel()
+	}
+}
+
+func TestSSEOpenRefusesAStreamThatAlreadyEnded(t *testing.T) {
+	t.Parallel()
+	// A shutdown that lands before the header is written ends the stream, and
+	// a stream that has ended must not go on to write a header of its own.
+	writer := &deadlineLog{deadlineWriter: deadlineWriter{recorder: httptest.NewRecorder()}}
+	c := &Context{
+		w: asResponseWriter(writer),
+		r: httptest.NewRequest(http.MethodGet, "/stream", nil),
+	}
+	stream := newSSEStream(c, SSEOptions{}.withDefaults())
+	t.Cleanup(stream.cancel)
+	stream.shuttingDown()
+	if err := stream.open(c); err == nil {
+		t.Fatal("open() = nil for a stream that had already ended")
+	}
+	if writer.recorder.Flushed {
+		t.Error("the header of a stream that had already ended was written")
+	}
+	stream.finish()
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
@@ -552,8 +553,14 @@ func setterFor(t reflect.Type) (setter, error) {
 	case reflect.Float32, reflect.Float64:
 		bits := t.Bits()
 		return func(dst reflect.Value, raw []string) error {
+			// ParseFloat reads "NaN", "Inf" and "Infinity" as numbers, and
+			// neither belongs in a parameter. NaN fails every comparison, so
+			// `if in.Amount > balance` waves it through; infinity passes any
+			// lower bound. A JSON body cannot carry either, so refusing them
+			// here makes a query string no more permissive than a body. An
+			// overflow such as 1e400 already fails with a range error.
 			v, err := strconv.ParseFloat(raw[0], bits)
-			if err != nil {
+			if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 				return errNotNumber
 			}
 			dst.SetFloat(v)

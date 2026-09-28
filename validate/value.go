@@ -39,6 +39,7 @@ func (r *ValueRules[T]) Reset() {
 	r.target = nil
 	r.label = ""
 	r.required = false
+	clear(r.steps)
 	r.steps = r.steps[:0]
 }
 
@@ -221,6 +222,7 @@ func (r *TimeRules) Reset() {
 	r.target = nil
 	r.label = ""
 	r.required = false
+	clear(r.steps)
 	r.steps = r.steps[:0]
 }
 

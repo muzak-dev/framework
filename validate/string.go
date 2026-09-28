@@ -45,12 +45,15 @@ func (r *StringRules) For(target any) *StringRules {
 //
 // It is what lets a Validation hand the same rule set to one request after
 // another: the steps slice keeps its capacity, so redeclaring the rules costs
-// no allocation once the shape has been seen. Application code has no reason to
-// call it.
+// no allocation once the shape has been seen. The steps are cleared as well as
+// truncated, so a rule set waiting to be reused holds no comparand or closure
+// from the request that last used it. Application code has no reason to call
+// it.
 func (r *StringRules) Reset() {
 	r.target = nil
 	r.label = ""
 	r.required = false
+	clear(r.steps)
 	r.steps = r.steps[:0]
 }
 

@@ -41,6 +41,7 @@ func (r *SliceRules[E]) Reset() {
 	r.target = nil
 	r.label = ""
 	r.required = false
+	clear(r.steps)
 	r.steps = r.steps[:0]
 	r.element = nil
 }

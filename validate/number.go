@@ -42,6 +42,7 @@ func (r *NumberRules) Reset() {
 	r.target = nil
 	r.label = ""
 	r.required = false
+	clear(r.steps)
 	r.steps = r.steps[:0]
 }
 

@@ -71,9 +71,18 @@ type Validation struct {
 	// reached through a pointer field can be traced back to the field holding
 	// it, which its address alone cannot reveal.
 	value    reflect.Value
-	prefix   string
 	rules    []validate.Evaluator
 	rejected []rejection
+
+	// parent is the Validation of the model this one is nested in, and depth
+	// how many models deep that is. A nested model's dotted path is not built
+	// when it is nested but the first time one of its failures needs it, and
+	// then kept in path, so a model that fails nothing costs no path at all
+	// and one that does costs a single join with its parent's.
+	parent    *Validation
+	depth     int
+	path      string
+	pathKnown bool
 
 	// run is the report every Validation of one request writes into, the
 	// model's own and each nested one's alike, so that one ceiling covers
@@ -102,24 +111,39 @@ type Validation struct {
 
 // reset returns a Validation to the pool's idea of empty, keeping the rule sets
 // and slices it has already built.
+//
+// Everything that points into the request is cleared, not only truncated: a
+// slice cut to length zero still holds what it held, and a pooled Validation
+// that kept the last request's rule sets bound to its fields, or the models
+// nested in it, would keep that request's body alive until the pool happened
+// to drop it.
 func (v *Validation) reset() {
 	v.plan = nil
 	v.base = 0
 	v.size = 0
 	v.value = reflect.Value{}
-	v.prefix = ""
-	for i := range v.rules {
-		v.rules[i] = nil
-	}
+	clear(v.rules)
 	v.rules = v.rules[:0]
-	for i := range v.rejected {
-		v.rejected[i] = rejection{}
-	}
+	clear(v.rejected)
 	v.rejected = v.rejected[:0]
-	v.run = nil
-	v.state = validationRun{}
-	v.start = 0
+	v.parent = nil
+	v.depth = 0
+	v.path, v.pathKnown = "", false
+	for _, rules := range v.freeStrings[:v.usedStrings] {
+		rules.Reset()
+	}
+	for _, rules := range v.freeNumbers[:v.usedNumbers] {
+		rules.Reset()
+	}
+	for _, rules := range v.freeTimes[:v.usedTimes] {
+		rules.Reset()
+	}
 	v.usedStrings, v.usedNumbers, v.usedTimes = 0, 0, 0
+	// The Validations kept for nested models are reset as each model
+	// finishes, a panicking one included, so only the list is kept here.
+	v.run = nil
+	v.state = validationRun{nested: v.state.nested}
+	v.start = 0
 }
 
 // MaxValidationDetails is the most failures the validation of one request
@@ -149,6 +173,20 @@ type validationRun struct {
 	// truncated records that a failure was found after the report was full,
 	// and is what stops everything that would have been evaluated after it.
 	truncated bool
+	// nested holds one Validation per level of nesting, reused by every model
+	// nested at that level. A model is validated completely before the next
+	// one at its level begins, so one per level is all a request needs, and
+	// a model nested once per element of a collection reuses the rule sets
+	// the previous element built.
+	nested []*Validation
+}
+
+// child hands out the Validation for a model nested at the given depth.
+func (r *validationRun) child(depth int) *Validation {
+	for len(r.nested) < depth {
+		r.nested = append(r.nested, new(Validation))
+	}
+	return r.nested[depth-1]
 }
 
 // room is how many more failures the report takes.
@@ -377,7 +415,8 @@ func (c *Condition) RejectKey(target any, key string, args ...any) *Condition {
 // than after the outer model's Validate returns: that is what lets a report
 // that has reached [MaxValidationDetails] stop nesting, so a model nested once
 // per element of a long collection costs nothing past the ceiling. Its
-// failures are still listed after the outer model's own.
+// failures are still listed after the outer model's own. A model nested more
+// than [MaxNestedDepth] levels deep is refused rather than validated.
 func (v *Validation) Nested(model Validatable) {
 	if model == nil || v.run == nil || v.run.truncated {
 		return
@@ -386,18 +425,55 @@ func (v *Validation) Nested(model Validatable) {
 	if pointer.Kind() != reflect.Pointer || pointer.IsNil() {
 		return
 	}
-
-	child := &Validation{
-		plan:   planForType(pointer.Type().Elem()),
-		base:   pointer.Pointer(),
-		size:   pointer.Type().Elem().Size(),
-		value:  pointer.Elem(),
-		prefix: joinPath(v.prefix, v.nameOfNested(model, pointer)),
-		run:    v.run,
-		start:  len(v.run.out),
+	if v.depth >= MaxNestedDepth {
+		v.run.add(ErrorDetail{
+			Field:    joinPath(v.prefix(), v.nameOfNested(pointer)),
+			Location: "body",
+			Issue:    fmt.Sprintf("must not be nested more than %d levels deep", MaxNestedDepth),
+			Kind:     "too_deep",
+			Args:     []any{"count", MaxNestedDepth},
+		})
+		return
 	}
+
+	child := v.run.child(v.depth + 1)
+	child.plan = planForType(pointer.Type().Elem())
+	child.base = pointer.Pointer()
+	child.size = pointer.Type().Elem().Size()
+	child.value = pointer.Elem()
+	child.parent = v
+	child.depth = v.depth + 1
+	child.run = v.run
+	child.start = len(v.run.out)
+	defer child.reset()
 	model.Validate(child)
 	child.evaluate()
+}
+
+// MaxNestedDepth is how many models deep [Validation.Nested] follows.
+//
+// A model that nests its own type, a tree or a thread of replies, is as deep as
+// the client makes it, and every level is a Validate call on the stack and a
+// segment on the path of every failure beneath it: nine thousand levels of a
+// recursive model once cost a 300 megabyte report and gigabytes of allocation.
+// A model nested deeper than this is not validated. It is reported, as a
+// failure of kind "too_deep" on the field that holds it, so the request is
+// refused rather than passed on with part of it unchecked.
+//
+// Thirty-two is well past the depth of any model a person designs, and a
+// recursive one that must go deeper should bound its own depth with a rule
+// before it nests.
+const MaxNestedDepth = 32
+
+// prefix is the dotted path of the model this Validation validates, empty for
+// the outermost one, built the first time a failure needs it.
+func (v *Validation) prefix() string {
+	if v.parent == nil || v.pathKnown {
+		return v.path
+	}
+	v.path = joinPath(v.parent.prefix(), v.parent.nameOfNested(v.value.Addr()))
+	v.pathKnown = true
+	return v.path
 }
 
 // nameOfNested works out which field of this model holds a nested one.
@@ -408,8 +484,8 @@ func (v *Validation) Nested(model Validatable) {
 // the field pointing at it. For that case the parent's pointer fields are
 // compared against the address, which is a short scan over a handful of fields
 // and only happens when the direct lookup fails.
-func (v *Validation) nameOfNested(model Validatable, pointer reflect.Value) string {
-	if origin, found := v.originOf(model); found {
+func (v *Validation) nameOfNested(pointer reflect.Value) string {
+	if origin, found := v.originOf(pointer.Interface()); found {
 		return origin.name
 	}
 	if !v.value.IsValid() || v.value.Kind() != reflect.Struct {
@@ -462,7 +538,7 @@ func (v *Validation) evaluate() {
 			continue
 		}
 		name, location := v.describe(rules.Target(), rules.Label())
-		field := joinPath(v.prefix, name)
+		field := joinPath(v.prefix(), name)
 		for _, problem := range problems {
 			run.add(ErrorDetail{
 				Field:    field + problem.Path,
@@ -477,7 +553,7 @@ func (v *Validation) evaluate() {
 	for _, rejected := range v.rejected {
 		name, location := v.describe(rejected.target, "")
 		run.add(ErrorDetail{
-			Field:    joinPath(v.prefix, name),
+			Field:    joinPath(v.prefix(), name),
 			Location: location,
 			Issue:    rejected.issue,
 			Key:      rejected.key,

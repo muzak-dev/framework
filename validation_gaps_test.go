@@ -271,7 +271,7 @@ func TestNameOfNestedFallsBack(t *testing.T) {
 	stray := &address{}
 
 	bare := &Validation{}
-	if got := bare.nameOfNested(stray, reflect.ValueOf(stray)); got != "" {
+	if got := bare.nameOfNested(reflect.ValueOf(stray)); got != "" {
 		t.Errorf("nameOfNested = %q, want empty", got)
 	}
 
@@ -282,7 +282,7 @@ func TestNameOfNestedFallsBack(t *testing.T) {
 		size:  reflect.TypeFor[delivery]().Size(),
 		value: reflect.ValueOf(holder).Elem(),
 	}
-	if got := withValue.nameOfNested(stray, reflect.ValueOf(stray)); got != "" {
+	if got := withValue.nameOfNested(reflect.ValueOf(stray)); got != "" {
 		t.Errorf("nameOfNested = %q, want empty for a model nothing points at", got)
 	}
 }

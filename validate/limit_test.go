@@ -3,6 +3,7 @@ package validate
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // TestEvaluateUpToStopsAtTheLimit checks the ceiling a caller puts on a
@@ -39,5 +40,43 @@ func TestEvaluateUpToStopsAtTheLimit(t *testing.T) {
 	// Evaluate keeps its meaning: every failing element.
 	if problems := rules.Evaluate(); len(problems) != len(values) {
 		t.Errorf("Evaluate = %d problems, want %d", len(problems), len(values))
+	}
+}
+
+// TestResetDropsWhatTheStepsHeld checks that a rule set waiting to be reused
+// holds nothing from the request that last used it: truncating the steps alone
+// would leave their closures and comparands reachable from the pool.
+func TestResetDropsWhatTheStepsHeld(t *testing.T) {
+	t.Parallel()
+	fail := errors.New("no")
+
+	text := String().Must(func(string) error { return fail })
+	text.Reset()
+	if held := text.steps[:1][0]; held.check != nil {
+		t.Error("a string rule set kept its closure")
+	}
+
+	number := Number().Must(func(float64) error { return fail })
+	number.Reset()
+	if held := number.steps[:1][0]; held.check != nil {
+		t.Error("a number rule set kept its closure")
+	}
+
+	moment := Time().Must(func(time.Time) error { return fail })
+	moment.Reset()
+	if held := moment.steps[:1][0]; held.check != nil {
+		t.Error("a time rule set kept its closure")
+	}
+
+	value := Value[int]().Must(func(int) error { return fail })
+	value.Reset()
+	if held := value.steps[:1][0]; held.check != nil {
+		t.Error("a value rule set kept its closure")
+	}
+
+	list := Slice[int]().Must(func([]int) error { return fail })
+	list.Reset()
+	if held := list.steps[:1][0]; held.check != nil {
+		t.Error("a slice rule set kept its closure")
 	}
 }

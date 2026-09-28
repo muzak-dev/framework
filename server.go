@@ -80,11 +80,26 @@ type ServerOptions struct {
 	// a certificate pair is supplied.
 	TLSConfig *tls.Config
 	// CertFile and KeyFile enable HTTPS from a certificate and key on disk.
+	// Setting only one of them is a build error.
 	CertFile string
 	KeyFile  string
 	// BaseContext returns the base context for incoming requests. When nil,
 	// requests derive from context.Background.
 	BaseContext func(net.Listener) context.Context
+}
+
+// validate reports a certificate pair that is only half there. Either file
+// alone leaves servesTLS false, so the server would come up in plaintext on
+// the port its operator believes is HTTPS, with nothing to say so; that is a
+// misconfiguration to refuse rather than a mode to fall back to.
+func (o ServerOptions) validate() error {
+	switch {
+	case o.CertFile != "" && o.KeyFile == "":
+		return errors.New("muzak: ServerOptions.CertFile is set without ServerOptions.KeyFile; set both to serve HTTPS, or neither")
+	case o.CertFile == "" && o.KeyFile != "":
+		return errors.New("muzak: ServerOptions.KeyFile is set without ServerOptions.CertFile; set both to serve HTTPS, or neither")
+	}
+	return nil
 }
 
 // withDefaults fills in the unset timeouts and normalises the disabling

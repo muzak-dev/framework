@@ -232,13 +232,39 @@ func browsableURL(scheme, addr, path string) string {
 	return scheme + "://" + net.JoinHostPort(host, port) + path
 }
 
+// resolveDocsRateLimit gives the documentation the rate limit a route
+// registered on the application itself inherits: [AppOptions.RateLimit], with
+// whatever the options given to [New] or [App.Options] layer on top, and no
+// limit at all when those exempt the application with [SkipRateLimit].
+//
+// The limit is carried by a stand-in route, as a file mount's is, so that it
+// is completed with every route's once the application is built: a quota the
+// documentation shares with the routes is one budget in one storage, and a
+// client that has spent it on the API cannot keep asking the documentation.
+// That matters because the documentation runs the application's guards. With
+// the guards and no limit, the document was a place to test credentials as
+// fast as a client could send them, answered with a 401 or a 200 and never
+// counted, while every route beside it counted each guess.
+func (a *App) resolveDocsRateLimit(state *buildState) {
+	if a.opts.DisableDocs {
+		return
+	}
+	limits := &Route{Method: "documentation", Path: a.opts.OpenAPIPath}
+	if err := limits.resolveRateLimit(inherited{rateLimit: a.opts.RateLimit}.merge(a.cfg)); err != nil {
+		state.errs = append(state.errs, err)
+		return
+	}
+	a.docsLimits = limits
+}
+
 // withDocs intercepts the documentation paths and delegates everything else to
 // the application's routes.
 //
-// The documentation is answered here, ahead of routing, so it runs the
-// application's own guards and providers itself: those declared on [New],
-// which every route inherits. Serving it without them published the full
-// shape of an API, every internal path and header it reads included, to
+// The documentation is answered here, ahead of routing, so it runs what a
+// route registered on the application itself would run before its handler:
+// the application's rate limit, then its guards and providers, those declared
+// on [New], which every route inherits. Serving it without them published the
+// full shape of an API, every internal path and header it reads included, to
 // clients the same application refused on every route.
 func (a *App) withDocs(next http.Handler) http.Handler {
 	assets := a.prepareDocs()
@@ -249,12 +275,20 @@ func (a *App) withDocs(next http.Handler) http.Handler {
 	docsPath := a.opts.DocsPath
 
 	serve := func(as *asset, w http.ResponseWriter, r *http.Request) { as.serve(w, r) }
-	if guards, providers := a.cfg.guards, a.cfg.providers; len(guards) > 0 || len(providers) > 0 {
+	guards, providers := a.cfg.guards, a.cfg.providers
+	var limits *rateLimitConfig
+	if a.docsLimits != nil {
+		limits = a.docsLimits.rateLimit
+	}
+	if len(guards) > 0 || len(providers) > 0 {
 		// A document only some clients may read must not be kept by a cache
-		// shared between them.
+		// shared between them. A rate limit alone does not make it so: every
+		// client that is answered is answered the same document.
 		assets.markPrivate()
+	}
+	if len(guards) > 0 || len(providers) > 0 || limits != nil {
 		serve = func(as *asset, w http.ResponseWriter, r *http.Request) {
-			a.serveGuardedAsset(as, w, r, guards, providers)
+			a.serveAdmittedAsset(as, w, r, limits, guards, providers)
 		}
 	}
 
@@ -280,15 +314,23 @@ func (a *App) withDocs(next http.Handler) http.Handler {
 	})
 }
 
-// serveGuardedAsset runs the application's guards and then its providers, in
-// the order a route runs them, and serves the asset only if every one of them
-// let the request through. A refusal is rendered by the same error path a
-// route's is, so a client sees the same 401 from the documentation as from
-// the API it describes.
-func (a *App) serveGuardedAsset(as *asset, w http.ResponseWriter, r *http.Request, guards []Guard, providers []*provider) {
+// serveAdmittedAsset runs the application's rate limit, guards and providers,
+// in the order a route runs them, and serves the asset only if every one of
+// them let the request through. The limit is counted before the guards unless
+// it was declared with [RateLimitOptions.AfterDependencies], as it is for a
+// route, so a request a guard refuses is still counted by default. A refusal
+// is rendered by the same error path a route's is, so a client sees the same
+// 401 or 429 from the documentation as from the API it describes.
+func (a *App) serveAdmittedAsset(as *asset, w http.ResponseWriter, r *http.Request, limits *rateLimitConfig, guards []Guard, providers []*provider) {
 	rw := asResponseWriter(w)
 	c := a.acquire(rw, r)
 	defer a.release(c)
+	if limits != nil && !limits.afterDependencies {
+		if err := limits.check(c); err != nil {
+			a.fail(c, err)
+			return
+		}
+	}
 	for _, guard := range guards {
 		if err := guard(c); err != nil {
 			a.fail(c, err)
@@ -298,6 +340,12 @@ func (a *App) serveGuardedAsset(as *asset, w http.ResponseWriter, r *http.Reques
 	if err := resolveProviders(c, providers); err != nil {
 		a.fail(c, err)
 		return
+	}
+	if limits != nil && limits.afterDependencies {
+		if err := limits.check(c); err != nil {
+			a.fail(c, err)
+			return
+		}
 	}
 	as.serve(rw, r)
 }

@@ -773,7 +773,13 @@ func (a *App) resolveRateLimiting(state *buildState) {
 	var storages []RateLimitStorage
 	var shared RateLimitStorage
 
-	for _, rt := range a.rateLimitOwners(state.frontends) {
+	owners := a.rateLimitOwners(state.frontends)
+	if a.docsLimits != nil {
+		// The documentation counts its requests through a stand-in of its own,
+		// completed here like a mount's; see [App.resolveDocsRateLimit].
+		owners = append(owners, a.docsLimits)
+	}
+	for _, rt := range owners {
 		for _, cfg := range rt.rateLimiters() {
 			for _, quota := range cfg.quotas {
 				previous, seen := declared[quota.Name]

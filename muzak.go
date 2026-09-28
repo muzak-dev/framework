@@ -159,12 +159,13 @@ type AppOptions struct {
 	// [App.Document] returns nil and both paths answer as any other unknown
 	// path does.
 	//
-	// Documentation that is served runs the application-wide guards and
-	// providers given to [New] before anything is sent, so leaving this unset
-	// does not publish an API its own guards keep private; the document is
-	// then marked private to caches as well. Guards declared on an included
-	// router or a route do not apply to it, because the document describes
-	// every router at once.
+	// Documentation that is served runs the application-wide rate limit,
+	// guards and providers given to [New] before anything is sent, so leaving
+	// this unset does not publish an API its own guards keep private, nor
+	// offer a place to test credentials that the rate limit does not count;
+	// a guarded document is then marked private to caches as well. Guards and
+	// limits declared on an included router or a route do not apply to it,
+	// because the document describes every router at once.
 	DisableDocs bool
 
 	// DisableAccessLog stops the per-request access log from being installed.
@@ -247,6 +248,10 @@ type App struct {
 	frontends []*frontend
 	routers   int
 	spec      *Document
+	// docsLimits is the stand-in route carrying the rate limit the
+	// documentation is served under; see [App.resolveDocsRateLimit]. It is
+	// nil when the documentation is disabled.
+	docsLimits *Route
 
 	lifecycle *lifecycleManager
 
@@ -313,9 +318,9 @@ type pathEntry struct {
 //		Addr:    ":8080",
 //	}, muzak.WithDependencies(GetQueryToken))
 //
-// The guards and providers declared here also run before the OpenAPI
-// document and the documentation UI are served, since those describe the
-// whole application; see [AppOptions.DisableDocs].
+// The guards, providers and rate limit declared here also run before the
+// OpenAPI document and the documentation UI are served, since those describe
+// the whole application; see [AppOptions.DisableDocs].
 //
 // New never fails. Problems with the routes, such as a duplicate path or an
 // unbindable input type, are reported by [App.Build] and by the methods that
@@ -526,7 +531,9 @@ func (a *App) build() {
 	}
 	// Rate limiting is completed once every route is known, because a quota
 	// name means the same thing everywhere and a storage nobody named is
-	// created once and shared.
+	// created once and shared. The documentation's limit is resolved first so
+	// that it is completed with the rest.
+	a.resolveDocsRateLimit(state)
 	a.resolveRateLimiting(state)
 	a.lifecycle.components = state.lifecycles
 	a.frontends = state.frontends

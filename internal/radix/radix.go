@@ -252,6 +252,15 @@ func (t *Tree[T]) Insert(pattern string, value T) error {
 // [maxStackSegment] bytes, and is safe for concurrent use provided no
 // insertion is in flight.
 func (t *Tree[T]) Lookup(path string, params *Params) (T, bool) {
+	// splitSeg drops the first byte on the assumption that it is the '/'
+	// every escaped request path begins with. A path that does not (what
+	// http.StripPrefix leaves behind for "/apiXadmin", or the "*" of an
+	// "OPTIONS *" request) would otherwise lose a byte and be routed as if it
+	// had been rooted, so it matches nothing instead.
+	if path == "" || path[0] != '/' {
+		var zero T
+		return zero, false
+	}
 	// One scan of the whole path decides whether any segment needs decoding,
 	// which is cheaper than asking again of every segment on the way down.
 	return t.root.lookup(path, params, strings.IndexByte(path, '%') >= 0)

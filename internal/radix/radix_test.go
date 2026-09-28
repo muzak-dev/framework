@@ -484,3 +484,26 @@ func benchTree(b *testing.B) *Tree[string] {
 	}
 	return tree
 }
+
+func TestLookupRejectsUnrootedPath(t *testing.T) {
+	t.Parallel()
+	tr := New[int]()
+	if err := tr.Insert("/admin/panel", 1); err != nil {
+		t.Fatal(err)
+	}
+	wild := New[int]()
+	if err := wild.Insert("/{rest...}", 2); err != nil {
+		t.Fatal(err)
+	}
+	var p Params
+	for _, path := range []string{"Xadmin/panel", "admin/panel", "*", ""} {
+		if _, ok := tr.Lookup(path, &p); ok {
+			t.Errorf("Lookup(%q) matched a tree of rooted routes", path)
+		}
+		p.Reset()
+		if _, ok := wild.Lookup(path, &p); ok {
+			t.Errorf("Lookup(%q) matched a root wildcard", path)
+		}
+		p.Reset()
+	}
+}

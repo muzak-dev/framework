@@ -173,8 +173,23 @@ func Compress(opts CompressionOptions) Middleware {
 				pool:           pool,
 				encoding:       negotiateEncoding(r.Header.Get("Accept-Encoding")),
 			}
-			defer cw.finish()
+			// finish commits whatever is pending, which is right when the
+			// handler returned and wrong when it panicked: sending a held
+			// header then would put a 200 on the wire before Recovery could
+			// answer 500, and closing the compressor would write the trailer
+			// that makes a truncated body look complete. The flag is set only
+			// on a normal return, so a panic (or runtime.Goexit) abandons the
+			// response instead and continues on its way.
+			returned := false
+			defer func() {
+				if returned {
+					cw.finish()
+					return
+				}
+				cw.abandon()
+			}()
 			next.ServeHTTP(cw, r)
+			returned = true
 		})
 	}
 }
@@ -430,6 +445,19 @@ func (w *compressWriter) finish() {
 		w.pool.put(w.encoding, w.compressor)
 		w.compressor = nil
 	}
+}
+
+// abandon gives up on a response whose handler did not return, committing
+// nothing: a header still held back stays unsent, a body still held is
+// dropped, and a compressor is released without writing its trailer. Whoever
+// recovers the panic then decides what the client sees, which is a 500 if the
+// header never left and an aborted connection if it did.
+//
+// The compressor is not returned to the pool, because a goroutine the handler
+// started may still hold this writer and write through it.
+func (w *compressWriter) abandon() {
+	w.held = nil
+	w.compressor = nil
 }
 
 // get takes a compressor from the pool, or builds one when the pool is empty,

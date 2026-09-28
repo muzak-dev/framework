@@ -543,3 +543,92 @@ func TestCompressKeepsVaryAgainstAHandlerThatWritesItsOwn(t *testing.T) {
 		t.Errorf("Accept-Encoding appears %d times in Vary, want once", count)
 	}
 }
+
+// TestCompressLeavesAPanicToRecovery is the regression test for a panic below
+// Compress that unwound through its deferred finish, which sent the pending
+// 200 header on the way out: Recovery then saw a response already started and
+// the client got an empty 200 in place of the 500 envelope. A header held back
+// for want of a length, and the body held with it, must not leak either.
+func TestCompressLeavesAPanicToRecovery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		below func(w http.ResponseWriter)
+	}{
+		{name: "before anything was written", below: func(http.ResponseWriter) {}},
+		{name: "with the header and a short body held back", below: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("held"))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			app := New(quietOptions())
+			app.Use(Compress(CompressionOptions{}))
+			app.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					tc.below(w)
+					panic("nil dereference in an auth middleware")
+				})
+			})
+			app.Get("/x", okHandler)
+			mustBuild(t, app)
+
+			rec := ask(t, app, "/x", "gzip")
+			assertStatus(t, rec, http.StatusInternalServerError)
+			if code := decodeError(t, rec).Error.Code; code != CodeInternalError {
+				t.Errorf("code = %q, want the standard envelope", code)
+			}
+			if rec.Header().Get("Content-Encoding") != "" || strings.Contains(rec.Body.String(), "held") {
+				t.Errorf("what was held for compression leaked into the 500: %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestCompressDoesNotCompleteAnAbortedStream covers the other half: once a
+// compressed body is on the wire, a panic must not close the compressor, whose
+// trailer would make the truncated stream decode as though it were whole.
+func TestCompressDoesNotCompleteAnAbortedStream(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Use(Compress(CompressionOptions{}))
+	app.Get("/export", func(ctx *Context, _ Empty) (rtOut, error) {
+		w := ctx.ResponseWriter()
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, prose)
+		_ = http.NewResponseController(w).Flush()
+		panic("the export fell over")
+	})
+	mustBuild(t, app)
+	server, _ := abortServer(t, app)
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/export", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Setting the header by hand turns off the transport's own decoding, so
+	// the test reads exactly the bytes the server sent.
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want the stream compressed", resp.Header.Get("Content-Encoding"))
+	}
+	raw, readErr := io.ReadAll(resp.Body)
+	if readErr == nil {
+		t.Fatalf("the aborted stream ended cleanly after %d bytes", len(raw))
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(reader); err == nil {
+		t.Error("the truncated body decoded as a complete gzip stream")
+	}
+}

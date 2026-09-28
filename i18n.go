@@ -169,12 +169,24 @@ type I18nOptions struct {
 	// between a setting and a list the framework derived is not.
 	derived bool
 
-	// DisableVary stops "Vary: Accept-Language" being added to responses when
-	// that header takes part in choosing the locale.
+	// DisableVary stops a Vary header being added for the request inputs that
+	// took part in choosing the locale.
 	//
-	// It is added by default because a cache in front of the service that does
-	// not see it will serve one language to a client that asked for another.
-	// Turn it off only when something else already varies the cache key.
+	// By default the response names every input the resolver actually read
+	// before it settled: "Accept-Language" for [LocaleFromAcceptLanguage], the
+	// configured header name for [LocaleFromHeader] and "Cookie" for
+	// [LocaleFromCookie]. A source listed after the one that decided is not
+	// read and so not named, and the path and query need nothing because they
+	// are already part of the address a cache keys on. It is added because a
+	// cache in front of the service that does not see it will serve one
+	// language to a client that asked for another, and with a header or cookie
+	// source the client choosing the language can be whoever reached the cache
+	// first. Turn it off only when something else already varies the cache
+	// key.
+	//
+	// The inputs of a [LocaleFromCustom] extractor are not known to the
+	// framework, so an extractor that reads a header or a cookie should name it
+	// in Vary itself.
 	DisableVary bool
 }
 
@@ -287,18 +299,21 @@ func contextWithLocale(ctx context.Context, locale string) context.Context {
 // before it, because middleware further out holds the request as it arrived.
 func Locale(opts I18nOptions) Middleware {
 	opts = opts.withDefaults()
-	// The available locales and whether the response varies are settled once,
+	// The available locales and what the response varies on are settled once,
 	// when the chain is built, rather than per request.
 	available := opts.AvailableLocales
-	varies := !opts.DisableVary && slices.Contains(opts.Sources, LocaleFromAcceptLanguage)
+	var vary []localeVary
+	if !opts.DisableVary {
+		vary = localeVaryPrefixes(opts)
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			locale := resolveLocale(r, opts, available)
-			if varies {
+			locale, consulted := resolveLocale(r, opts, available)
+			if consulted > 0 && len(vary) > 0 {
 				// Added rather than set, so that it composes with the Vary the
 				// compression middleware writes for Accept-Encoding.
-				w.Header().Add("Vary", "Accept-Language")
+				vary[consulted-1].addTo(w.Header())
 			}
 			if locale != "" {
 				w.Header().Set(HeaderContentLanguage, locale)
@@ -315,8 +330,12 @@ func Locale(opts I18nOptions) Middleware {
 // single rule is what stops "?locale=../../etc/passwd" reaching a filesystem
 // path and a locale carrying a line break reaching a response header: the value
 // returned here is always one the application chose, never one a client sent.
-func resolveLocale(r *http.Request, opts I18nOptions, available []string) string {
-	for _, source := range opts.Sources {
+//
+// It also returns how many sources it read, counting the one that decided,
+// because that is exactly the set of request inputs the answer depends on and
+// so the set a shared cache has to key on.
+func resolveLocale(r *http.Request, opts I18nOptions, available []string) (string, int) {
+	for i, source := range opts.Sources {
 		var candidates []string
 		switch source {
 		case LocaleFromPath:
@@ -331,18 +350,89 @@ func resolveLocale(r *http.Request, opts I18nOptions, available []string) string
 			}
 		case LocaleFromAcceptLanguage:
 			if matched := negotiateLanguage(r.Header.Get("Accept-Language"), available); matched != "" {
-				return matched
+				return matched, i + 1
 			}
 		case LocaleFromCustom:
 			candidates = opts.Extractor(r)
 		}
 		for _, candidate := range candidates {
 			if matched := matchLocale(candidate, available); matched != "" {
-				return matched
+				return matched, i + 1
 			}
 		}
 	}
-	return opts.DefaultLocale
+	return opts.DefaultLocale, len(opts.Sources)
+}
+
+// localeVary is the Vary a response carries when the locale resolver read a
+// given number of sources: the request headers those sources depend on, both
+// as a list and joined into the single value added when nothing else has
+// written Vary yet.
+type localeVary struct {
+	fields []string
+	joined string
+}
+
+// localeVaryPrefixes computes, for each count of sources read, the Vary that
+// count implies. Entry i covers the first i+1 sources. Doing this once when
+// the middleware is built keeps the per-request cost to one header write.
+// Names are deduplicated case-insensitively, so a header source configured as
+// "Accept-Language" next to [LocaleFromAcceptLanguage], or two sources that
+// both depend on cookies, name the field once.
+func localeVaryPrefixes(opts I18nOptions) []localeVary {
+	out := make([]localeVary, len(opts.Sources))
+	var fields []string
+	for i, source := range opts.Sources {
+		var field string
+		switch source {
+		case LocaleFromHeader:
+			field = http.CanonicalHeaderKey(opts.Header)
+		case LocaleFromCookie:
+			field = "Cookie"
+		case LocaleFromAcceptLanguage:
+			field = "Accept-Language"
+		}
+		if field != "" && !slices.ContainsFunc(fields, func(f string) bool { return strings.EqualFold(f, field) }) {
+			fields = append(fields, field)
+		}
+		// Clip so that a later append never writes into an earlier entry's
+		// backing array.
+		out[i] = localeVary{fields: slices.Clip(fields), joined: strings.Join(fields, ", ")}
+	}
+	return out
+}
+
+// addTo adds the fields to a response's Vary header, skipping any that
+// something earlier in the chain already named, so the header never lists a
+// field twice.
+func (v localeVary) addTo(h http.Header) {
+	if len(v.fields) == 0 {
+		return
+	}
+	existing := h.Values("Vary")
+	if len(existing) == 0 {
+		h.Add("Vary", v.joined)
+		return
+	}
+	for _, field := range v.fields {
+		if !varyNames(existing, field) {
+			h.Add("Vary", field)
+		}
+	}
+}
+
+// varyNames reports whether a Vary header already covers a field, either by
+// naming it or with "*", which varies on everything.
+func varyNames(values []string, field string) bool {
+	for _, value := range values {
+		for name := range strings.SplitSeq(value, ",") {
+			name = strings.TrimSpace(name)
+			if name == "*" || strings.EqualFold(name, field) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // presentValue wraps a single value, dropping it when it is empty.

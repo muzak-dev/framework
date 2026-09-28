@@ -350,3 +350,87 @@ func TestFallbackVariesOnAccept(t *testing.T) {
 		}
 	}
 }
+
+func TestIsShortName(t *testing.T) {
+	t.Parallel()
+	for segment, want := range map[string]bool{
+		"ENV~1":        true,
+		"env~1":        true,
+		"GIT~1":        true,
+		"HTPASS~1":     true,
+		"ADMINI~12":    false,
+		"ADMIN~12":     true,
+		"AB12~1":       true,
+		"~1":           true,
+		"PROGRA~1.TXT": true,
+		"ENV~1.":       true,
+		"ENV~1. .":     true,
+		"ENV~1 ":       true,
+		"SWP~1.swp":    true,
+		"A~1.HTML":     false,
+		"VENDOR~1":     true,
+		"vendors~1.js": false,
+		"app~main.js":  false,
+		"ENV~":         false,
+		"ENV~A":        false,
+		"ENV~1A":       false,
+		"ENV1":         false,
+		"index.html":   false,
+		"":             false,
+		"~":            false,
+	} {
+		if got := isShortName(segment); got != want {
+			t.Errorf("isShortName(%q) = %v, want %v", segment, got, want)
+		}
+	}
+}
+
+func TestNamesShortName(t *testing.T) {
+	t.Parallel()
+	for relative, want := range map[string]bool{
+		"":                  false,
+		"index.html":        false,
+		"ENV~1":             true,
+		"GIT~1/config":      true,
+		"assets/HTPASS~1":   true,
+		"assets\\ENV~1":     true,
+		"ADMINI~1/x.txt":    true,
+		"assets/app.js":     false,
+		"assets/v1~beta.js": false,
+	} {
+		if got := namesShortName(relative); got != want {
+			t.Errorf("namesShortName(%q) = %v, want %v", relative, got, want)
+		}
+	}
+}
+
+// TestMountRefusesShortNamesOnWindows is the regression test for a dotfile
+// reached through its 8.3 short name on NTFS, where /ENV~1 opens .env without
+// the dotfile check having seen a dot. The filesystem is modelled with a map
+// holding the short spelling, so the request is refused on Windows, whatever
+// the options, and on any other platform, where no filesystem resolves a
+// short name, the file of that literal name is served as before.
+func TestMountRefusesShortNamesOnWindows(t *testing.T) {
+	t.Parallel()
+	files := fstest.MapFS{
+		"index.html":   {Data: []byte("<p>app</p>")},
+		"ENV~1":        {Data: []byte("SECRET=hunter2")},
+		"GIT~1/config": {Data: []byte("[core]")},
+	}
+	app := New(quietOptions())
+	app.Frontend("/", FrontendOptions{FS: files})
+	app.Static("/static", StaticOptions{FS: files, AllowDotfiles: true})
+	mustBuild(t, app)
+
+	want := http.StatusOK
+	if shortNamesResolve {
+		want = http.StatusNotFound
+	}
+	for _, target := range []string{"/ENV~1", "/GIT~1/config", "/static/ENV~1", "/static/GIT~1/config"} {
+		rec := doRequest(t, app, withAccept(target, "text/html"))
+		assertStatus(t, rec, want)
+		if want == http.StatusNotFound && strings.Contains(rec.Body.String(), "<p>app</p>") {
+			t.Errorf("GET %s answered with the fallback", target)
+		}
+	}
+}

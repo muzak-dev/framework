@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -176,7 +177,10 @@ type frontend struct {
 // A path naming a file or directory that begins with a dot, such as /.env or
 // /.git/config, answers 404 and is not given the fallback, since a build
 // output is where such files end up by accident; a leading /.well-known/ is
-// served as usual. See [FrontendOptions.AllowDotfiles].
+// served as usual. See [FrontendOptions.AllowDotfiles]. On Windows a path
+// segment shaped like an 8.3 short name, such as /ENV~1 or /GIT~1/config, is
+// refused the same way whatever the options say, because the filesystem opens
+// the long name it stands for without any check having seen that name.
 //
 // Problems with the mount, including a directory that does not exist, are
 // reported when the application is built rather than on the first request.
@@ -311,7 +315,7 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 		a.fail(c, err)
 		return
 	}
-	if !f.opts.AllowDotfiles && namesDotfile(relative) {
+	if (!f.opts.AllowDotfiles && namesDotfile(relative)) || (shortNamesResolve && namesShortName(relative)) {
 		// Answered as though nothing were there, and without the fallback: a
 		// 200 carrying the application document for /.env reads to a scanner
 		// as a hit and to a person as the file being served.
@@ -421,19 +425,73 @@ func (a *App) rateLimitOwners(mounts []*frontend) []*Route {
 
 // namesDotfile reports whether any segment of a path relative to a mount
 // begins with a dot, other than a leading ".well-known".
+func namesDotfile(relative string) bool {
+	return anySegment(relative, func(segment string, first bool) bool {
+		return strings.HasPrefix(segment, ".") && (!first || segment != ".well-known")
+	})
+}
+
+// shortNamesResolve reports whether the filesystems of this platform may
+// resolve an 8.3 short name, which NTFS generates beside a long one unless a
+// volume is configured not to. It is a constant so that the check it guards
+// costs nothing where it cannot matter.
+const shortNamesResolve = runtime.GOOS == "windows"
+
+// namesShortName reports whether any segment of a path relative to a mount is
+// shaped like an 8.3 short name, such as ENV~1 or GIT~1.
+//
+// On Windows the filesystem opens a long name through its short one, and the
+// short name of ".env" is "ENV~1", with the dot gone. A request for /ENV~1 or
+// /GIT~1/config therefore reached a dotfile the dotfile check never saw, and
+// /ADMINI~1/x reached a directory mounted with guards of its own through a
+// parent mount that has none. The name a short name stands for cannot be
+// known without asking the filesystem, so every segment of that shape is
+// refused, whether or not dotfiles are allowed. A file whose real name looks
+// like one is refused with it, which a build output does not produce.
+func namesShortName(relative string) bool {
+	return anySegment(relative, func(segment string, _ bool) bool {
+		return isShortName(segment)
+	})
+}
+
+// isShortName reports whether one path segment has the shape of an 8.3 short
+// name: a base of at most eight characters ending in a tilde and a number,
+// then an optional extension of at most three.
+//
+// Trailing dots and spaces are dropped first, because Windows drops them from
+// a name before looking it up, so "ENV~1." opens what "ENV~1" does.
+func isShortName(segment string) bool {
+	segment = strings.TrimRight(segment, ". ")
+	base, extension, _ := strings.Cut(segment, ".")
+	if len(base) > 8 || len(extension) > 3 {
+		return false
+	}
+	tilde := strings.LastIndexByte(base, '~')
+	if tilde < 0 || tilde == len(base)-1 {
+		return false
+	}
+	for _, digit := range base[tilde+1:] {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// anySegment reports whether match holds for any segment of a path relative
+// to a mount, and tells it whether the segment is the first.
 //
 // Both separators count, because a filesystem on Windows reads a backslash as
 // one, and a name hidden behind it would otherwise pass as part of an
 // innocent segment. The path is walked in place rather than split, so the
 // check allocates nothing.
-func namesDotfile(relative string) bool {
+func anySegment(relative string, match func(segment string, first bool) bool) bool {
 	start := 0
 	for i := 0; i <= len(relative); i++ {
 		if i < len(relative) && relative[i] != '/' && relative[i] != '\\' {
 			continue
 		}
-		segment := relative[start:i]
-		if strings.HasPrefix(segment, ".") && (start != 0 || segment != ".well-known") {
+		if match(relative[start:i], start == 0) {
 			return true
 		}
 		start = i + 1

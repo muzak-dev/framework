@@ -779,6 +779,13 @@ func (a *App) matchVersion(c *Context, candidates []*Route) *Route {
 
 // dispatchFallback answers a request whose path exists but whose method has no
 // handler, covering automatic HEAD and OPTIONS before reporting 405.
+//
+// OPTIONS and the 405 are answered from the route table without running any
+// route's guards, providers or rate limit, because no route is called: they
+// disclose that the path exists and the methods it takes, which is what the
+// documentation lists too, and nothing a route returns. Middleware installed
+// with [App.Use] still wraps them. A HEAD answered by a GET route is a call to
+// that route and runs everything the GET does.
 func (a *App) dispatchFallback(c *Context, entry *pathEntry) {
 	switch c.r.Method {
 	case http.MethodHead:

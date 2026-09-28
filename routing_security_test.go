@@ -181,3 +181,42 @@ func TestNotFoundMessageSurvivesAnyPath(t *testing.T) {
 	odd.Method = "P\x00ST"
 	assertStatus(t, doRequest(t, app, odd), http.StatusMethodNotAllowed)
 }
+
+// TestOptionsAndMethodNotAllowedSkipRouteGuards pins down what the package
+// documentation says about the answers given from the route table alone: a
+// route's guard is not run for them, so they disclose the path and its
+// methods to an unauthenticated client, and middleware installed with Use
+// still is.
+func TestOptionsAndMethodNotAllowedSkipRouteGuards(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	var seen []string
+	app.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seen = append(seen, r.Method)
+			next.ServeHTTP(w, r)
+		})
+	})
+	guarded := NewRouter(Needs(currentMountUser))
+	guarded.Get("/secret", func(*Context, Empty) (string, error) { return "classified", nil })
+	app.Include(guarded)
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, "GET", "/secret"), http.StatusUnauthorized)
+
+	rec := do(t, app, "OPTIONS", "/secret")
+	assertStatus(t, rec, http.StatusNoContent)
+	if got := rec.Header().Get("Allow"); got != "GET, HEAD, OPTIONS" {
+		t.Errorf("Allow = %q", got)
+	}
+	rec = do(t, app, "DELETE", "/secret")
+	assertStatus(t, rec, http.StatusMethodNotAllowed)
+	if strings.Contains(rec.Body.String(), "classified") {
+		t.Error("the 405 carried the route's data")
+	}
+	assertStatus(t, do(t, app, "GET", "/nothing-here"), http.StatusNotFound)
+
+	if want := []string{"GET", "OPTIONS", "DELETE", "GET"}; strings.Join(seen, ",") != strings.Join(want, ",") {
+		t.Errorf("middleware saw %v, want %v", seen, want)
+	}
+}

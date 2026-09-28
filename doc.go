@@ -168,6 +168,25 @@
 // end, such as how long the request took, has to wrap the writer and fill the
 // value in as the response starts.
 //
+// # What a route's guards do not cover
+//
+// A route's guards, providers and rate limit run when the route is called, and
+// a request that never reaches the route never runs them. Two kinds of request
+// do not: an OPTIONS request to a path that has routes, which is answered 204
+// with an Allow header, and a request whose method the path has no route for,
+// which is answered 405 with the same header. Both are answered from the
+// route table alone, exactly as net/http.ServeMux does, and both stay in reach
+// of what [App.Use] installs, since middleware wraps every request.
+//
+// What that discloses is which paths exist, and which methods they take,
+// to a client who has not authenticated and whom no route quota counts: 405
+// against 404 tells a client that "/admin/export" is a real path. That is
+// route structure, which the OpenAPI document publishes anyway unless it is
+// turned off with [AppOptions.DisableDocs] or put behind a guard, and it is
+// never a route's data. A deployment for which the existence of a path is
+// itself a secret puts a guard or a limit in middleware installed with
+// [App.Use], where it covers these answers too.
+//
 // # Rate limiting
 //
 // Rate limiting is built in and off until a policy names a [Quota]. A policy is

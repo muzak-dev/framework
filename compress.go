@@ -408,24 +408,40 @@ func (w *compressWriter) flushHeld() error {
 	return err
 }
 
-// Flush resolves a pending decision and pushes everything buffered to the
+// FlushError resolves a pending decision and pushes everything buffered to the
 // client, so that a handler streaming a response is not held up by either this
 // writer or the compressor.
-func (w *compressWriter) Flush() {
+//
+// It reports the first thing that went wrong on the way, because a caller that
+// streams through [http.ResponseController] learns from it that the client is
+// gone. A flush that answered nil whatever became of the bytes would leave a
+// stream writing to a dead connection until something else noticed.
+func (w *compressWriter) FlushError() error {
+	var first error
 	if !w.decided {
 		// Whatever has arrived so far is all there is to judge by.
 		w.reject()
-		_ = w.flushHeld()
+		first = w.flushHeld()
 	}
-	if flusher, ok := w.compressor.(*gzip.Writer); ok {
-		_ = flusher.Flush()
+	switch flusher := w.compressor.(type) {
+	case *gzip.Writer:
+		first = firstError(first, flusher.Flush())
+	case *zlib.Writer:
+		first = firstError(first, flusher.Flush())
 	}
-	if flusher, ok := w.compressor.(*zlib.Writer); ok {
-		_ = flusher.Flush()
+	return firstError(first, http.NewResponseController(w.ResponseWriter).Flush())
+}
+
+// Flush is the older spelling of [compressWriter.FlushError], kept because a
+// wrapper written before the newer one existed looks for it by name.
+func (w *compressWriter) Flush() { _ = w.FlushError() }
+
+// firstError returns first when it is set and next otherwise.
+func firstError(first, next error) error {
+	if first != nil {
+		return first
 	}
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	return next
 }
 
 // markHijacked records that a handler took the connection over, which settles

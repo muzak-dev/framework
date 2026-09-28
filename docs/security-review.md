@@ -300,6 +300,12 @@ the default tracker's semantics would be a silent behavior change for every
 existing deployment. Applications serving IPv6 clients and relying on
 per-client rate limiting should adopt `IPPrefixTracker` explicitly.
 
+**Update (fourth review, F1).** The default has since changed: `IPTracker` now
+counts an IPv6 client by its /56, following `ConnectionIPv6Prefix`, so the rate
+limit and the connection caps agree on who one client is. The reasoning above
+about the right prefix being a deployment decision still holds, which is why
+the prefix is configurable and `IPPrefixTracker` still takes any length.
+
 ---
 
 ## 8. MEDIUM - WebSocket/SSE connection cap had no per-client dimension (FIXED)
@@ -608,6 +614,72 @@ and the binder; and linear cost for every string rule on megabyte inputs.
   validate package directly; `EvaluateUpTo` is the bounded form.
 - The Windows short-name check (T24) is exercised by tests on every OS, but has
   not been run on Windows.
+
+---
+
+## Fourth review - 2026-09-29
+
+A fourth pass, one reviewer per subsystem (core lifecycle, router and static
+serving, binding and validation, WebSocket, SSE and logging, rate limiting
+and i18n), each reading its files in full, re-testing the third review's fixes
+and writing an executable repro for every finding. Nothing critical or high was
+found, and the third review's fixes held. Every finding below was reproduced by
+a test that failed before the fix, and each test is now a regression test
+beside its fix. Where the right answer was a product decision the fix is the
+documentation, and it is listed as such.
+
+| # | Severity | Finding | Default config? | Status |
+|---|---|---|---|---|
+| F1 | Medium | The default `IPTracker` keyed IPv6 clients by /64, so a /56 or /48 holder had 256 to 65,536 times the budget | Yes | Fixed (/56, configurable) |
+| F2 | Medium | A multipart form with no file field was bounded by the 32 MiB upload limit, not `MaxBodySize`; 16 concurrent 19 MiB requests took 870 MiB | Form-only routes | Fixed |
+| F3 | Medium | `Unique()` on `[]time.Time` compared pairs: a 368 KB body cost 12 s of CPU | With `Unique()` on times | Fixed (keyed) |
+| F4 | Medium | A WebSocket's connection slot was released before its socket closed, so a peer withholding its close frame exceeded `MaxConnections` by orders of magnitude | Yes | Fixed |
+| F5 | Medium | An idle SSE stream over HTTP/2 was reset at `WriteTimeout`, because the write deadline was never cleared | HTTP/2 | Fixed |
+| F6 | Medium | `HTTPError`'s builders edited the receiver, so a shared error leaked one request's details into another and raced | Shared errors | Fixed (copies) |
+| F7 | Medium | A flush before the first write left the response looking unstarted, so a later failure appended the error envelope to a 200 stream | Streaming handlers | Fixed |
+| F8 | Low | The per-IP WebSocket cap was checked after the 101 was written, so a fast second dial slipped past it | Yes | Fixed |
+| F9 | Low | Pings, pongs and empty fragments were not counted by `MessageLimits` (77k pings in 0.5 s on one connection) | Yes | Fixed (per-connection budget) |
+| F10 | Low | A WebSocket handshake ran guards and dependencies before the Origin and cap checks | Yes | Fixed |
+| F11 | Low | The WebSocket Origin check accepted userinfo, a path and `//host`, and read only the first `Origin` header | Yes | Fixed |
+| F12 | Low | An SSE data race between `open()` and shutdown, and streams that never ended cleanly | Yes | Fixed |
+| F13 | Low | `Vary` from CORS, Locale and versioning was replaced by a handler's own `SetHeader("Vary", ...)` | Yes | Fixed |
+| F14 | Low | YAML aliases were deep-copied: 330 bytes allocated 216 MB and `MaxDepth` was bypassed | Locale files | Fixed (budget) |
+| F15 | Low | `%c` and `%x` in a locale's strftime pattern recursed until the stack overflowed, which Recovery cannot catch | Locale files | Fixed |
+| F16 | Low | Locale text amplified without bound (strftime widths, printf widths, deep JSON) | Locale files | Fixed (caps) |
+| F17 | Low | A flat dotted locale key next to a nested one resolved differently on each start | Locale files | Fixed (refused) |
+| F18 | Low | `Matches()` recompiled its expression on every request | With `Matches()` | Fixed (cached) |
+| F19 | Low | A negative `MaxBodySize` documented as "no limit" made every JSON body fail with 413 | Negative limit | Fixed |
+| F20 | Low | `Required()` skipped a nil pointer while the document listed the member as required | Pointer members | Fixed |
+| F21 | Low | `MultipleOf` used an absolute 1e-9 tolerance; `Nested` with a value receiver silently validated nothing; a self-referential collection type hung route registration | Yes | Fixed |
+| F22 | Low | The OpenAPI document disagreed with the runtime on body defaults, `time.Duration`, embedded pointers, generic component names and nested rules | Yes | Fixed, two items documented |
+| F23 | Low | `Base64`, `UUID`, `URL` and `NotBlank` accepted values a caller would call invalid | Yes | Fixed |
+| F24 | Low | Client-IP trust ignored IPv6 zones and `::ffff:` CIDRs; `Context.ClientIP()` kept the zone | Yes | Fixed |
+| F25 | Low | Radix `Lookup` dropped the first byte of a path with no leading slash; a route template could declare one parameter twice; two static mounts could share a path | Yes | Fixed (build errors) |
+| F26 | Low | `Accept-Encoding: deflate` answered raw DEFLATE, not zlib; version negotiation was lenient and read one header line | Yes | Fixed |
+| F27 | Low | Half a TLS pair served plaintext; `Run` did not stop lifecycle components on a serve error; the `Lifecycle.Start` context ended when `Start` returned; a second signal was swallowed; an `App` could not be re-run | Yes | Fixed |
+| F28 | Low | `required` config accepted an empty value; a CORS build failure was not logged; `TryFrom` panicked on a nil interface | Yes | Fixed |
+| F29 | Low | `SSEReader.Retry()` overflowed, `SSEDial` had no handshake bound, a sub-millisecond `Retry` was written as 0, and the compression wrapper hid a failed flush | Client side, SSE | Fixed |
+| F30 | Low | JSON logs passed C1, DEL and bidi controls raw, a panic value was logged unbounded, and default redaction missed common secret keys | Yes | Fixed |
+| F31 | Low | `Static` and `Frontend` do not stop a symlink escaping through `os.DirFS`; OPTIONS and 405 skip a route's guards and disclose which paths and methods exist | `os.DirFS`; yes | Documented |
+
+Two of these are behaviour changes worth knowing about. F1 makes IPv6 counters
+in shared storage reset once, because the key changed. F20 and F23 make
+validation stricter: a nil pointer fails `Required()`, and a UUID must be in
+its canonical form. Each is listed under **Changed** in the changelog with its
+migration.
+
+What was checked and held: the request, buffer, validator and compressor pools
+under a 3,000-request stress with panics, guards and dependencies (no state
+crossed a request); a JSON body reaching a member bound from the path, query,
+a header or a cookie (175,000 fuzz executions); route matching against a
+reference matcher (45 million executions, no mismatch); the WebSocket frame
+parser against an independent decoder (1.3 million executions, no divergence);
+SSE event-field injection; the CORS origin matcher; and rate-limit counter
+atomicity. There is no `unsafe` in the framework.
+
+Not established: WebSocket over HTTP/2 and HTTP/3, real-network slow-client
+timing, path aliasing by Windows trailing dots and macOS Unicode normalisation,
+and the behaviour of a shared rate-limit store across nodes.
 
 ---
 

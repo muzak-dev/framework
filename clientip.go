@@ -172,6 +172,15 @@ func parseTrustedProxy(entry string) (netip.Prefix, error) {
 		if err != nil {
 			return netip.Prefix{}, fmt.Errorf("muzak: trusted proxy %q is not a valid CIDR prefix: %w", entry, err)
 		}
+		// A prefix written in the IPv4-in-IPv6 form, such as
+		// "::ffff:10.0.0.0/104", is the IPv4 prefix it wraps. Every address
+		// is unmapped before it is compared, so left as written it would
+		// parse, match nothing, and leave the proxy it names silently
+		// untrusted. Its length counts the 96 bits of the ::ffff: prefix,
+		// which a wider one does not reach into and so stays what it is.
+		if addr := prefix.Addr(); addr.Is4In6() && prefix.Bits() >= 96 {
+			prefix = netip.PrefixFrom(addr.Unmap(), prefix.Bits()-96)
+		}
 		// Masking discards any host bits the prefix was written with, so that
 		// "10.1.2.3/8" means the same as "10.0.0.0/8" rather than never
 		// matching anything.
@@ -181,8 +190,21 @@ func parseTrustedProxy(entry string) (netip.Prefix, error) {
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("muzak: trusted proxy %q is not a valid address or CIDR prefix: %w", entry, err)
 	}
-	addr = addr.Unmap()
+	addr = normalizeAddr(addr)
 	return netip.PrefixFrom(addr, addr.BitLen()), nil
+}
+
+// normalizeAddr puts an address in the one form every comparison and every key
+// is made from: an IPv4-in-IPv6 address unwrapped to the IPv4 it carries, and
+// an IPv6 zone dropped.
+//
+// The zone is what a link-local address is scoped to on the host that wrote
+// it ("fe80::1%eth0"), and it means nothing to this one. Kept, it would make
+// a trusted prefix never contain the address, since a prefix does not contain
+// a zoned address, and it would make one client many, since a client that
+// appends "%a", "%b" and so on to its own address is a new string each time.
+func normalizeAddr(addr netip.Addr) netip.Addr {
+	return addr.WithZone("").Unmap()
 }
 
 // trusts reports whether an address is one whose forwarding header may be
@@ -255,7 +277,7 @@ func parseForwardedAddr(field string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	if addr, err := netip.ParseAddr(field); err == nil {
-		return addr.Unmap(), true
+		return normalizeAddr(addr), true
 	}
 	host, _, err := net.SplitHostPort(field)
 	if err != nil {
@@ -265,7 +287,7 @@ func parseForwardedAddr(field string) (netip.Addr, bool) {
 	if err != nil {
 		return netip.Addr{}, false
 	}
-	return addr.Unmap(), true
+	return normalizeAddr(addr), true
 }
 
 // peerAddr parses the address net/http recorded for the connection, which
@@ -275,10 +297,10 @@ func peerAddr(remoteAddr string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	if addrPort, err := netip.ParseAddrPort(remoteAddr); err == nil {
-		return addrPort.Addr().Unmap(), true
+		return normalizeAddr(addrPort.Addr()), true
 	}
 	if addr, err := netip.ParseAddr(remoteAddr); err == nil {
-		return addr.Unmap(), true
+		return normalizeAddr(addr), true
 	}
 	return netip.Addr{}, false
 }
@@ -289,8 +311,9 @@ func peerAddr(remoteAddr string) (netip.Addr, bool) {
 // that peer as a trusted proxy, in which case it is the address the proxy
 // reported. The result is normalised, so an address written as an
 // IPv4-in-IPv6 form and the same address written plainly are one value rather
-// than two, which is what stops a client from being counted twice, or from
-// evading a count, by rewriting its own address.
+// than two, and an IPv6 address carries no zone ("%eth0"), which is what stops
+// a client from being counted twice, or from evading a count, by rewriting its
+// own address.
 //
 // It returns the empty string when the connection has no address that can be
 // parsed, which happens on a listener that is not addressed by IP, such as a

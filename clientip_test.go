@@ -236,6 +236,8 @@ func TestPeerAddr(t *testing.T) {
 		{remote: "192.0.2.1", want: "192.0.2.1", ok: true},
 		{remote: "2001:db8::1", want: "2001:db8::1", ok: true},
 		{remote: "[::ffff:192.0.2.1]:80", want: "192.0.2.1", ok: true},
+		{remote: "[fe80::1%eth0]:80", want: "fe80::1", ok: true},
+		{remote: "fe80::1%eth0", want: "fe80::1", ok: true},
 		{remote: ""},
 		{remote: "/var/run/muzak.sock"},
 		{remote: "pipe"},
@@ -264,6 +266,8 @@ func TestParseForwardedAddr(t *testing.T) {
 		{field: "198.51.100.9", want: "198.51.100.9", ok: true},
 		{field: "2001:db8::1", want: "2001:db8::1", ok: true},
 		{field: "[2001:db8::1]:9", want: "2001:db8::1", ok: true},
+		{field: "2001:db8::1%eth0", want: "2001:db8::1", ok: true},
+		{field: "[2001:db8::1%eth0]:9", want: "2001:db8::1", ok: true},
 		{field: "198.51.100.9:9", want: "198.51.100.9", ok: true},
 		{field: ""},
 		{field: "unknown"},
@@ -298,6 +302,9 @@ func TestParseTrustedProxy(t *testing.T) {
 		{entry: "10.1.2.3", want: "10.1.2.3/32"},
 		{entry: "2001:db8::/32", want: "2001:db8::/32"},
 		{entry: "::ffff:10.1.2.3", want: "10.1.2.3/32"},
+		{entry: "::ffff:10.0.0.0/104", want: "10.0.0.0/8"},
+		{entry: "::ffff:10.1.2.3/128", want: "10.1.2.3/32"},
+		{entry: "fe80::1%eth0", want: "fe80::1/128"},
 		{entry: "", bad: true},
 		{entry: "nonsense", bad: true},
 		{entry: "10.0.0.0/99", bad: true},
@@ -412,5 +419,71 @@ func TestBuildRejectsAnUnreadableTrustedProxy(t *testing.T) {
 	message := buildError(t, app)
 	if !strings.Contains(message, "nonsense") {
 		t.Errorf("build error = %q, want it to name the entry it could not parse", message)
+	}
+}
+
+// TestClientIPDropsTheIPv6Zone is the regression test for a zoned address
+// kept as written: a trusted proxy's link-local address with a zone was read
+// as an untrusted client, and one client rotating the suffix of its own
+// address was counted as as many.
+func TestClientIPDropsTheIPv6Zone(t *testing.T) {
+	t.Parallel()
+	resolver, err := newClientIPResolver(ClientIPOptions{
+		TrustedProxies:       []string{"10.0.0.0/8", "fe80::/10"},
+		ConnectionIPv6Prefix: 128,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A trusted proxy that reports itself with a zone is still trusted, so
+	// the walk steps over it to the client.
+	req := forwardedRequest("10.1.2.3:9", DefaultForwardedHeader, "203.0.113.5, fe80::1%eth0")
+	if got := resolver.resolve(req).String(); got != "203.0.113.5" {
+		t.Errorf("resolve() = %q, want the client behind the zoned proxy", got)
+	}
+	req = forwardedRequest("[fe80::1%eth0]:9", DefaultForwardedHeader, "203.0.113.5")
+	if got := resolver.resolve(req).String(); got != "203.0.113.5" {
+		t.Errorf("resolve() = %q, want the client behind a zoned peer", got)
+	}
+
+	// Two spellings of one client are one client, however they are counted.
+	keys := map[string]bool{}
+	for _, zone := range []string{"a", "b", "c"} {
+		req := forwardedRequest("10.1.2.3:9", DefaultForwardedHeader, "2001:db8::1%"+zone)
+		addr := resolver.resolve(req)
+		if addr.Zone() != "" || strings.Contains(addr.String(), "%") {
+			t.Errorf("resolve() = %q, want no zone", addr)
+		}
+		keys[resolver.connectionKey(addr)] = true
+	}
+	if len(keys) != 1 {
+		t.Errorf("zone suffixes made %d connection keys, want 1: %v", len(keys), keys)
+	}
+
+	app := mustBuild(t, clientIPApp(t, ClientIPOptions{TrustedProxies: []string{"192.0.2.0/24"}}))
+	req = httptest.NewRequest(http.MethodGet, "/whoami", nil)
+	req.Header.Set(DefaultForwardedHeader, "2001:db8::1%evil")
+	rec := doRequest(t, app, req)
+	assertStatus(t, rec, http.StatusOK)
+	assertJSON(t, rec, `"2001:db8::1"`)
+}
+
+// TestClientIPTrustsAnIPv4MappedPrefix is the regression test for a trusted
+// proxy written as an IPv4-in-IPv6 prefix, which parsed and then never
+// matched, because a peer is always unmapped before it is compared.
+func TestClientIPTrustsAnIPv4MappedPrefix(t *testing.T) {
+	t.Parallel()
+	resolver, err := newClientIPResolver(ClientIPOptions{TrustedProxies: []string{"::ffff:10.0.0.0/104"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := forwardedRequest("10.0.0.1:9", DefaultForwardedHeader, "8.8.8.8")
+	if got := resolver.resolve(req).String(); got != "8.8.8.8" {
+		t.Errorf("resolve() = %q, want the client the mapped-prefix proxy reported", got)
+	}
+	req = forwardedRequest("11.0.0.1:9", DefaultForwardedHeader, "8.8.8.8")
+	if got := resolver.resolve(req).String(); got != "11.0.0.1" {
+		t.Errorf("resolve() = %q, want the untrusted peer outside the prefix", got)
 	}
 }

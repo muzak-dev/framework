@@ -12,6 +12,19 @@ import (
 // this package reaches the same entry point an application does.
 const MaxDepth = 100
 
+// MaxAliasNodes bounds how many values the aliases of one document may
+// duplicate between them.
+//
+// An alias stands for a copy of the anchored value, so a file can name a value
+// once, alias it ten times inside a second anchor, alias that ten times inside
+// a third, and so on: each level costs a few dozen bytes of input and
+// multiplies what it expands to by ten. Without a bound a few hundred bytes
+// are enough to allocate gigabytes when a locale file is loaded. The limit is
+// far above what sharing a block of defaults between locales needs, which is
+// a few hundred values, and far below what a load can afford to allocate for
+// a file the framework did not write.
+const MaxAliasNodes = 100_000
+
 // Parse decodes a document into a tree.
 //
 // Values are one of map[string]any, []any, string, int64, float64, bool or nil.
@@ -24,7 +37,7 @@ func Parse(data []byte) (map[string]any, error) {
 // ParseFile is [Parse] with a file name attached to any error it reports, so
 // that a document which will not load says which one it was.
 func ParseFile(name string, data []byte) (map[string]any, error) {
-	p := &parser{file: name, lines: scan(data), anchors: map[string]any{}}
+	p := &parser{file: name, lines: scan(data), anchors: map[string]anchor{}}
 	return p.document()
 }
 
@@ -33,7 +46,62 @@ type parser struct {
 	file    string
 	lines   []line
 	pos     int
-	anchors map[string]any
+	anchors map[string]anchor
+
+	// expanded counts the values the aliases read so far have copied, against
+	// [MaxAliasNodes].
+	expanded int
+}
+
+// anchor is a value a later alias may refer to, with the two measurements of
+// it that an alias is checked against: how many values a copy of it holds, and
+// how deeply it nests.
+type anchor struct {
+	value  any
+	nodes  int
+	height int
+}
+
+// sizeOf returns how many values a node holds, itself included, and how many
+// levels of collection lie below it.
+func sizeOf(v any) (nodes, height int) {
+	nodes = 1
+	switch node := v.(type) {
+	case map[string]any:
+		height = 1
+		for _, child := range node {
+			n, h := sizeOf(child)
+			nodes += n
+			height = max(height, h+1)
+		}
+	case []any:
+		height = 1
+		for _, child := range node {
+			n, h := sizeOf(child)
+			nodes += n
+			height = max(height, h+1)
+		}
+	}
+	return nodes, height
+}
+
+// expand copies an anchored value for an alias found at the given depth,
+// refusing one that would push the document past what the parser bounds.
+//
+// The copy is charged to the document's alias budget and its depth is added to
+// the depth of the alias, so an alias can neither be used to multiply a value
+// without limit nor to nest deeper than [MaxDepth] by naming a value that
+// nests already. It returns a message, and no value, for whichever bound was
+// hit; the caller attaches the position.
+func (p *parser) expand(a anchor, depth int) (any, string) {
+	if depth+a.height >= MaxDepth {
+		return nil, "this alias names a value that nests it more deeply than this parser will follow"
+	}
+	p.expanded += a.nodes
+	if p.expanded > MaxAliasNodes {
+		return nil, "the aliases in this document expand to more values than this parser will build"
+	}
+	return copyNode(a.value), ""
 }
 
 // errAt builds a located failure. Columns are 1-based, as an editor counts them.

@@ -21,7 +21,7 @@ func (p *parser) value(rest string, l line, indent, depth int) (any, error) {
 	case '&':
 		return p.anchored(rest, l, indent, depth)
 	case '*':
-		return p.alias(rest, l, col)
+		return p.alias(rest, l, col, depth)
 	case '!':
 		return nil, errAt(p.file, l, col, "this parser does not read explicit tags")
 	case '[', '{':
@@ -106,22 +106,27 @@ func (p *parser) anchored(rest string, l line, indent, depth int) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.anchors[name] = value
+	nodes, height := sizeOf(value)
+	p.anchors[name] = anchor{value: value, nodes: nodes, height: height}
 	return value, nil
 }
 
 // alias resolves a reference to an anchor declared earlier in the document.
-func (p *parser) alias(rest string, l line, col int) (any, error) {
+func (p *parser) alias(rest string, l line, col, depth int) (any, error) {
 	p.pos++
 	name := strings.TrimSpace(rest[1:])
 	if name == "" {
 		return nil, errAt(p.file, l, col, "an alias is written without a name")
 	}
-	value, known := p.anchors[name]
+	target, known := p.anchors[name]
 	if !known {
 		return nil, errAt(p.file, l, col, "an alias names an anchor that has not been declared above it")
 	}
-	return copyNode(value), nil
+	value, problem := p.expand(target, depth)
+	if problem != "" {
+		return nil, errAt(p.file, l, col, problem)
+	}
+	return value, nil
 }
 
 // copyNode duplicates an aliased value.
@@ -200,7 +205,7 @@ func (f *flow) value(depth int) (any, error) {
 	case '\'', '"':
 		return f.quoted()
 	case '*':
-		return f.alias()
+		return f.alias(depth)
 	case '!', '&':
 		return nil, f.fail("this parser reads neither tags nor anchors inside a flow collection")
 	default:
@@ -321,17 +326,21 @@ func (f *flow) quoted() (any, error) {
 
 // alias resolves a reference to an anchor from inside a flow collection, which
 // is what a merge naming several sources needs: "<<: [*base, *extra]".
-func (f *flow) alias() (any, error) {
+func (f *flow) alias(depth int) (any, error) {
 	f.i++
 	name := strings.TrimSpace(f.plain())
 	if name == "" {
 		return nil, f.fail("an alias is written without a name")
 	}
-	value, known := f.p.anchors[name]
+	target, known := f.p.anchors[name]
 	if !known {
 		return nil, f.fail("an alias names an anchor that has not been declared above it")
 	}
-	return copyNode(value), nil
+	value, problem := f.p.expand(target, depth)
+	if problem != "" {
+		return nil, f.fail(problem)
+	}
+	return value, nil
 }
 
 // plain reads an unquoted flow scalar, which ends at the punctuation that

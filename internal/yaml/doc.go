@@ -48,12 +48,15 @@
 //	non-scalar keys
 //	an anchor on a key
 //	a recursive alias
+//	aliases that expand past [MaxAliasNodes] values, or nest past [MaxDepth]
 //	a directive other than "%YAML"
 //
 // # Complexity
 //
 // Parsing is a single forward pass over the lines of the document. Nesting is
-// bounded at [MaxDepth] so that a hostile file cannot exhaust the stack, which
-// matters because the fuzz target in this package reaches the same entry point
-// an application does.
+// bounded at [MaxDepth], counting the depth of a value an alias stands for, so
+// that a hostile file cannot exhaust the stack, and the copies aliases make are
+// bounded at [MaxAliasNodes] per document, so that a few hundred bytes of
+// nested aliases cannot allocate gigabytes. That matters because the fuzz
+// target in this package reaches the same entry point an application does.
 package yaml

@@ -13,7 +13,10 @@ import (
 // file is the only document the framework did not write itself, so it is the
 // one place a fuzz target clearly earns the time it costs. The seed corpus is
 // the real locale files, so the generated inputs start from something shaped
-// like the thing being read.
+// like the thing being read. It also asserts the two bounds the package
+// documents for a hostile file: what a document parses to holds no more than
+// the input's own size plus the alias budget, and nests no deeper than
+// [MaxDepth].
 func FuzzParse(f *testing.F) {
 	names, _ := filepath.Glob(filepath.Join("testdata", "*.yml"))
 	for _, name := range names {
@@ -26,6 +29,7 @@ func FuzzParse(f *testing.F) {
 	f.Add([]byte("a: |\n  text\n"))
 	f.Add([]byte("a: [1, {b: 2}]\n"))
 	f.Add([]byte(""))
+	f.Add([]byte(aliasBomb(6)))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		tree, err := Parse(data)
@@ -37,6 +41,9 @@ func FuzzParse(f *testing.F) {
 		}
 		if tree == nil {
 			t.Error("Parse returned neither a tree nor an error")
+		}
+		if nodes, height := sizeOf(tree); nodes > 20*len(data)+1000+MaxAliasNodes || height > MaxDepth+1 {
+			t.Errorf("%d input bytes parsed to %d values nested %d deep, past the documented bounds", len(data), nodes, height)
 		}
 	})
 }

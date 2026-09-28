@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -80,13 +81,24 @@ const (
 	LogFormatNone
 )
 
-// DefaultRedactedKeys lists the attribute keys whose values are replaced with
-// [RedactedPlaceholder] before a record is written.
+// DefaultRedactedKeys lists the terms that mark an attribute key as carrying
+// a secret, whose value is replaced with [RedactedPlaceholder] before a record
+// is written.
 //
-// Matching is case-insensitive and ignores '-' and '_', so "API-Key",
-// "api_key" and "apikey" are all caught. The list exists because credentials
-// reach logs by accident far more often than by design, most often through an
-// attribute carrying a whole header map or request struct.
+// Both the key and each term are normalised first: lower-cased, with '-',
+// '_', '.' and spaces removed. A key is redacted when its normalised form
+// contains the normalised form of any term, so "token" catches "token",
+// "access_token", "X-CSRF-Token" and "github_token" alike, "password" catches
+// "db_password", and "api-key" catches "X-Api-Key". The list exists because
+// credentials reach logs by accident far more often than by design, most
+// often through an attribute carrying a whole header map or request struct,
+// and such keys are spelled every way there is.
+//
+// Matching by containment errs towards hiding: a key such as "token_count" or
+// "session_count" is redacted too. That is the intended trade, since a count
+// missing from a log costs far less than a credential written into one. The
+// same rule applies to a list passed as [LoggerOptions.RedactKeys], so a short
+// or common term there redacts every key that contains it.
 //
 // A key names a group as well as a single value. A group whose key matches,
 // whether it was built with [slog.Group], produced by a [slog.LogValuer], or
@@ -94,21 +106,18 @@ const (
 // the JSON format and the console format alike.
 var DefaultRedactedKeys = []string{
 	"authorization",
-	"proxy-authorization",
 	"cookie",
-	"set-cookie",
 	"password",
 	"passwd",
 	"secret",
 	"token",
-	"access-token",
-	"refresh-token",
 	"api-key",
-	"apikey",
 	"private-key",
-	"client-secret",
+	"signature",
+	"credential",
 	"session",
-	"credentials",
+	"jwt",
+	"bearer",
 }
 
 // RedactedPlaceholder is written in place of a redacted value.
@@ -143,9 +152,11 @@ type LoggerOptions struct {
 	// AddSource records the source file and line of the call site. It costs a
 	// stack walk per record, so it defaults to off.
 	AddSource bool
-	// RedactKeys replaces [DefaultRedactedKeys] when non-nil. Pass an empty,
-	// non-nil slice to disable redaction, which is only appropriate when
-	// nothing sensitive can reach the logger.
+	// RedactKeys replaces [DefaultRedactedKeys] when non-nil, and is matched
+	// the same way: a key is redacted when it contains any of these terms,
+	// once both are normalised. Pass an empty, non-nil slice to disable
+	// redaction, which is only appropriate when nothing sensitive can reach
+	// the logger.
 	RedactKeys []string
 	// ShortRequestID truncates request identifiers to their first eight
 	// characters in the console format, which keeps lines narrow while
@@ -215,15 +226,21 @@ func isTerminal(w io.Writer) bool {
 
 // redactor decides which attribute values must never be written.
 type redactor struct {
-	keys map[string]struct{}
+	// terms are the configured keys, normalised once.
+	terms [][]byte
 }
 
 // newRedactor normalises the configured keys once, so that the per-record
-// check is a single map lookup on an already normalised key.
+// check only has to normalise the key it is given.
+//
+// A term that normalises to nothing is dropped rather than kept, because
+// every key contains the empty string and it would redact everything.
 func newRedactor(keys []string) *redactor {
-	r := &redactor{keys: make(map[string]struct{}, len(keys))}
+	r := &redactor{}
 	for _, k := range keys {
-		r.keys[normalizeKey(k)] = struct{}{}
+		if term := appendNormalizedKey(nil, k); len(term) > 0 {
+			r.terms = append(r.terms, term)
+		}
 	}
 	return r
 }
@@ -231,29 +248,45 @@ func newRedactor(keys []string) *redactor {
 // normalizeKey lower-cases a key and drops the separators that distinguish
 // "api_key" from "API-Key", so that one entry covers every spelling.
 func normalizeKey(k string) string {
-	var b strings.Builder
-	b.Grow(len(k))
+	return string(appendNormalizedKey(nil, k))
+}
+
+// appendNormalizedKey appends the normalised form of k to buf; see
+// [normalizeKey].
+func appendNormalizedKey(buf []byte, k string) []byte {
 	for i := range len(k) {
 		c := k[i]
 		switch {
 		case c == '-' || c == '_' || c == '.' || c == ' ':
 			continue
 		case c >= 'A' && c <= 'Z':
-			b.WriteByte(c + ('a' - 'A'))
+			buf = append(buf, c+('a'-'A'))
 		default:
-			b.WriteByte(c)
+			buf = append(buf, c)
 		}
 	}
-	return b.String()
+	return buf
 }
 
-// shouldRedact reports whether an attribute with this key carries a secret.
+// shouldRedact reports whether an attribute with this key carries a secret,
+// which it does when the normalised key contains any normalised term.
+//
+// Matching whole keys only, as this once did, let the spellings credentials
+// are actually logged under through: db_password, X-Api-Key, jwt, session_id,
+// Stripe-Signature. The key is normalised into a buffer on the stack, so the
+// check allocates nothing for any key of ordinary length.
 func (r *redactor) shouldRedact(key string) bool {
-	if len(r.keys) == 0 {
+	if len(r.terms) == 0 {
 		return false
 	}
-	_, ok := r.keys[normalizeKey(key)]
-	return ok
+	var scratch [64]byte
+	normalized := appendNormalizedKey(scratch[:0], key)
+	for _, term := range r.terms {
+		if bytes.Contains(normalized, term) {
+			return true
+		}
+	}
+	return false
 }
 
 // anyRedacted reports whether any of the enclosing group names carries a

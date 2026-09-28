@@ -120,7 +120,9 @@
 // file accepts only multipart, because urlencoded cannot carry one. Files and
 // form values are body content, so both are required unless the field carries
 // `required:"false"` or a default. Two limits bound what a route accepts:
-// [MaxUploadSize] for the whole body and [MaxFileSize] for any single file.
+// [MaxUploadSize] for the whole of a multipart body and [MaxFileSize] for any
+// single file. A urlencoded body carries no file and is read into memory
+// whole, so it is bounded by [MaxBodySize] like a JSON body.
 //
 // A handler that returns [HTML] writes an HTML document instead of JSON, which
 // is what serving an upload form from the same application takes:

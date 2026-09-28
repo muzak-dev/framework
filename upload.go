@@ -345,14 +345,23 @@ func parseMultipart(c *Context, route *Route) error {
 	return nil
 }
 
-// parseURLEncodedForm reads a urlencoded body, bounding it by the same limit a
-// multipart body would be bound by so that one route has one limit.
+// parseURLEncodedForm reads a urlencoded body, bounding it by the route's
+// [MaxBodySize] rather than by its upload limit.
+//
+// A urlencoded body is held in memory whole, and every value in it is text
+// the binder parses, so it is a JSON body in all but syntax and is bounded
+// like one. The upload limit exists because a file is expected to be large,
+// and a urlencoded body cannot carry a file. Bounding it by that limit, as
+// this once did, let a form-only route buffer 32 MiB where net/http on its own
+// stops at 10 MB. Wrapping the body in a MaxBytesReader is also what turns
+// off net/http's own cap, so when the route has no limit at all the body is
+// left unwrapped and that cap still applies.
 func parseURLEncodedForm(c *Context, route *Route) error {
-	if route.maxUploadSize > 0 {
-		c.r.Body = http.MaxBytesReader(c.w, c.r.Body, route.maxUploadSize)
+	if route.maxBodySize > 0 {
+		c.r.Body = http.MaxBytesReader(c.w, c.r.Body, route.maxBodySize)
 	}
 	if err := c.r.ParseForm(); err != nil {
-		return uploadReadError(err, route.maxUploadSize, "form")
+		return uploadReadError(err, route.maxBodySize, "form")
 	}
 	return nil
 }

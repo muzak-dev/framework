@@ -295,13 +295,14 @@ func MaxBodySize(bytes int64) SharedOption {
 	}
 }
 
-// MaxUploadSize overrides the maximum accepted size, in bytes, of a form body
-// for a route or for every route beneath a router.
+// MaxUploadSize overrides the maximum accepted size, in bytes, of a multipart
+// body for a route or for every route beneath a router.
 //
-// It is what bounds a route that binds `form` or `file` fields, in place of
-// [MaxBodySize], because an upload is expected to be larger than a JSON
-// document and the two limits should not have to be traded off against each
-// other. A body that exceeds it is rejected with 413 while it is being read,
+// It is what bounds a multipart body sent to a route that binds `form` or
+// `file` fields, in place of [MaxBodySize], because an upload is expected to
+// be larger than a JSON document and the two limits should not have to be
+// traded off against each other. A urlencoded body cannot carry a file and is
+// held in memory whole, so it stays bounded by [MaxBodySize]. A body that exceeds it is rejected with 413 while it is being read,
 // so the server never buffers more than the limit. The application-wide
 // default comes from [AppOptions.MaxUploadSize]; a negative value removes an
 // inherited limit, which is only appropriate behind a proxy that imposes its

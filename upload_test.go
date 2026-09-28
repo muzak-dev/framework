@@ -669,7 +669,7 @@ func TestFormRouteRejectsWhatItCannotDecode(t *testing.T) {
 	app := New(quietOptions())
 	app.Post("/login/", func(ctx *Context, in formOnlyIn) (Empty, error) {
 		return Empty{}, nil
-	}, MaxUploadSize(32))
+	}, MaxBodySize(32))
 	built := mustBuild(t, app)
 
 	req := httptest.NewRequest(http.MethodPost, "/login/", strings.NewReader(`{"username":"muzak"}`))

@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 // FrontendOptions describes a built frontend to serve.
@@ -153,6 +155,13 @@ type frontend struct {
 //	ui := muzak.NewRouter()
 //	ui.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
 //	app.Include(ui, muzak.WithPrefix("/app"))
+//
+// When mounts nest, the most specific one answers, and a request that would
+// fall under a more specific mount if case were ignored answers 404 rather
+// than being served by a less specific one. With another mount at the root
+// beside the one above, /APP/x is refused rather than handed to the root: on
+// a case-insensitive filesystem the outer mount could otherwise open the
+// inner mount's files without the inner mount's guards.
 //
 // A path naming a file or directory that begins with a dot, such as /.env or
 // /.git/config, answers 404 and is not given the fallback, since a build
@@ -558,13 +567,71 @@ func contentTypeFor(name string) string {
 
 // frontendFor finds the frontend that should answer a request path, which is
 // the most specific mount covering it.
+//
+// Mount paths are matched exactly, but the filesystem behind a mount may not
+// be: on macOS and Windows "ADMIN/secret.txt" opens "admin/secret.txt". With
+// a public mount at "/" over a directory whose admin subdirectory is also
+// mounted, guarded, at "/admin", a request for /ADMIN/secret.txt missed the
+// guarded mount and was served by the public one from the very same file. So
+// a request that falls under a more specific mount once case is ignored, or
+// once a backslash is read as the separator Windows reads it as, is never
+// answered by a less specific one: it answers 404. Routing it to the specific
+// mount instead would guess at what the filesystem does; refusing it holds on
+// every platform.
 func (a *App) frontendFor(requestPath string) (*frontend, string, bool) {
+	// Mounts are ordered longest first, so the first one the path falls under
+	// loosely is the most specific such mount.
+	loose := -1
 	for _, mount := range a.frontends {
 		if relative, ok := mount.matches(requestPath); ok {
+			if len(mount.path) < loose {
+				return nil, "", false
+			}
 			return mount, relative, true
+		}
+		if loose < 0 && mount.coversLoosely(requestPath) {
+			loose = len(mount.path)
 		}
 	}
 	return nil, "", false
+}
+
+// coversLoosely reports whether a request path falls under this mount when
+// case is ignored and a backslash counts as a separator, which is how a
+// case-insensitive filesystem on macOS or Windows would resolve it.
+//
+// Case is compared rune by rune under Unicode folding rather than byte by
+// byte, because a folded spelling need not be the same length: the Kelvin
+// sign is three bytes and folds to a one-byte "k".
+func (f *frontend) coversLoosely(requestPath string) bool {
+	rest, prefix := requestPath, f.path
+	for prefix != "" {
+		if rest == "" {
+			return false
+		}
+		got, gotSize := utf8.DecodeRuneInString(rest)
+		want, wantSize := utf8.DecodeRuneInString(prefix)
+		if !equalFoldRune(got, want) {
+			return false
+		}
+		rest, prefix = rest[gotSize:], prefix[wantSize:]
+	}
+	return rest == "" || rest[0] == '/' || rest[0] == '\\'
+}
+
+// equalFoldRune reports whether two runes are the same letter under Unicode
+// simple case folding, walking the folding orbit the way strings.EqualFold
+// does.
+func equalFoldRune(a, b rune) bool {
+	if a == b {
+		return true
+	}
+	for r := unicode.SimpleFold(a); r != a; r = unicode.SimpleFold(r) {
+		if r == b {
+			return true
+		}
+	}
+	return false
 }
 
 // allowedOnFiles is the Allow header of a path served from a filesystem, which

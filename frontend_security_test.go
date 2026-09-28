@@ -308,3 +308,76 @@ func TestNamesDotfile(t *testing.T) {
 		}
 	}
 }
+
+// TestMountCaseVariantIsNotServedByParent is the regression test for a
+// guarded mount reached through a public parent mount on a case-insensitive
+// filesystem. The filesystem is modelled with a map holding the upper-case
+// spelling too, so the check holds on every platform: whatever the parent's
+// filesystem would open, a path that falls under the guarded mount once case
+// is ignored is not the parent's to answer.
+func TestMountCaseVariantIsNotServedByParent(t *testing.T) {
+	t.Parallel()
+	secret := &fstest.MapFile{Data: []byte("admin-only")}
+	public := fstest.MapFS{
+		"index.html":             {Data: []byte("public")},
+		"admin/secret.txt":       secret,
+		"ADMIN/secret.txt":       secret,
+		"Admin/secret.txt":       secret,
+		"admin\\secret.txt":      secret,
+		"\u212Aeys/secret.txt":   secret,
+		"administrator/note.txt": {Data: []byte("public note")},
+	}
+	admin := NewRouter(WithDependencies(RequireBearerToken("s3cret")))
+	admin.Static("/", StaticOptions{FS: fstest.MapFS{"secret.txt": secret}})
+	keys := NewRouter(WithDependencies(RequireBearerToken("s3cret")))
+	keys.Static("/", StaticOptions{FS: fstest.MapFS{"secret.txt": secret}})
+
+	app := New(quietOptions())
+	app.Static("/", StaticOptions{FS: public, Index: true})
+	app.Include(admin, WithPrefix("/admin"))
+	app.Include(keys, WithPrefix("/keys"))
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, "GET", "/admin/secret.txt"), http.StatusUnauthorized)
+	assertStatus(t, doRequest(t, app, withToken("/admin/secret.txt")), http.StatusOK)
+	for _, target := range []string{
+		"/ADMIN/secret.txt", "/Admin/secret.txt", "/aDmIn", "/admin%5Csecret.txt", "/%E2%84%AAeys/secret.txt",
+	} {
+		rec := do(t, app, "GET", target)
+		assertStatus(t, rec, http.StatusNotFound)
+		if strings.Contains(rec.Body.String(), "admin-only") {
+			t.Fatalf("GET %s served the guarded file: %s", target, rec.Body.String())
+		}
+	}
+	// A path that only shares the first letters is not under the mount.
+	assertStatus(t, do(t, app, "GET", "/administrator/note.txt"), http.StatusOK)
+	assertStatus(t, do(t, app, "GET", "/"), http.StatusOK)
+}
+
+// TestMountCaseVariantOnThisFilesystem replays the report against a real
+// directory, which is only meaningful where the filesystem ignores case.
+func TestMountCaseVariantOnThisFilesystem(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "admin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"index.html": "public", "admin/secret.txt": "admin-only"} {
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ADMIN", "secret.txt")); err != nil {
+		t.Skip("this filesystem is case-sensitive; TestMountCaseVariantIsNotServedByParent covers the logic")
+	}
+	admin := NewRouter(WithDependencies(RequireBearerToken("s3cret")))
+	admin.Static("/", StaticOptions{Dir: filepath.Join(dir, "admin")})
+	app := New(quietOptions())
+	app.Static("/", StaticOptions{Dir: dir})
+	app.Include(admin, WithPrefix("/admin"))
+	mustBuild(t, app)
+	assertStatus(t, do(t, app, "GET", "/admin/secret.txt"), http.StatusUnauthorized)
+	for _, target := range []string{"/ADMIN/secret.txt", "/Admin/secret.txt"} {
+		assertStatus(t, do(t, app, "GET", target), http.StatusNotFound)
+	}
+}

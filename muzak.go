@@ -870,6 +870,11 @@ func (a *App) fail(c *Context, err error) {
 			slog.String(RequestIDKey, c.RequestID()),
 			slog.String("error", cause.Error()))
 	}
+	if !c.w.written {
+		// Before the renderer runs rather than after, so a renderer that sets
+		// a header of its own, a problem+json Content-Type say, keeps it.
+		resetForError(c.w.Header(), c.locale)
+	}
 	status, body := a.renderError(c, err)
 	if c.w.written {
 		// Only a hijacked connection or a streaming route reaches this, and
@@ -888,6 +893,54 @@ func (a *App) fail(c *Context, err error) {
 			slog.String("error", writeErr.Error()))
 		writeMinimalError(c.w, c.RequestID())
 	}
+}
+
+// successEntityHeaders are the response headers that describe a body, or how
+// long a cache may keep it, and so are only true of the body they were set
+// for; see [resetForError].
+var successEntityHeaders = [...]string{
+	"Content-Type",
+	"Content-Length",
+	"Content-Disposition",
+	"Content-Encoding",
+	"Content-Range",
+	"ETag",
+	"Last-Modified",
+	"Cache-Control",
+	"Expires",
+}
+
+// resetForError clears what a handler declared about the success response it
+// never sent, before an error is written in its place.
+//
+// A handler sets its headers first and fails afterwards, and every one of
+// them used to reach the error envelope. The envelope then went out as
+// whatever the handler meant to send: a 404 quoting client input served as
+// text/html, an attachment to be saved to disk, a transient 503 a shared cache
+// could keep for a day under the success response's Cache-Control, or an ETag
+// and Last-Modified that let a later conditional request revalidate the error
+// as though it were the resource. The rule is that a header describing the
+// body or its caching goes, and every other header stays: Vary (the error
+// depends on the same inputs the success would have), the security headers,
+// Retry-After, Allow, a WWW-Authenticate a guard set to name its scheme,
+// Set-Cookie, the request identifier and anything else middleware or the
+// handler declared about the exchange rather than the entity. Content-Language
+// is put back to the locale the error is rendered in, because a handler may
+// have changed it for content that is no longer being sent.
+//
+// An error is never worth storing, so it is sent with "Cache-Control:
+// no-store". The header is set here, before the error renderer runs, so a
+// renderer that wants a failure cached can say so.
+func resetForError(header http.Header, locale string) {
+	for _, name := range successEntityHeaders {
+		header.Del(name)
+	}
+	if locale != "" {
+		header.Set(HeaderContentLanguage, locale)
+	} else {
+		header.Del(HeaderContentLanguage)
+	}
+	header.Set("Cache-Control", "no-store")
 }
 
 // endsItsOwnResponse reports whether the request was routed to a WebSocket or

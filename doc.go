@@ -627,6 +627,15 @@
 // logged and never transmitted. Replace the shape entirely with
 // [AppOptions.ErrorRenderer].
 //
+// An error replaces the response its handler was preparing, so the headers
+// that described that response go with it: Content-Type, Content-Length,
+// Content-Disposition, Content-Encoding, Content-Range, ETag, Last-Modified,
+// Cache-Control and Expires are dropped, Content-Language is set back to the
+// locale the error is written in, and the error is sent with
+// "Cache-Control: no-store". Every other header, Vary, Retry-After, Allow,
+// WWW-Authenticate and Set-Cookie among them, is kept. A custom renderer runs
+// after this and may set any of them again.
+//
 // There is a constructor for each outcome worth a name of its own, so that
 // returning the right response does not mean remembering the right number:
 //

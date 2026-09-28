@@ -246,6 +246,9 @@ func writeMinimalError(w http.ResponseWriter, requestID string) {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
+	// The body is fixed English, not the locale a handler or the Locale
+	// middleware declared, so Content-Language is dropped rather than kept.
+	resetForError(w.Header(), "")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusInternalServerError)

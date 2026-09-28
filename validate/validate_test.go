@@ -2,6 +2,8 @@ package validate
 
 import (
 	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -414,5 +416,57 @@ func TestTimeRules(t *testing.T) {
 	}
 	if got := Time().Required().For(&moment).Target(); got == nil {
 		t.Error("Target = nil after For")
+	}
+}
+
+// A rule is declared inside Validate, which runs on every request, so
+// declaring Matches must not compile its expression again.
+func TestMatchesCompilesAPatternOnce(t *testing.T) {
+	// Not parallel: AllocsPerRun cannot be measured beside other tests.
+	const pattern = `^[\p{L}\p{N} ._-]{1,1000}$`
+	declare := func() *StringRules { return String().Matches(pattern) }
+	declare()
+	if allocs := testing.AllocsPerRun(50, func() { declare().MatchesNot(pattern) }); allocs > 20 {
+		t.Errorf("declaring Matches allocated %.0f times, want the compiled expression reused", allocs)
+	}
+	if compilePattern(pattern) != compilePattern(pattern) {
+		t.Error("the same pattern compiled to two expressions")
+	}
+	if err := declare().Check("abc"); err != nil {
+		t.Errorf("a matching value gave %v", err)
+	}
+	if err := declare().Check("a!"); err == nil {
+		t.Error("a value outside the pattern was accepted")
+	}
+}
+
+func TestMatchesStillPanicsOnAMalformedPattern(t *testing.T) {
+	t.Parallel()
+	for range 2 {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("a malformed pattern did not panic")
+				}
+			}()
+			String().Matches(`(`)
+		}()
+	}
+}
+
+func TestPatternCacheIsBounded(t *testing.T) {
+	t.Parallel()
+	store := &patternStore{limit: 4, held: map[string]*regexp.Regexp{}}
+	for i := range 10 {
+		store.compile(fmt.Sprintf("^bounded-%d$", i))
+	}
+	if len(store.held) != 4 {
+		t.Errorf("the store holds %d patterns, want 4", len(store.held))
+	}
+	if store.compile("^bounded-9$").MatchString("bounded-1") {
+		t.Error("a pattern beyond the limit was not applied")
+	}
+	if store.compile("^bounded-0$") != store.compile("^bounded-0$") {
+		t.Error("a pattern within the limit was compiled twice")
 	}
 }

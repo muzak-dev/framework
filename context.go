@@ -73,6 +73,18 @@ type depValue struct {
 // Request returns the underlying *http.Request. Mutating it is allowed but the
 // router has already finished matching, so changes to the URL have no effect
 // on which handler runs.
+//
+// A form parsed through it, by FormValue, ParseForm or ParseMultipartForm, is
+// parsed by net/http rather than by the binder, so the route's limits do not
+// apply to it: net/http stops a urlencoded body at 10 MB, and holds up to
+// 32 MiB of a multipart body in memory and writes the rest to temporary files
+// with no limit. Bind the values through `form` and `file` fields instead,
+// which read the body under [MaxBodySize] and [MaxUploadSize], or wrap the
+// body in [http.MaxBytesReader] before parsing it. That matters most in a
+// guard: a form is parsed once per request, so a guard that parses it before
+// the binder runs hands the binder its form, and the route's upload limit
+// never applied to it. Whatever parsed a multipart form, its temporary files
+// are removed when the request ends.
 func (c *Context) Request() *http.Request { return c.r }
 
 // RawBody returns the request body exactly as it arrived, and whether the route

@@ -402,9 +402,13 @@ func (p *bindPlan) unsupportedMediaType(mediaType string) error {
 
 // releaseUpload removes the temporary files a multipart body spilled to disk.
 //
-// net/http does the same once the response is finished, but only for requests
-// it served itself. Doing it here means a request driven through the handler
-// directly, as a test does, leaves nothing behind either.
+// net/http does the same once the response is finished, but only for the
+// request it handed to the server's handler, never for a copy made from it,
+// and only for requests it served itself. So this runs twice: once when a
+// route that binds a form returns, so the files last no longer than the
+// handler that may read them, and again when the request is released, for a
+// form some guard or handler parsed itself. The second finds nothing left to
+// remove when the first already ran.
 func releaseUpload(r *http.Request) {
 	if r.MultipartForm != nil {
 		_ = r.MultipartForm.RemoveAll()

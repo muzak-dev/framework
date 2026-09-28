@@ -921,7 +921,17 @@ func (a *App) acquire(w *responseWriter, r *http.Request) *Context {
 // release clears the Context and returns it to the pool. Clearing is what
 // makes pooling safe: a Context that kept a previous request's dependencies
 // could hand them to the next request that borrowed it.
+//
+// It also removes whatever a multipart form spilled to disk, whoever parsed
+// it. The binder removes its own form's files, but a guard or handler that
+// calls FormValue on [Context.Request] parses the form itself, and
+// net/http's own cleanup cannot see that form: it removes the files of the
+// request it handed to the server's handler, and the request here is a copy
+// the middleware made with WithContext, whose form is set on the copy alone.
+// Every request that parsed a multipart body that way left its files behind
+// for good, as large as the client cared to make them.
 func (a *App) release(c *Context) {
+	releaseUpload(c.r)
 	c.reset()
 	a.ctxPool.Put(c)
 }

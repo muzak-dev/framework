@@ -879,12 +879,46 @@ func (b *schemaBuilder) schemaFor(t reflect.Type) *Schema {
 // nameFor picks a unique component name for a named type, qualifying it with
 // its package when two packages export the same type name.
 func (b *schemaBuilder) nameFor(t reflect.Type) string {
-	name := t.Name()
+	name := componentName(t.Name())
 	if existing, taken := b.names[name]; taken && existing != t {
 		name = sanitizeSchemaName(shortPackage(t.PkgPath()) + "." + t.Name())
 	}
 	b.names[name] = t
 	return name
+}
+
+// componentName turns the name reflect gives a type into one that is a valid
+// component key. A generic type is named with its arguments, including the
+// import path of each, as in Page[example.com/app.Item], and a reference to a
+// component whose key holds a slash or a bracket does not resolve: the slash
+// splits the JSON pointer, and the bracket is not a character a key may hold.
+// Each argument keeps the package and name it is known by and loses the
+// import path, so Page[example.com/app.Item] is Page_app.Item.
+func componentName(name string) string {
+	if !strings.ContainsAny(name, "[/") {
+		return name
+	}
+	var b strings.Builder
+	var word strings.Builder
+	flush := func() {
+		text := word.String()
+		if i := strings.LastIndexByte(text, '/'); i >= 0 {
+			text = text[i+1:]
+		}
+		b.WriteString(text)
+		word.Reset()
+	}
+	for _, r := range name {
+		switch r {
+		case '[', ']', ',', ' ', '*':
+			flush()
+			b.WriteByte('_')
+		default:
+			word.WriteRune(r)
+		}
+	}
+	flush()
+	return strings.Trim(sanitizeSchemaName(b.String()), "_")
 }
 
 // shortPackage returns the last element of an import path.

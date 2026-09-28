@@ -3,6 +3,7 @@ package muzak
 import (
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +43,40 @@ func TestAnEmbeddedPointerIsPromotedInTheDocument(t *testing.T) {
 	}
 	if slices.Contains(schema.Required, "id") || !slices.Contains(schema.Required, "name") {
 		t.Errorf("required = %v, want name only", schema.Required)
+	}
+}
+
+type namedPage[T any] struct {
+	Items []T `json:"items"`
+}
+
+type namedThing struct {
+	ID string `json:"id"`
+}
+
+// A generic type is named with the import path of its arguments, and a
+// reference to a component whose key holds a slash or a bracket does not
+// resolve.
+func TestAGenericTypeGetsAComponentKeyAReferenceCanName(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/things", func(ctx *Context, _ Empty) (namedPage[namedThing], error) { return namedPage[namedThing]{}, nil })
+	mustBuild(t, app)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc.Components.Schemas["namedPage_framework.namedThing"]; !ok {
+		t.Errorf("components = %v, want the generic type named namedPage_framework.namedThing", keysOf(doc.Components.Schemas))
+	}
+	for name := range doc.Components.Schemas {
+		if strings.ContainsAny(name, "/[] ") {
+			t.Errorf("component key %q cannot be the target of a reference", name)
+		}
+	}
+	response := doc.Paths["/things"].Get.Responses["200"].Content["application/json"].Schema
+	if response == nil || strings.ContainsAny(response.Ref, "[] ") || strings.Count(response.Ref, "/") != 3 {
+		t.Errorf("response = %+v, want a reference whose only slashes are the pointer's", response)
 	}
 }

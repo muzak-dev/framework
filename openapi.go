@@ -295,6 +295,10 @@ func (d *Document) Marshal() ([]byte, error) {
 // Document returns the generated OpenAPI description of the application,
 // building it if necessary. It returns nil when documentation is disabled with
 // [AppOptions.DisableDocs], and an error when the application does not build.
+//
+// Because it builds the application, call it only once every route, guard
+// and middleware is in place: configuring the application afterwards panics,
+// as it does after [App.Build].
 func (a *App) Document() (*Document, error) {
 	if err := a.Build(); err != nil {
 		return nil, err

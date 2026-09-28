@@ -398,9 +398,13 @@ func (a *App) installDefaultMiddleware() {
 //
 // Middleware installed here runs inside the built-in chain, so it already has
 // a request identifier available and is already covered by panic recovery.
-// Calls to Use after the application has been built have no effect, because
-// the chain is assembled once.
+// Use must be called before the application is built, whether explicitly by
+// [App.Build] or implicitly by [App.ServeHTTP], [App.Document] or a run
+// method, because the chain is assembled once. A call made afterwards panics
+// rather than leave a middleware, possibly one that denies access, silently
+// uninstalled.
 func (a *App) Use(middleware ...Middleware) {
+	a.mustBeOpen("App.Use")
 	a.middleware = append(a.middleware, middleware...)
 }
 
@@ -413,10 +417,14 @@ func (a *App) Logger() *slog.Logger { return a.logger }
 //
 //	app.Options(muzak.WithSingleton(models, muzak.LifecycleFunc("ml-model", start, stop)))
 //
-// Options must be called before the application is built. Calls made
-// afterwards have no effect, because the routing tree and the dependency
-// chains are resolved once.
+// Options must be called before the application is built, whether explicitly
+// by [App.Build] or implicitly by [App.ServeHTTP], [App.Document] or a run
+// method, because the routing tree and the dependency chains are resolved
+// once. A call made afterwards panics rather than leave a guard silently
+// unapplied. Registering a route or including a router after the build panics
+// for the same reason.
 func (a *App) Options(opts ...RouterOption) {
+	a.mustBeOpen("App.Options")
 	for _, opt := range opts {
 		opt.applyRouter(&a.cfg)
 	}
@@ -430,10 +438,13 @@ func (a *App) Config() AppOptions { return a.opts }
 // Build resolves the routing tree, compiles every binding plan and generates
 // the OpenAPI document.
 //
-// It is called automatically by [App.ServeHTTP] and by the run methods, so
-// calling it explicitly is only necessary to surface configuration errors
-// early, which is what a test or a start-up check wants. Building is
-// idempotent: the work happens once and later calls return the same result.
+// It is called automatically by [App.ServeHTTP], [App.Document] and the run
+// methods, so calling it explicitly is only necessary to surface
+// configuration errors early, which is what a test or a start-up check wants.
+// Building is idempotent: the work happens once and later calls return the
+// same result. Building also freezes the configuration: [App.Use],
+// [App.Options], registering a route and including a router all panic once it
+// has happened, since none of them could take effect any more.
 //
 // The returned error joins every problem found, so a misconfigured application
 // reports all of them at once rather than one per attempt.

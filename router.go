@@ -497,7 +497,27 @@ type Router struct {
 	frontends []*frontend
 	includes  []include
 	errs      []error
-	mounted   bool
+	// mounted is set when the router is resolved into an application being
+	// built. From then on its configuration has been read for good, which is
+	// why a further registration is refused rather than quietly ignored.
+	mounted bool
+}
+
+// mustBeOpen panics when the router has already been built into an
+// application, naming the call that came too late.
+//
+// Building reads the routing tree, the guards and the middleware once, and a
+// call made afterwards used to be accepted and then silently had no effect.
+// That fails open: a guard or a deny-all middleware added after something
+// built the application implicitly, [App.Document] writing the OpenAPI file
+// at start-up for instance, protected nothing while the code read as though
+// it did. A panic is the loud failure that mistake needs, since a call like
+// this is made once during start-up, where a panic is seen at once.
+func (r *Router) mustBeOpen(call string) {
+	if r.mounted {
+		panic("muzak: " + call + " was called after the application was built, where it would have no effect; " +
+			"make every configuration call before the first call to Build, ServeHTTP, Document or a run method")
+	}
 }
 
 // NewRouter returns a router configured by the given options.
@@ -530,8 +550,10 @@ func NewRouter(opts ...RouterOption) *Router {
 // Guards contributed by the parent run before those contributed here, which
 // run before the child's own. A router may be included only once; including it
 // twice is reported as an error when the application is built, because a route
-// has a single resolved path.
+// has a single resolved path. Include panics once the application the router
+// belongs to has been built, as registering a route does.
 func (r *Router) Include(child *Router, opts ...RouterOption) {
+	r.mustBeOpen("Include")
 	if child == nil {
 		r.errs = append(r.errs, errors.New("muzak: Include was given a nil router"))
 		return
@@ -567,7 +589,8 @@ func (r *Router) Routes() []*Route {
 // under, and may contain "{name}" parameters and one trailing "{name...}"
 // wildcard. Registration errors (an unbindable input type, a duplicate route,
 // or a path parameter no field binds) are collected and reported when the
-// application is built.
+// application is built. Registering a route on a router whose application has
+// already been built panics, because the route would never be served.
 func (r *Router) Get[In, Out any](path string, h Handler[In, Out], opts ...RouteOption) *Route {
 	return register(r, http.MethodGet, path, h, opts)
 }
@@ -628,6 +651,7 @@ func (r *Router) Handle[In, Out any](method, path string, h Handler[In, Out], op
 // its checks reports the reason and returns without joining the router's route
 // list, so nothing downstream has to cope with a half-built Route.
 func register[In, Out any](r *Router, method, path string, h Handler[In, Out], opts []RouteOption) *Route {
+	r.mustBeOpen("registering " + method + " " + path)
 	rt := &Route{
 		Method:   method,
 		rawPath:  path,

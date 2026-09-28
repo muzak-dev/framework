@@ -183,7 +183,9 @@ type WSOptions struct {
 	PingInterval time.Duration
 
 	// PongTimeout is how long a keepalive ping waits for its answer, defaulting
-	// to [DefaultWSPongTimeout]. It is meaningful only alongside PingInterval.
+	// to [DefaultWSPongTimeout], which is also what a negative value means: no
+	// answer is not a bound worth having. It is meaningful only alongside
+	// PingInterval.
 	PongTimeout time.Duration
 
 	// MessageLimits bounds how fast a peer may send messages, using the same
@@ -322,7 +324,9 @@ func (o WSOptions) withDefaults() WSOptions {
 		o.PingInterval = 0
 	}
 	if o.PingInterval > 0 {
-		o.PongTimeout = orDefaultDuration(o.PongTimeout, DefaultWSPongTimeout)
+		if o.PongTimeout <= 0 {
+			o.PongTimeout = DefaultWSPongTimeout
+		}
 	}
 	return o
 }

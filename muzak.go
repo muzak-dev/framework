@@ -1209,7 +1209,7 @@ func (c *Context) writeResponse(v any) error {
 		}
 	}()
 
-	if err := json.MarshalWrite(buf, v); err != nil {
+	if err := json.MarshalWrite(buf, v, durationJSON); err != nil {
 		return fmt.Errorf("muzak: encoding the response of %s %s failed: %w", c.r.Method, c.route.pathOrRequest(c.r), err)
 	}
 	header := c.w.Header()

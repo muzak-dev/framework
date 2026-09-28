@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type defaultsBase struct {
@@ -102,5 +103,33 @@ func TestABodyDefaultThatIsNotItsTypeRefusesTheRoute(t *testing.T) {
 	err := app.Build()
 	if err == nil || !strings.Contains(err.Error(), `default "many"`) {
 		t.Errorf("Build = %v, want the default named", err)
+	}
+}
+
+type durationIn struct {
+	Timeout time.Duration `json:"timeout"`
+}
+
+// The document calls a duration in a JSON body a string such as "1500ms", and
+// now it is one, both ways.
+func TestADurationInABodyIsAString(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/d", func(ctx *Context, in durationIn) (durationIn, error) { return in, nil })
+	mustBuild(t, app)
+
+	rec := do(t, app, "POST", "/d", `{"timeout":"1500ms"}`)
+	assertStatus(t, rec, http.StatusOK)
+	assertJSON(t, rec, `{"timeout":"1.5s"}`)
+
+	assertStatus(t, do(t, app, "POST", "/d", `{"timeout":null}`), http.StatusOK)
+
+	for _, body := range []string{`{"timeout":1500000000}`, `{"timeout":"soon"}`, `{"timeout":true}`} {
+		rec := do(t, app, "POST", "/d", body)
+		assertStatus(t, rec, http.StatusUnprocessableEntity)
+		details := decodeError(t, rec).Error.Details
+		if len(details) != 1 || details[0].Field != "timeout" {
+			t.Errorf("%s: details = %+v, want one failure on timeout", body, details)
+		}
 	}
 }

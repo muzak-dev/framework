@@ -3,6 +3,7 @@ package muzak
 import (
 	"bytes"
 	"encoding"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -1058,8 +1059,45 @@ func requestMediaType(r *http.Request) (string, error) {
 // unknown members are rejected too unless the route opted out with
 // [AllowUnknownFields].
 func (rt *Route) jsonReadOptions() json.Options {
-	return json.RejectUnknownMembers(!rt.allowUnknownFields)
+	return json.JoinOptions(json.RejectUnknownMembers(!rt.allowUnknownFields), durationJSON)
 }
+
+// durationJSON gives a time.Duration in a JSON body the representation the
+// document describes, a string such as "1500ms" that time.ParseDuration reads
+// and Duration.String writes.
+//
+// encoding/json/v2 has none of its own: it refuses to encode or decode a
+// Duration that carries no format, and a format tag is not accepted for it
+// either, so a body member of that type was a 422 for every value a client
+// could send and a 500 for every response that held one, while the document
+// called it a duration string and a request parameter of the same type read
+// "1500ms" without trouble. A number is refused as the wrong type, and a null
+// leaves the zero value, as it does for any other scalar.
+var durationJSON = json.JoinOptions(
+	json.WithMarshalers(json.MarshalToFunc(func(enc *jsontext.Encoder, d time.Duration) error {
+		return enc.WriteToken(jsontext.String(d.String()))
+	})),
+	json.WithUnmarshalers(json.UnmarshalFromFunc(func(dec *jsontext.Decoder, d *time.Duration) error {
+		switch kind := dec.PeekKind(); kind {
+		case 'n':
+			*d = 0
+			return dec.SkipValue()
+		case '"':
+		default:
+			return &json.SemanticError{GoType: reflect.TypeFor[time.Duration](), JSONKind: kind}
+		}
+		var text string
+		if err := json.UnmarshalDecode(dec, &text); err != nil {
+			return err
+		}
+		parsed, err := time.ParseDuration(text)
+		if err != nil {
+			return errNotDuration
+		}
+		*d = parsed
+		return nil
+	})),
+)
 
 // discardBody drains and closes a request body that no handler will read, so
 // that keep-alive connections can be reused instead of being torn down.

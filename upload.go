@@ -368,13 +368,21 @@ func parseURLEncodedForm(c *Context, route *Route) error {
 
 // uploadReadError turns a parse failure into the response it deserves, which
 // is 413 when the body outgrew its limit and 400 when it was malformed.
+//
+// A malformed body is reported with no cause attached. The parser's error
+// quotes what it could not parse, which is the client's own bytes: a
+// multipart part header is read under net/http's generous line limits, so a
+// one megabyte header wrote a five megabyte line to the error log, and a
+// client sending those in a loop filled the disk of whoever collected it. A
+// client's malformed body is the client's mistake, and the 400 is the whole
+// story. The 413 keeps its cause, which names only the limit.
 func uploadReadError(err error, limit int64, what string) error {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
 		return NewHTTPErrorf(http.StatusRequestEntityTooLarge,
 			"the %s exceeds the %d byte limit for this route", what, limit).Wrap(err)
 	}
-	return NewHTTPErrorf(http.StatusBadRequest, "the %s could not be read", what).Wrap(err)
+	return NewHTTPErrorf(http.StatusBadRequest, "the %s could not be read", what)
 }
 
 // unsupportedMediaType reports that a form route was sent something it cannot

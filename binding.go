@@ -586,9 +586,9 @@ func setterFor(t reflect.Type) (setter, error) {
 		}
 		return func(dst reflect.Value, raw []string) error {
 			out := reflect.MakeSlice(dst.Type(), len(raw), len(raw))
-			for i, s := range raw {
+			for i := range raw {
 				if err := elem(out.Index(i), raw[i:i+1]); err != nil {
-					return fmt.Errorf("entry %d %q %w", i+1, s, err)
+					return &entryError{index: i + 1, err: err}
 				}
 			}
 			dst.Set(out)
@@ -677,6 +677,7 @@ var (
 	errNotInt      = errors.New("must be a valid integer")
 	errNotUint     = errors.New("must be a valid non-negative integer")
 	errNotNumber   = errors.New("must be a valid number")
+	errNotText     = errors.New("is not in the expected format")
 )
 
 // bindingKeys maps each of those onto the key its translation is written under.
@@ -686,6 +687,52 @@ var bindingKeys = map[error]string{
 	errNotInt:      "integer",
 	errNotUint:     "unsigned",
 	errNotNumber:   "number",
+	errNotText:     "format",
+}
+
+// entryError reports a failure inside a repeated parameter, naming the entry
+// by its position.
+//
+// The position is all it names. The value is the client's own text, which a
+// client already has, and quoting it back turned every rejected entry into an
+// amplifier: a header of 450 KB of non-UTF-8 bytes came back quoted at four
+// times the size. A position is enough for a client to find its mistake.
+type entryError struct {
+	index int
+	err   error
+}
+
+func (e *entryError) Error() string { return fmt.Sprintf("entry %d %v", e.index, e.err) }
+
+func (e *entryError) Unwrap() error { return e.err }
+
+// paramIssue turns a setter's failure into the issue a client is sent, with
+// the translation key and arguments that go with it.
+//
+// Every built-in kind already fails with one of the fixed phrases above. A type
+// implementing encoding.TextUnmarshaler writes its own error, and the standard
+// library's own such types write errors that are no fit for a client:
+// time.Time names its layout string and quotes the whole input back, and
+// netip.Addr names the function that failed. So the text of such an error is
+// replaced with a fixed phrase too, and only an [*HTTPError] is passed
+// through, since its Message is by contract written for the client. The same
+// setters serve [LoadConfig], whose errors go to an operator rather than a
+// client, which is why the replacement happens here rather than in the
+// setter.
+func paramIssue(err error) (issue, key string, args []any) {
+	var entry *entryError
+	if errors.As(err, &entry) {
+		issue, key, args = paramIssue(entry.err)
+		return fmt.Sprintf("entry %d %s", entry.index, issue), key, args
+	}
+	if key := bindingKey(err); key != "" {
+		return err.Error(), key, nil
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.Message != "" {
+		return httpErr.Message, httpErr.MessageKey, httpErr.MessageArgs
+	}
+	return errNotText.Error(), bindingKey(errNotText), nil
 }
 
 // bindingKeyFor reports the rule a binding failure came from, or the empty
@@ -721,7 +768,8 @@ func bindParams(binders []paramBinder, c *Context, dst reflect.Value, query url.
 			raw = []string{b.defValue}
 		}
 		if err := b.set(fieldByIndex(dst, b.index), raw); err != nil {
-			verr.addKey(b.source.String(), b.name, err.Error(), bindingKey(err))
+			issue, key, args := paramIssue(err)
+			verr.addKey(b.source.String(), b.name, issue, key, args...)
 		}
 	}
 }

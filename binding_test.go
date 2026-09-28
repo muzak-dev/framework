@@ -113,7 +113,7 @@ func TestSetterErrors(t *testing.T) {
 		{"duration", reflect.TypeFor[time.Duration](), []string{"soon"}, "must be a valid duration"},
 		{"uuid", reflect.TypeFor[uuid.UUID](), []string{"not-a-uuid"}, "uuid"},
 		{"pointer", reflect.TypeFor[*int](), []string{"x"}, "must be a valid integer"},
-		{"slice element", reflect.TypeFor[[]int](), []string{"1", "bad"}, `entry 2 "bad" must be a valid integer`},
+		{"slice element", reflect.TypeFor[[]int](), []string{"1", "bad"}, "entry 2 must be a valid integer"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

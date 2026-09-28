@@ -133,6 +133,7 @@ en:
       integer: "must be a valid integer"
       unsigned: "must be a valid non-negative integer"
       number: "must be a valid number"
+      format: "is not in the expected format"
       unknown_field: "is not a field this endpoint accepts"
       invalid_json: "is not valid JSON: %{reason}"
 

@@ -380,7 +380,9 @@ type wsConfig struct {
 // applies here: middleware runs, guards run, dependencies resolve, and the
 // input struct is bound and validated before a single byte is upgraded. A
 // request that fails any of that is answered with the usual JSON error and
-// never becomes a connection at all.
+// never becomes a connection at all. The handshake itself, its origin and the
+// connection limits are checked first, before the guards and dependencies, so
+// that a handshake bound to be refused runs none of them.
 //
 //	type WSItemIn struct {
 //		ItemID string `path:"item_id"`
@@ -565,22 +567,9 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 	// The per-client key is resolved once here and reused for both the
 	// pre-upgrade check and the post-upgrade recording below, so the same
 	// client is counted against the same budget in both places.
-	connKey, err := perClientKey(c, a.websockets.perKeyLimit)
+	connKey, err := a.admitWebSocket(c)
 	if err != nil {
 		return nil, err
-	}
-	// Refusing before the upgrade is what lets a client shut out by a draining
-	// or a full server read an ordinary error response.
-	switch a.websockets.admits(connKey) {
-	case registryDraining:
-		return nil, errWSShuttingDown
-	case registryFull:
-		c.w.Header().Set("Retry-After", "5")
-		return nil, errWSTooManyConnections
-	case registryKeyFull:
-		c.w.Header().Set("Retry-After", "5")
-		return nil, errWSTooManyConnectionsFromClient
-	case admitted:
 	}
 	subprotocol := wsSubprotocol(c.r, cfg.opts.Subprotocols)
 	conn, err := a.upgrade(c, cfg, accept, subprotocol)
@@ -609,6 +598,51 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 		go conn.keepalive(c.Context(), cfg.opts.PingInterval, cfg.opts.PongTimeout)
 	}
 	return conn, nil
+}
+
+// admitWebSocket refuses a handshake the application has no room for and
+// returns the key the connection will be counted under.
+//
+// Refusing before the upgrade is what lets a client shut out by a draining or
+// a full server read an ordinary error response. It is only a check: the
+// connection is counted when it is recorded, under the register's own lock,
+// which is what keeps two handshakes arriving together from both passing a
+// limit of one.
+func (a *App) admitWebSocket(c *Context) (string, error) {
+	connKey, err := perClientKey(c, a.websockets.perKeyLimit)
+	if err != nil {
+		return "", err
+	}
+	switch a.websockets.admits(connKey) {
+	case registryDraining:
+		return "", errWSShuttingDown
+	case registryFull:
+		c.w.Header().Set("Retry-After", "5")
+		return "", errWSTooManyConnections
+	case registryKeyFull:
+		c.w.Header().Set("Retry-After", "5")
+		return "", errWSTooManyConnectionsFromClient
+	}
+	return connKey, nil
+}
+
+// refuseWebSocket answers a handshake that is going to be refused for what it
+// is or for who sent it, which is everything that can be known without running
+// the route's guards and dependencies.
+//
+// They run after it, not before, because they are where a session is looked
+// up, an expiry slid or a one-shot token consumed, and a cross-site page can
+// make a visitor's browser send the cookie those resolve from. A handshake that
+// is bound to be answered 403 or 503 should not have cost any of that, and a
+// full server should not spend a store round trip on every handshake it turns
+// away. The checks are repeated when the connection is accepted, which is
+// cheap and is what keeps the answer right if the register filled in between.
+func (a *App) refuseWebSocket(c *Context, cfg *wsConfig) error {
+	if _, err := cfg.checkHandshake(c); err != nil {
+		return err
+	}
+	_, err := a.admitWebSocket(c)
+	return err
 }
 
 // wsCloseGoingAway ends a connection because the server is going away, which

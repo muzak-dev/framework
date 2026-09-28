@@ -841,6 +841,14 @@ func (a *App) run(c *Context, route *Route) {
 			return
 		}
 	}
+	// A WebSocket handshake that is going to be refused for its shape, its
+	// origin or a full server is refused before anything runs on its behalf.
+	if route.websocket != nil {
+		if err := a.refuseWebSocket(c, route.websocket); err != nil {
+			a.fail(c, err)
+			return
+		}
+	}
 	// Before the dependencies, so a guard verifying a signature over the bytes
 	// sees them, and after the rate limit above, so a client past its budget is
 	// refused without the server buffering a body on its behalf.

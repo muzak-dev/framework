@@ -311,9 +311,14 @@ func Locale(opts I18nOptions) Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			locale, consulted := resolveLocale(r, opts, available)
 			if consulted > 0 && len(vary) > 0 {
-				// Added rather than set, so that it composes with the Vary the
-				// compression middleware writes for Accept-Encoding.
-				vary[consulted-1].addTo(w.Header())
+				// Declared to the writer instead of added to the header, so
+				// that it composes with the Vary the compression middleware
+				// writes for Accept-Encoding and survives a handler that sets
+				// a Vary of its own; see [responseWriter].
+				rw := asResponseWriter(w)
+				defer rw.commitVary()
+				w = rw
+				rw.varyOn(vary[consulted-1].fields...)
 			}
 			if locale != "" {
 				w.Header().Set(HeaderContentLanguage, locale)
@@ -365,12 +370,9 @@ func resolveLocale(r *http.Request, opts I18nOptions, available []string) (strin
 }
 
 // localeVary is the Vary a response carries when the locale resolver read a
-// given number of sources: the request headers those sources depend on, both
-// as a list and joined into the single value added when nothing else has
-// written Vary yet.
+// given number of sources: the request headers those sources depend on.
 type localeVary struct {
 	fields []string
-	joined string
 }
 
 // localeVaryPrefixes computes, for each count of sources read, the Vary that
@@ -397,28 +399,9 @@ func localeVaryPrefixes(opts I18nOptions) []localeVary {
 		}
 		// Clip so that a later append never writes into an earlier entry's
 		// backing array.
-		out[i] = localeVary{fields: slices.Clip(fields), joined: strings.Join(fields, ", ")}
+		out[i] = localeVary{fields: slices.Clip(fields)}
 	}
 	return out
-}
-
-// addTo adds the fields to a response's Vary header, skipping any that
-// something earlier in the chain already named, so the header never lists a
-// field twice.
-func (v localeVary) addTo(h http.Header) {
-	if len(v.fields) == 0 {
-		return
-	}
-	existing := h.Values("Vary")
-	if len(existing) == 0 {
-		h.Add("Vary", v.joined)
-		return
-	}
-	for _, field := range v.fields {
-		if !varyNames(existing, field) {
-			h.Add("Vary", field)
-		}
-	}
 }
 
 // varyNames reports whether a Vary header already covers a field, either by

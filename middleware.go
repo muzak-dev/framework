@@ -467,16 +467,22 @@ func CORS(opts CORSOptions) (Middleware, error) {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Declared to the writer instead of added to the header, so a
+			// handler that sets a Vary of its own cannot take Origin out of
+			// it; see [responseWriter].
+			rw := asResponseWriter(w)
+			defer rw.commitVary()
+			w = rw
 			header := w.Header()
 			if !wildcard {
-				addVary(header, "Origin")
+				rw.varyOn("Origin")
 			}
 			preflight := false
 			if r.Method == http.MethodOptions {
-				addVary(header, "Access-Control-Request-Method")
+				rw.varyOn("Access-Control-Request-Method")
 				if r.Header.Get("Access-Control-Request-Method") != "" {
 					preflight = true
-					addVary(header, "Access-Control-Request-Headers")
+					rw.varyOn("Access-Control-Request-Headers")
 				}
 			}
 
@@ -552,12 +558,22 @@ func setIfAbsent(h http.Header, key, value string) {
 // handling of a later failure: a started response is aborted so the client
 // cannot mistake it for a complete one, while a hijacked connection no longer
 // belongs to net/http and must not be touched.
+//
+// vary holds the request headers the response depends on that middleware
+// declared before the handler ran. They are merged into Vary when the response
+// is written, and not when they are declared, because Vary is an ordinary
+// header a handler may set or replace before it writes: one that does its own
+// content negotiation would otherwise erase the Origin, Accept-Language or
+// version header the response was chosen by, and a shared cache would store
+// it for every client. Compression makes the same promise the same way; see
+// [compressWriter].
 type responseWriter struct {
 	http.ResponseWriter
 	status   int
 	bytes    int64
 	written  bool
 	hijacked bool
+	vary     []string
 }
 
 // asResponseWriter wraps w unless it is already a *responseWriter, so that
@@ -585,9 +601,46 @@ func (w *responseWriter) WriteHeader(status int) {
 		w.ResponseWriter.WriteHeader(status)
 		return
 	}
+	w.commitVary()
 	w.status = status
 	w.written = true
 	w.ResponseWriter.WriteHeader(status)
+}
+
+// varyOn records that the response depends on the named request headers, to be
+// merged into Vary by [responseWriter.commitVary] rather than written now.
+func (w *responseWriter) varyOn(fields ...string) {
+	w.vary = append(w.vary, fields...)
+}
+
+// commitVary merges what [responseWriter.varyOn] recorded into Vary, adding
+// only the fields the header does not already name. It is called when the
+// response is written, the last moment a handler could have replaced the
+// header, and by whoever ends the request, for a response with nothing to
+// write, which net/http commits from the header as it stands when the handler
+// returns. It does nothing once it has run, and nothing after the header is on
+// the wire, when a change to the header no longer reaches the client.
+func (w *responseWriter) commitVary() {
+	if len(w.vary) == 0 {
+		return
+	}
+	addVaryFields(w.Header(), w.vary...)
+	w.vary = nil
+}
+
+// addVaryFields adds every named field the Vary header does not already
+// cover, as one value, and nothing at all when it covers them all.
+func addVaryFields(header http.Header, fields ...string) {
+	existing := header.Values("Vary")
+	var missing []string
+	for _, field := range fields {
+		if !varyNames(existing, field) && !slices.ContainsFunc(missing, func(m string) bool { return strings.EqualFold(m, field) }) {
+			missing = append(missing, field)
+		}
+	}
+	if len(missing) > 0 {
+		header.Add("Vary", strings.Join(missing, ", "))
+	}
 }
 
 // isInformational reports whether status is an interim 1xx response, such as
@@ -606,6 +659,7 @@ func isInformational(status int) bool {
 // Write records the byte count and marks the response as started.
 func (w *responseWriter) Write(b []byte) (int, error) {
 	if !w.written {
+		w.commitVary()
 		w.status = http.StatusOK
 		w.written = true
 	}
@@ -634,6 +688,9 @@ func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 // the JSON envelope to a stream the client has already been told is a
 // success. A writer that cannot flush sent nothing, so nothing is recorded.
 func (w *responseWriter) FlushError() error {
+	// A flush sends the header as it stands, whether or not anything was
+	// written before it.
+	w.commitVary()
 	err := http.NewResponseController(w.ResponseWriter).Flush()
 	if !w.written && !errors.Is(err, http.ErrNotSupported) {
 		w.status = http.StatusOK

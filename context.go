@@ -243,6 +243,11 @@ func (c *Context) Cookie(name string) (*http.Cookie, error) {
 // SetHeader sets a response header, replacing any previously set value.
 // Headers must be set before the handler returns; once the response has begun,
 // further changes are ignored by net/http.
+//
+// Setting Vary is safe next to the middleware that declares one: the fields
+// CORS, the Locale middleware and header versioning depend on are merged into
+// it when the response is written, so a handler's own Vary adds to them
+// rather than replacing them.
 func (c *Context) SetHeader(name, value string) {
 	c.w.Header().Set(name, value)
 }

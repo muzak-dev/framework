@@ -718,6 +718,10 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 	rw := asResponseWriter(w)
 	c := a.acquire(rw, r)
 	defer a.release(c)
+	// A response with nothing to write is committed by net/http from the
+	// header as it stands when this returns, so what was declared about Vary
+	// is merged in before then.
+	defer rw.commitVary()
 
 	entry, found := a.tree.Lookup(r.URL.EscapedPath(), &c.params)
 	if !found {
@@ -782,7 +786,9 @@ func (a *App) matchVersion(c *Context, candidates []*Route) *Route {
 		return candidates[0]
 	}
 	if field := versioning.varyField(); field != "" && (len(candidates) > 1 || !candidates[0].isVersionNeutral()) {
-		addVary(c.w.Header(), field)
+		// Declared rather than added, so a handler that sets a Vary of its own
+		// cannot replace it; see [responseWriter].
+		c.w.varyOn(field)
 	}
 	return selectVersion(candidates, versioning.requestedVersions(c.r))
 }

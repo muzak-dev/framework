@@ -124,7 +124,7 @@ func TestLocaleVaryKeepsWhatIsAlreadyThere(t *testing.T) {
 
 	h := http.Header{}
 	h.Add("Vary", "Origin, cookie")
-	vary[2].addTo(h)
+	addVaryFields(h, vary[2].fields...)
 	if got, want := varyOf(h), []string{"Origin", "cookie", "X-Locale", "Accept-Language"}; !slices.Equal(got, want) {
 		t.Errorf("Vary = %q, want %q", got, want)
 	}
@@ -132,7 +132,7 @@ func TestLocaleVaryKeepsWhatIsAlreadyThere(t *testing.T) {
 	// A response that already varies on everything needs nothing added.
 	star := http.Header{}
 	star.Set("Vary", "*")
-	vary[2].addTo(star)
+	addVaryFields(star, vary[2].fields...)
 	if got := varyOf(star); !slices.Equal(got, []string{"*"}) {
 		t.Errorf("Vary = %q, want only *", got)
 	}

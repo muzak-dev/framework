@@ -38,7 +38,7 @@ type Validatable interface {
 // The union is what lets one entry point serve both `Name string` and
 // `Nickname *string`. Rules bind to the field's address either way, so the
 // field is still identified by position, and a nil pointer skips its rules
-// rather than failing them.
+// rather than failing them, except Required, which a nil pointer fails.
 type StringField interface {
 	~string | *string
 }
@@ -287,8 +287,8 @@ type rejection struct {
 //
 //	v.String(&in.Email).Trim().Lower().Required().Email()
 //
-// The field may be a string or a pointer to one; a nil pointer skips its rules.
-// A field of any other type does not compile.
+// The field may be a string or a pointer to one; a nil pointer skips its rules,
+// except Required, which reports it missing. A field of any other type does not compile.
 func (v *Validation) String[T StringField](ptr *T) *validate.StringRules {
 	rules := v.nextString().For(ptr)
 	v.rules = append(v.rules, rules)

@@ -63,7 +63,7 @@ func (r *NumberRules) Describe() Constraints {
 func (r *NumberRules) Evaluate() []Problem {
 	value, ok := resolve(r.target)
 	if !ok {
-		return nil
+		return absentProblems(r.target, r.steps)
 	}
 	number, ok := toFloat(value)
 	if !ok {

@@ -244,7 +244,7 @@ func (r *TimeRules) Describe() Constraints {
 func (r *TimeRules) Evaluate() []Problem {
 	value, ok := resolve(r.target)
 	if !ok {
-		return nil
+		return absentProblems(r.target, r.steps)
 	}
 	moment, ok := value.Interface().(time.Time)
 	if !ok {

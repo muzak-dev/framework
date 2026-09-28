@@ -150,7 +150,7 @@ func TestNumberAcrossEveryNumericKind(t *testing.T) {
 			t.Errorf("Evaluate = %v", problems)
 		}
 		var absent *int
-		if problems := Number().Required().For(&absent).Evaluate(); len(problems) != 0 {
+		if problems := Number().Between(1, 10).For(&absent).Evaluate(); len(problems) != 0 {
 			t.Errorf("a nil pointer field reported %v, want it skipped", problems)
 		}
 	})

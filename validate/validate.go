@@ -122,8 +122,9 @@ func floatPtr(v float64) *float64 { return new(v) }
 // resolve walks a field pointer down to the value the rules act on.
 //
 // A field declared as a pointer is optional by construction: when it is nil
-// there is no value to check, so the rule set is skipped rather than failed.
-// The returned value is settable, which is what lets a transform write back
+// there is no value to check, so the rule set is skipped rather than failed,
+// with the one exception [absentProblems] makes for Required. The returned
+// value is settable, which is what lets a transform write back
 // through the pointer.
 func resolve(target any) (reflect.Value, bool) {
 	if target == nil {
@@ -141,6 +142,31 @@ func resolve(target any) (reflect.Value, bool) {
 		rv = rv.Elem()
 	}
 	return rv, true
+}
+
+// absentProblems is what a rule set reports for a field that resolve found
+// nothing behind: nothing, unless the set is Required, in which case the field
+// is missing and the rule that says so speaks.
+//
+// A nil pointer skips every rule, since an optional field nobody sent has
+// nothing to check, but Required is not a check on a value. It is the
+// statement that a value has to be there, and the generated document lists the
+// field as required. Skipping it for the one field type whose absence can be
+// told from an empty value let `{}` and `{"name":null}` through a
+// `Required()` on a `*string`, and handed the handler a nil pointer it had
+// been promised was not one.
+func absentProblems[T any](target any, steps []step[T]) []Problem {
+	if rv := reflect.ValueOf(target); rv.Kind() != reflect.Pointer || rv.IsNil() {
+		// The rule set is bound to nothing at all, which the entry points never
+		// allow, so there is no field to call missing.
+		return nil
+	}
+	for i := range steps {
+		if steps[i].kind == kindRequired {
+			return []Problem{problemFor(&steps[i], errRequired)}
+		}
+	}
+	return nil
 }
 
 // ruleKind identifies a built-in rule without a closure.

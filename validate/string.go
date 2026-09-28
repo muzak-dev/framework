@@ -77,8 +77,8 @@ func (r *StringRules) describe() Constraints {
 func (r *StringRules) Evaluate() []Problem {
 	value, ok := resolve(r.target)
 	if !ok {
-		// A nil pointer field carries no value to judge.
-		return nil
+		// A nil pointer field carries no value to judge, but it is missing.
+		return absentProblems(r.target, r.steps)
 	}
 	return r.applyToValue(value)
 }

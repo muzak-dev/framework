@@ -326,9 +326,39 @@ func TestStringEvaluateThroughAPointerField(t *testing.T) {
 		t.Errorf("the transform did not reach the value: %q", text)
 	}
 
+	// An optional field nobody sent has nothing to check, but Required says a
+	// value has to be there, so a nil pointer is missing rather than skipped.
 	var absent *string
-	if problems := String().Required().For(&absent).Evaluate(); len(problems) != 0 {
+	if problems := String().MinLen(3).For(&absent).Evaluate(); len(problems) != 0 {
 		t.Errorf("a nil pointer field reported %v, want it skipped", problems)
+	}
+	problems := String().Required().MinLen(3).For(&absent).Evaluate()
+	if len(problems) != 1 || problems[0].Issue != "is required" || problems[0].Kind != KindBlank {
+		t.Errorf("a required nil pointer field reported %v, want it required", problems)
+	}
+	problems = String().Required().Message("say something").For(&absent).Evaluate()
+	if len(problems) != 1 || problems[0].Issue != "say something" {
+		t.Errorf("a required nil pointer field reported %v, want the rule's own message", problems)
+	}
+}
+
+func TestRequiredRejectsANilPointerForEveryScalarFamily(t *testing.T) {
+	t.Parallel()
+	var (
+		number *int
+		moment *time.Time
+	)
+	if problems := Number().Required().For(&number).Evaluate(); len(problems) != 1 || problems[0].Issue != "is required" {
+		t.Errorf("a required nil *int reported %v", problems)
+	}
+	if problems := Number().Min(1).For(&number).Evaluate(); len(problems) != 0 {
+		t.Errorf("an optional nil *int reported %v", problems)
+	}
+	if problems := Time().Required().For(&moment).Evaluate(); len(problems) != 1 || problems[0].Issue != "is required" {
+		t.Errorf("a required nil *time.Time reported %v", problems)
+	}
+	if problems := Time().For(&moment).Evaluate(); len(problems) != 0 {
+		t.Errorf("an optional nil *time.Time reported %v", problems)
 	}
 }
 

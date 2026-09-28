@@ -429,3 +429,35 @@ func TestRuleSetsAreRecycledAcrossRequests(t *testing.T) {
 		t.Error("a second time rule set reused the first")
 	}
 }
+
+// requiredPointerIn declares Required on a field whose absence can be told
+// from an empty value, which the generated document lists as required.
+type requiredPointerIn struct {
+	Name *string `json:"name"`
+	Age  *int    `json:"age"`
+}
+
+func (in *requiredPointerIn) Validate(v *Validation) {
+	v.String(&in.Name).Required()
+	v.Number(&in.Age).Min(0)
+}
+
+// TestRequiredRejectsAMissingPointerField: Required is the statement that a
+// value has to be there, so a nil pointer is missing rather than skipped. The
+// rules of an optional pointer, such as Age's, are still skipped when nil.
+func TestRequiredRejectsAMissingPointerField(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/p", func(ctx *Context, in requiredPointerIn) (rtOut, error) { return rtOut{OK: true}, nil })
+	mustBuild(t, app)
+
+	for _, body := range []string{`{}`, `{"name":null}`, `{"name":""}`} {
+		rec := do(t, app, "POST", "/p", body)
+		assertStatus(t, rec, http.StatusUnprocessableEntity)
+		details := decodeError(t, rec).Error.Details
+		if len(details) != 1 || details[0].Field != "name" || details[0].Issue != "is required" {
+			t.Errorf("%s: details = %+v, want name reported as required", body, details)
+		}
+	}
+	assertStatus(t, do(t, app, "POST", "/p", `{"name":"a"}`), http.StatusOK)
+}

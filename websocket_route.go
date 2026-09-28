@@ -567,7 +567,9 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 		// the check above and the upgrade, so it is reasoned about rather than
 		// provoked. The connection is told to go away rather than left
 		// unaccounted for; there is no response left to refuse it with by now.
-		_ = conn.Close(WSStatusGoingAway, "the server is shutting down")
+		// It is not waited on for a close frame of its own, because nothing
+		// counts it while it lingers.
+		_ = conn.abort(WSStatusGoingAway, "the server is shutting down")
 		return nil, errWSShuttingDown
 	}
 	if cfg.messages != nil {
@@ -882,10 +884,18 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 	conn.cancelOnEnd(cancel)
 	c.r = c.r.WithContext(handlerCtx)
 
+	// The connection's slot is returned only once its transport is closed, and
+	// this is the first deferred call so that it runs after the closing one
+	// below, including when that one is re-raising a panic. Closing is not
+	// instant: it waits for the peer's own close frame, and for the write half
+	// when another goroutine is stuck writing to a peer that does not read. A
+	// slot freed before that would let a peer that withholds its close frame
+	// hold sockets and goroutines the caps say nobody may.
+	defer a.websockets.remove(conn)
+
 	status, reason := WSStatusNormalClosure, ""
 	defer func() {
 		conn.stopWatching()
-		a.websockets.remove(conn)
 		if recovered := recover(); recovered != nil {
 			// The connection is closed before the panic continues, because the
 			// recovery above cannot write a response onto a hijacked socket.

@@ -587,7 +587,14 @@ func (r *Router) Routes() []*Route {
 //
 // The path is relative to whatever prefixes the router is eventually mounted
 // under, and may contain "{name}" parameters and one trailing "{name...}"
-// wildcard. Registration errors (an unbindable input type, a duplicate route,
+// wildcard. A parameter is percent-decoded once before it is bound, and a
+// segment that arrives as "%2F" stays inside the segment it belongs to when
+// the route is matched, so a wildcard's value can contain "/" and "..", and a
+// value can contain a NUL byte. Treat one as text a client wrote: check it
+// before using it as a file name, as [Router.Frontend] and [Router.Static] do
+// for the paths they serve.
+//
+// Registration errors (an unbindable input type, a duplicate route,
 // or a path parameter no field binds) are collected and reported when the
 // application is built. Registering a route on a router whose application has
 // already been built panics, because the route would never be served.

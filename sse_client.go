@@ -24,6 +24,10 @@ const (
 	// it has begun, at thirty seconds. It does not bound how long a stream may
 	// sit idle between events, because waiting is what a stream is for.
 	DefaultSSEReadTimeout = 30 * time.Second
+	// DefaultSSEHandshakeTimeout bounds how long opening a stream may take, at
+	// thirty seconds: from sending the request until the response has been
+	// accepted as a stream, or refused and read.
+	DefaultSSEHandshakeTimeout = 30 * time.Second
 )
 
 // SSEDialOptions configures [SSEDial].
@@ -35,10 +39,25 @@ type SSEDialOptions struct {
 	// a network of its own, such as the in-process one a test client serves
 	// over. It defaults to a fresh [net/http.Client].
 	//
-	// A client with a Timeout is used with that timeout removed, because it
-	// would otherwise apply to the whole life of the stream rather than to the
-	// request and cut it short.
+	// A client with a Timeout is used with that timeout removed from the
+	// stream, because it would otherwise apply to the whole life of the stream
+	// rather than to the request and cut it short. It is kept for the request:
+	// unless HandshakeTimeout says otherwise, it is the time opening the stream
+	// may take.
 	HTTPClient *http.Client
+
+	// HandshakeTimeout bounds how long opening the stream may take, from the
+	// request being sent until the response has been accepted as a stream, or
+	// has been refused and its body read. It defaults to the Timeout of
+	// HTTPClient when that has one, and otherwise to
+	// [DefaultSSEHandshakeTimeout]. A negative value removes the bound.
+	//
+	// It ends when the stream opens and has no say in how long the stream then
+	// lasts or how long it may sit idle. Without it a server that accepts the
+	// connection and never answers would hold [SSEDial] for as long as the
+	// caller's context lasts, which for a context that has no deadline is
+	// forever.
+	HandshakeTimeout time.Duration
 
 	// Method is the request method, defaulting to GET. A stream reached by
 	// POST is not unusual: it is how a protocol that streams its answer to a
@@ -153,8 +172,30 @@ func SSEDial(ctx context.Context, rawURL string, opts SSEDialOptions) (*SSEReade
 	if method == "" {
 		method = http.MethodGet
 	}
+	// The handshake is bounded through the request's own context, which is the
+	// one thing that reaches every phase of it: the connection, the wait for the
+	// header and the reading of a refusal's body. It cannot be a deadline on that
+	// context, because the same context governs the stream after it opens and a
+	// deadline cannot be lifted. So it is a timer that cancels the context, and
+	// that is stopped once the stream is open.
+	timeout := sseHandshakeTimeout(opts)
+	ctx, cancel := context.WithCancelCause(ctx)
+	var (
+		timer   *time.Timer
+		expired error
+	)
+	if timeout > 0 {
+		expired = fmt.Errorf("muzak: the event stream was not opened within %v: %w", timeout, context.DeadlineExceeded)
+		timer = time.AfterFunc(timeout, func() { cancel(expired) })
+	}
+	// settled ends the bound and reports whether it expired first. A timer that
+	// has already fired has cancelled the request, so a response that arrived
+	// in the same instant cannot be trusted to still be readable.
+	settled := func() bool { return timer != nil && !timer.Stop() }
 	request, err := http.NewRequestWithContext(ctx, strings.ToUpper(method), rawURL, opts.Body)
 	if err != nil {
+		settled()
+		cancel(nil)
 		return nil, nil, fmt.Errorf("muzak: building the event stream request: %w", err)
 	}
 	for name, values := range opts.Header {
@@ -172,12 +213,38 @@ func SSEDial(ctx context.Context, rawURL string, opts SSEDialOptions) (*SSEReade
 
 	response, err := sseDialClient(opts.HTTPClient).Do(request)
 	if err != nil {
+		settled()
+		defer cancel(nil)
+		if expired != nil && errors.Is(context.Cause(ctx), expired) {
+			return nil, nil, expired
+		}
 		return nil, nil, fmt.Errorf("muzak: the event stream request failed: %w", err)
 	}
 	if err := sseCheckResponse(response); err != nil {
-		return nil, sseBufferBody(response), err
+		response = sseBufferBody(response)
+		settled()
+		cancel(nil)
+		return nil, response, err
 	}
-	return newSSEReader(response.Body, opts), response, nil
+	if settled() {
+		_ = response.Body.Close()
+		cancel(nil)
+		return nil, nil, expired
+	}
+	reader := newSSEReader(response.Body, opts)
+	reader.release = func() { cancel(nil) }
+	return reader, response, nil
+}
+
+// sseHandshakeTimeout resolves how long opening a stream may take: what the
+// caller said, else the timeout of the client it supplied, since that is the
+// bound it asked for on the request, else the default. Zero means unbounded.
+func sseHandshakeTimeout(opts SSEDialOptions) time.Duration {
+	fallback := DefaultSSEHandshakeTimeout
+	if opts.HTTPClient != nil && opts.HTTPClient.Timeout > 0 {
+		fallback = opts.HTTPClient.Timeout
+	}
+	return orDefaultDuration(opts.HandshakeTimeout, fallback)
 }
 
 // sseCheckResponse reports a response that is not an event stream.
@@ -270,6 +337,10 @@ type SSEReader struct {
 	lastEventID string
 	retry       time.Duration
 
+	// release lets go of what opening the stream set up, which is the request's
+	// context. It is called when the reader is closed.
+	release func()
+
 	closeOnce sync.Once
 	mu        sync.Mutex
 	err       error
@@ -308,7 +379,12 @@ func (r *SSEReader) Retry() time.Duration { return r.retry }
 // that is waiting.
 func (r *SSEReader) Close() error {
 	var err error
-	r.closeOnce.Do(func() { err = r.body.Close() })
+	r.closeOnce.Do(func() {
+		err = r.body.Close()
+		if r.release != nil {
+			r.release()
+		}
+	})
 	return err
 }
 

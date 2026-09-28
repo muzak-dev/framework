@@ -848,8 +848,14 @@ func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *V
 	}()
 	buf.Reset()
 
-	limited := http.MaxBytesReader(c.w, c.r.Body, route.maxBodySize)
-	if _, err := buf.ReadFrom(limited); err != nil {
+	// A limit that is not positive is the documented way to remove it. It is
+	// not passed on: MaxBytesReader clamps a negative limit to zero and
+	// would refuse every body.
+	var source io.Reader = c.r.Body
+	if route.maxBodySize > 0 {
+		source = http.MaxBytesReader(c.w, c.r.Body, route.maxBodySize)
+	}
+	if _, err := buf.ReadFrom(source); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			return NewHTTPErrorf(http.StatusRequestEntityTooLarge,
@@ -979,13 +985,21 @@ func captureRequestBody(c *Context, route *Route) error {
 	// over. MaxBytesReader is not used here because its error is reported
 	// against the response writer, and this read happens before the binder's
 	// own limit would apply.
+	//
+	// A limit that is not positive removes it, and one too large to add a byte
+	// to is as good as none: the sum would overflow into a negative count, which
+	// LimitReader reads as an empty body.
 	limit := route.maxBodySize
-	body, err := io.ReadAll(io.LimitReader(c.r.Body, limit+1))
+	var source io.Reader = c.r.Body
+	if limit > 0 && limit < math.MaxInt64 {
+		source = io.LimitReader(c.r.Body, limit+1)
+	}
+	body, err := io.ReadAll(source)
 	if err != nil {
 		return NewHTTPError(http.StatusBadRequest, "the request body could not be read").Wrap(err)
 	}
 
-	if int64(len(body)) > limit {
+	if limit > 0 && int64(len(body)) > limit {
 		// Refused here rather than truncated. A truncated body fails its
 		// signature check, and a signature failure reads as an attack rather
 		// than as the oversized request this is.

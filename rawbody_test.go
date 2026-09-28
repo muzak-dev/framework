@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -245,5 +246,33 @@ func TestCaptureBodyDoesNotLeakBetweenRequests(t *testing.T) {
 	assertStatus(t, res, http.StatusOK)
 	if out := decodeCapture(t, res); out.OK || out.Raw != "" {
 		t.Fatalf("a pooled Context carried the previous request's body: %+v", out)
+	}
+}
+
+// The documented way to remove the limit is a negative AppOptions.MaxBodySize,
+// and a limit of math.MaxInt64 is the other way an operator says the same. Both
+// used to fail closed: MaxBytesReader clamps a negative limit to zero and
+// refuses every body, and limit+1 overflowed the capture's read.
+func TestAnUnlimitedBodyIsReadWhole(t *testing.T) {
+	t.Parallel()
+	for name, limit := range map[string]int64{"negative": -1, "maximum": math.MaxInt64} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			opts := quietOptions()
+			opts.MaxBodySize = limit
+			app := New(opts)
+			app.Post("/plain", captureHandler)
+			app.Post("/captured", captureHandler, CaptureBody())
+			mustBuild(t, app)
+
+			body := `{"name":"` + strings.Repeat("x", 2<<20) + `"}`
+			for _, path := range []string{"/plain", "/captured"} {
+				res := do(t, app, "POST", path, body)
+				assertStatus(t, res, http.StatusOK)
+				if out := decodeCapture(t, res); len(out.Name) != 2<<20 {
+					t.Errorf("%s: bound %d bytes of the name, want %d", path, len(out.Name), 2<<20)
+				}
+			}
+		})
 	}
 }

@@ -29,9 +29,9 @@ listed for completeness.
 | 4 | Medium | `validate.String().URL()` accepted `javascript:`, `data:` and any other scheme as a "valid absolute URL" | Fixed |
 | 5 | Medium | `validate.Number()` let NaN and +/-Inf silently satisfy every numeric rule (Min, Max, Between, Positive, Required, ...); a large int64/uint64 also lost precision on every validation pass, not just when a rule changed it | Fixed |
 | 6 | Low-Medium | A secret-tagged config field's raw value could leak into a startup error message via a custom `TextUnmarshaler`'s own error text | Fixed |
-| 7 | Medium | Rate limiting keyed on the exact client IP lets any client on a rotatable IPv6 /64 (the block size most providers hand out) present a fresh identity on every request | Mitigation added (`IPPrefixTracker`, opt-in) |
+| 7 | Medium | Rate limiting keyed on the exact client IP lets any client on a rotatable IPv6 /64 (the block size most providers hand out) present a fresh identity on every request | Mitigation added (`IPPrefixTracker`, opt-in); default since the second review (S11) |
 | 8 | Medium | WebSocket/SSE concurrent-connection cap was a single global counter with no per-client dimension, so one address could hold the whole process budget | Fixed (`MaxConnectionsPerIP` / `MaxStreamsPerIP`) |
-| 9 | Medium | In-memory rate-limit storage's eviction is global, so a high-cardinality custom `Tracker` can be flooded to evict other clients' counters early | Documented, not fixed |
+| 9 | Medium | In-memory rate-limit storage's eviction is global, so a high-cardinality custom `Tracker` can be flooded to evict other clients' counters early | Fixed in the second review (S17): the default tracker was affected too |
 
 ---
 
@@ -359,7 +359,7 @@ remove/re-admit bookkeeping directly. The whole suite, including
 
 ---
 
-## 9. MEDIUM - Rate-limiter eviction is global, so a high-cardinality custom Tracker can be flooded (not fixed)
+## 9. MEDIUM - Rate-limiter eviction is global, so a high-cardinality custom Tracker can be flooded (FIXED in the second review)
 
 **Where:** `framework/ratelimit_memory.go`, `makeRoom` (around line 211).
 
@@ -376,6 +376,12 @@ them (a full self-bypass), and once the table saturates, every further attempt
 evicts the globally soonest-to-expire entry - which is disproportionately
 likely to belong to some other legitimate tenant or IP, silently resetting
 their limit early.
+
+**Correction (second review).** The claim below that the default `IPTracker`
+is not affected was wrong. It keyed on the exact address, so a client holding
+one IPv6 /64 could send the same flood from distinct addresses and evict, for
+example, a per-account login counter kept under another quota. Both halves are
+now fixed: see S11 and S17 in the second review below.
 
 **Why not fixed here.** The default `IPTracker` is not affected, so nothing
 unsafe ships by default; only an application-supplied high-cardinality
@@ -450,18 +456,21 @@ the codebase, and because it names the patterns worth replicating elsewhere.
 - **WebSocket/SSE per-message handling resists memory exhaustion**: a frame's
   declared length is never trusted for a single allocation - payloads are read
   and grown in bounded chunks - and a message's true size is checked against
-  the connection's read limit as it arrives, not after the fact.
+  the connection's read limit as it arrives, not after the fact. (The check
+  itself could overflow; see S1 in the second review.)
 - **Panics never reach the client.** Both the HTTP and WebSocket/SSE recovery
   paths log the panic value and stack server-side only and always respond with
   the fixed, opaque error envelope.
 - **Rate limiter internals are race-free**: check-then-increment is fully
   mutex-serialized, and the in-memory table is bounded with eviction rather
-  than growing without limit (see finding 9 for the one caveat, which needs an
+  than growing without limit (see finding 9 for the one caveat, which the
+  second review found did not in fact need an
   application-supplied unsafe tracker to matter).
 - **No JWT implementation** exists (only static shared-secret bearer/header
   guards), so the usual algorithm-confusion or missing-expiry JWT bug classes
   do not apply here.
-- **No mass-assignment risk**: reflection-based request binding only ever
+- **No mass-assignment risk** (wrong for two struct shapes; see S3 in the
+  second review): reflection-based request binding only ever
   touches exported fields, and JSON body decoding is structurally prevented
   from overwriting a field bound from the path, query or a header, even for an
   embedded struct that mixes both kinds of field.
@@ -473,6 +482,64 @@ the codebase, and because it names the patterns worth replicating elsewhere.
   usages for request/response bodies and code samples do not introduce XSS on
   their own, and the one place a spec-derived path is rendered as markup
   (`prettyPath`) escapes it first as well.
+
+---
+
+## Second review - 2026-09-28
+
+A second adversarial pass, scoped to the framework module alone and to what
+an attacker can do to a service built on it. It read every subsystem again
+and required each finding to be reproduced with a test against the framework
+before it counted; each of those tests is now a regression test beside the
+fix. Two entries in section 11 above turned out not to hold, and finding 9's
+reasoning was wrong; all three are annotated where they appear.
+
+The CHANGELOG's Unreleased section describes every fix, and every default it
+tightens, with a migration.
+
+| # | Severity | Finding | Default config? | Status |
+|---|---|---|---|---|
+| S1 | High | WebSocket read-limit check overflowed: a 1-byte frame then a continuation declaring 2^63-1 bytes passed the check, so one unauthenticated connection could buffer until the process ran out of memory (256 MiB sent grew the heap to 747 MiB with a 1 MiB limit) | Yes | Fixed |
+| S2 | High | A static route was matched on the escaped segment, so `/users/%61dmin` skipped a guarded `/users/admin` and reached a public `/users/{id}` with `id=admin` | Yes | Fixed |
+| S3 | High | Location tags inside an embedded `*T` or a named nested struct were ignored, so the body could set a field meant to come from a gateway header (mass assignment) | Yes | Fixed (build error) |
+| S4 | High | `Slice().Unique()` was quadratic: a 228 KB body cost 24 s of CPU, and a later `MaxItems` did not bound it | Yes | Fixed |
+| S5 | Medium | Frontend and Static mounts ran guards but not `Needs` providers or rate limits, so a router authenticated by a provider served its files publicly | Yes | Fixed |
+| S6 | Medium | An inner `Needs[T]` removed an outer `Needs[T]` of the same type, so an admin check declared at `Include` never ran | Yes | Fixed |
+| S7 | Medium | A custom `StatusCoder` rendered the whole wrapped error chain to the client, 5xx included | Yes | Fixed |
+| S8 | Medium | A singleton cached a panic or a cancellation error forever, so one aborted first request could fail every later one | Yes | Fixed |
+| S9 | Medium | The binder accepted `NaN`/`Inf` for float query, path, header, cookie and form fields (finding 5 fixed only `validate.Number`) | Yes | Fixed |
+| S10 | Medium | `IP()`/`IPv6()` accepted any text as a zone, CRLF and markup included | Yes | Fixed |
+| S11 | Medium | The per-client WebSocket/SSE caps and the default tracker counted an IPv6 client per address, so one /64 had unlimited allowance | Yes | Fixed (/64) |
+| S12 | Low | `/openapi.json` and the docs UI were served before any application-wide guard | Yes | Fixed |
+| S13 | Low | A JSON route accepted a body with no Content-Type, enabling cross-site POSTs without a preflight | Yes | Fixed (415) |
+| S14 | Low | The console log format wrote request-controlled CR, LF and terminal escapes raw | TTY stderr | Fixed |
+| S15 | Low | A failure after the response started ended it cleanly, so a truncated body looked complete | Yes | Fixed (abort) |
+| S16 | Low | A panic below `Compress` became an empty 200 | With `Compress` | Fixed |
+| S17 | Low | In-memory rate-limit eviction was global, so an IPv6 flood under the default tracker reset another quota's counters (finding 9) | Yes | Fixed |
+| S18 | Low | CORS omitted `Vary: Origin` for missing or denied origins | With CORS | Fixed |
+| S19 | Low | Frontend and Static served dotfiles (`/.env`, `/.git/config`) | Yes | Fixed (opt-in) |
+| S20 | Low | `WSDial` connections ignored `ReadTimeout` and `WriteTimeout` | Client side | Fixed |
+| S21 | Low | `Email()` accepted bidi, zero-width and control characters | Yes | Fixed |
+| S22 | Low | On a case-insensitive filesystem, `/ADMIN/x` was served by a public parent mount instead of a guarded `/admin` mount | macOS, Windows | Fixed |
+| S23 | Low | A locale chosen by header or cookie added only `Vary: Accept-Language` | With those sources | Fixed |
+| S24 | Low | An env file parse error echoed the offending line, which could hold a secret | Yes | Fixed |
+| S25 | Low | A path that is not valid UTF-8 turned its 404 into a 500 | Yes | Fixed |
+| S26 | Info | `json:"-"` on a located field silently disabled its location binding | Yes | Fixed |
+
+**Checked and found solid in this pass:** traversal and symlink escape in file
+serving, open redirects, auto-HEAD and auto-OPTIONS guard handling, hidden
+routes staying out of the spec, context pooling across requests, WebSocket
+origin policy, handshake validation, frame masking, control-frame and UTF-8
+rules, SSE field injection, the trusted-proxy walk and `X-Forwarded-For`
+spoofing, request-ID injection, CORS origin matching, bearer parsing and
+constant-time comparison, duplicate and case-folded JSON keys, integer
+overflow in binding, and multipart limits.
+
+**Residual.** `Unique` over element types that are not hashable (`[]*T`,
+`[]any`, nested slices) is still quadratic and should carry a `MaxItems`
+bound, as its documentation now says. The case check between mounts does not
+cover Unicode normalization on volumes that fold composed and decomposed
+accents.
 
 ---
 

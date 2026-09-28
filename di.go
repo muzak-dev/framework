@@ -84,10 +84,21 @@ func WithDependencies(guards ...Guard) SharedOption {
 //
 // Resolved values are stored on the request's [Context] and discarded when it
 // returns to the pool, so two concurrent requests never observe each other's
-// values. Declaring the same type more than once along the chain is allowed;
-// the most recent declaration wins, which lets a route override a dependency
-// its router declared. Use [Singleton] for a value that should be computed
-// once for the whole application instead.
+// values. Use [Singleton] for a value that should be computed once for the
+// whole application instead.
+//
+// Declaring the same type more than once along the chain is allowed, and the
+// most recent declaration overrides the value, not the check. Every provider
+// on the chain runs, outermost first, and the first error aborts the request;
+// [From] then returns the value of the innermost declaration. This matters
+// because a provider is often also an authorization step: a router included
+// with Needs(RequireAdmin) keeps rejecting non-admins even when the router
+// itself, or a route inside it, declares Needs(CurrentUser) of the same type,
+// rather than the nearer declaration silently removing the outer one and the
+// check with it. A provider that calls From for its own type
+// sees the value produced by the nearest enclosing declaration of that type,
+// since its own value does not exist yet, which lets an inner provider refine
+// an outer one rather than repeat its work.
 func Needs[T any](provide func(ctx *Context) (T, error)) SharedOption {
 	p := &provider{
 		typ: reflect.TypeFor[T](),
@@ -215,10 +226,14 @@ func From[T any](ctx *Context) T {
 // TryFrom returns the value dependency of type T resolved for the current
 // request and reports whether the route declared one. It is the non-panicking
 // form of [From], useful for an optional dependency that only some routes in a
-// shared helper declare.
+// shared helper declare. When the type is declared more than once along the
+// chain it returns the innermost value, as [From] does.
 func TryFrom[T any](ctx *Context) (T, bool) {
 	target := reflect.TypeFor[T]()
-	for i := range ctx.deps {
+	// Searching from the end is what makes the innermost declaration win:
+	// values are appended in declaration order, outermost first, and every
+	// declaration of a type is resolved rather than only the last one.
+	for i := len(ctx.deps) - 1; i >= 0; i-- {
 		if ctx.deps[i].typ == target {
 			// The assertion cannot fail: the value was stored by Needs or
 			// Singleton instantiated at this very type.
@@ -227,27 +242,6 @@ func TryFrom[T any](ctx *Context) (T, bool) {
 	}
 	var zero T
 	return zero, false
-}
-
-// dedupeProviders returns providers with earlier declarations of a type
-// removed, so that the most specific declaration for each type wins while the
-// relative order of the survivors is preserved. Ordering matters because a
-// provider may itself call [From] for a type declared before it.
-func dedupeProviders(providers []*provider) []*provider {
-	if len(providers) < 2 {
-		return providers
-	}
-	last := make(map[reflect.Type]int, len(providers))
-	for i, p := range providers {
-		last[p.typ] = i
-	}
-	out := make([]*provider, 0, len(providers))
-	for i, p := range providers {
-		if last[p.typ] == i {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // resolveDependencies runs the route's guards and then its value providers,
@@ -259,7 +253,16 @@ func (rt *Route) resolveDependencies(c *Context) error {
 			return err
 		}
 	}
-	for _, p := range rt.providers {
+	return resolveProviders(c, rt.providers)
+}
+
+// resolveProviders runs every provider in order and appends each value to the
+// request Context, stopping at the first error. It is shared by routes and by
+// anything else that inherits a router's providers, such as a file mount, so
+// that all of them apply the same rule: no inherited provider is skipped, and
+// [From] sees the innermost value of each type.
+func resolveProviders(c *Context, providers []*provider) error {
+	for _, p := range providers {
 		v, err := p.get(c)
 		if err != nil {
 			return err

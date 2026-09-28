@@ -815,7 +815,7 @@ func (rt *Route) resolve(in inherited) error {
 	rt.Path = in.prefix + rt.rawPath
 	rt.Tags = dedupeStrings(concat(in.tags, cfg.tags))
 	rt.guards = concat(in.guards, cfg.guards)
-	rt.providers = dedupeProviders(concat(in.providers, cfg.providers))
+	rt.providers = concat(in.providers, cfg.providers)
 	rt.responses = concat(in.responses, cfg.responses)
 	rt.Summary = cfg.summary
 	rt.Description = cfg.description

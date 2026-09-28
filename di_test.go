@@ -144,43 +144,13 @@ func TestRouteProviderOverridesRouterProvider(t *testing.T) {
 	assertJSON(t, do(t, app, "GET", "/overridden"), `{"text":"route"}`)
 	assertJSON(t, do(t, app, "GET", "/inherited"), `{"text":"router"}`)
 
-	if routerCalls.Load() != 1 {
-		t.Errorf("the overridden router provider ran %d times, want 1", routerCalls.Load())
+	// The router's provider runs on both routes: a nearer declaration of the
+	// same type overrides the value the handler sees, never the check.
+	if routerCalls.Load() != 2 {
+		t.Errorf("the router provider ran %d times, want 2", routerCalls.Load())
 	}
 	if routeCalls.Load() != 1 {
 		t.Errorf("the route provider ran %d times, want 1", routeCalls.Load())
-	}
-}
-
-func TestDedupeProviders(t *testing.T) {
-	t.Parallel()
-	a := &provider{typ: emptyType}
-	b := &provider{typ: emptyType}
-	c := &provider{typ: uuidType}
-
-	tests := []struct {
-		name string
-		in   []*provider
-		want []*provider
-	}{
-		{"nil", nil, nil},
-		{"single", []*provider{a}, []*provider{a}},
-		{"last of a type wins", []*provider{a, b}, []*provider{b}},
-		{"order is preserved", []*provider{a, c, b}, []*provider{c, b}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := dedupeProviders(tc.in)
-			if len(got) != len(tc.want) {
-				t.Fatalf("dedupeProviders = %d entries, want %d", len(got), len(tc.want))
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Fatalf("entry %d = %p, want %p", i, got[i], tc.want[i])
-				}
-			}
-		})
 	}
 }
 

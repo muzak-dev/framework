@@ -237,8 +237,15 @@ type WSConn struct {
 	br  *bufio.Reader
 	// nc is the underlying network connection when there is one, which is what
 	// makes deadlines available. It is nil for a connection that reached the
-	// peer through an [net/http.Client].
+	// peer through an [net/http.Client], whose switched transport is the body
+	// of a response and has no deadlines to set.
 	nc net.Conn
+
+	// readExpiry and writeExpiry stand in for the deadlines nc would provide
+	// when there is no nc. Each is owned by the half of the connection that
+	// holds the matching semaphore, and neither is used when nc is set.
+	readExpiry  wsExpiry
+	writeExpiry wsExpiry
 
 	client       bool
 	subprotocol  string
@@ -658,14 +665,41 @@ func (c *WSConn) readPayload(ctx context.Context, header wsframe.Header, message
 // A caller's own deadline is left alone when it is already the tighter of the
 // two, because the caller asked for it.
 func (c *WSConn) startMessageClock(ctx context.Context) {
-	if c.nc == nil || c.readTimeout <= 0 {
+	if c.readTimeout <= 0 {
 		return
 	}
 	deadline := time.Now().Add(c.readTimeout)
 	if fromCtx, ok := ctx.Deadline(); ok && !fromCtx.After(deadline) {
 		return
 	}
+	if c.nc == nil {
+		// The expiry is disarmed by the function armRead returned, however
+		// the read ends, so it cannot outlive the message it was set for.
+		c.readExpiry.arm(deadline, c.readExpired)
+		return
+	}
 	_ = c.nc.SetReadDeadline(deadline)
+}
+
+// wsReadTimeoutReason is the close reason for a message that began and then
+// stopped arriving, whichever way the connection enforces the read timeout.
+const wsReadTimeoutReason = "the message did not arrive within the time allowed"
+
+// readExpired ends a connection whose message clock ran out on a transport
+// with no deadlines of its own.
+//
+// It runs on a timer while the reader is still blocked, so it does what
+// [WSConn.readFailed] would have done for a deadline in the reader's place:
+// the peer is told why with a close frame, and only then is the transport
+// closed, which is the one way to wake a read that has no deadline. The
+// outcome is recorded first, because the reader wakes to a closed transport
+// and would otherwise report the closure as a lost connection rather than as
+// the timeout it was.
+func (c *WSConn) readExpired() {
+	closure := &WSCloseError{Status: WSStatusPolicyViolation, Reason: wsReadTimeoutReason}
+	_ = c.record(closure)
+	_ = c.sendClose(closure.Status, closure.Reason)
+	_ = c.fail(closure)
 }
 
 // maskingRule states which end is at fault for an incorrectly masked frame.
@@ -730,7 +764,7 @@ func (c *WSConn) readFailed(ctx context.Context, err error) error {
 		// The caller's deadline was ruled out above, so the only one left is
 		// the time a message is given once it has begun. A peer that has not
 		// finished sending one by now is not going to.
-		return c.abort(WSStatusPolicyViolation, "the message did not arrive within the time allowed")
+		return c.abort(WSStatusPolicyViolation, wsReadTimeoutReason)
 	}
 	// The connection ended without a close frame, which is what a dropped
 	// network or a peer that simply stopped looks like.
@@ -901,12 +935,19 @@ func wsWrite[T wsPayload](c *WSConn, ctx context.Context, deadline time.Time, op
 // there is nothing to do but end the connection.
 func (c *WSConn) flush(ctx context.Context, b []byte) error {
 	if _, err := c.rwc.Write(b); err != nil {
-		if ctxErr := wsContextFailure(ctx, err); ctxErr != nil {
-			return c.fail(fmt.Errorf("muzak: writing a websocket message: %w", ctxErr))
-		}
-		return c.fail(&WSCloseError{Status: WSStatusAbnormalClosure, Reason: "the connection was lost", cause: err})
+		return c.fail(wsWriteFailure(ctx, err))
 	}
 	return nil
+}
+
+// wsWriteFailure turns a failed write into the error the connection will
+// report from then on: the caller's context when that is what ended it, and a
+// lost connection carrying the transport's own failure otherwise.
+func wsWriteFailure(ctx context.Context, err error) error {
+	if ctxErr := wsContextFailure(ctx, err); ctxErr != nil {
+		return fmt.Errorf("muzak: writing a websocket message: %w", ctxErr)
+	}
+	return &WSCloseError{Status: WSStatusAbnormalClosure, Reason: "the connection was lost", cause: err}
 }
 
 // deadline returns when a write must have finished by, which is the sooner of
@@ -941,36 +982,121 @@ func (c *WSConn) closeTimeout() time.Duration {
 // cancellation to interrupt one already in progress, returning the function
 // that undoes both.
 func (c *WSConn) armRead(ctx context.Context) func() bool {
-	if c.nc != nil {
-		var deadline time.Time
-		if fromCtx, ok := ctx.Deadline(); ok {
-			deadline = fromCtx
-		}
-		_ = c.nc.SetReadDeadline(deadline)
+	if c.nc == nil {
+		// Nothing is armed here: the only clock a read has of its own is the
+		// message clock, which starts later, once a message begins. What is
+		// returned disarms it however the read ends, because an expiry left
+		// running would fire between messages and close a connection that is
+		// merely idle.
+		return c.interruptible(ctx, &c.readExpiry)
 	}
+	var deadline time.Time
+	if fromCtx, ok := ctx.Deadline(); ok {
+		deadline = fromCtx
+	}
+	_ = c.nc.SetReadDeadline(deadline)
 	if c.arranged(ctx) {
 		return wsNothingToStop
-	}
-	if c.nc == nil {
-		// Without a network connection there are no deadlines to set, so the
-		// only way to interrupt a blocked read is to close the transport.
-		return context.AfterFunc(ctx, func() { _ = c.rwc.Close() })
 	}
 	return context.AfterFunc(ctx, func() { _ = c.nc.SetReadDeadline(time.Now()) })
 }
 
 // armWrite is the writing counterpart of armRead.
 func (c *WSConn) armWrite(ctx context.Context, deadline time.Time) func() bool {
-	if c.nc != nil {
-		_ = c.nc.SetWriteDeadline(deadline)
+	if c.nc == nil {
+		if !deadline.IsZero() {
+			// A write that outlives its deadline ends the connection, as it
+			// would on a network connection, and reports the same thing: the
+			// caller's context when it was the caller's deadline that passed,
+			// and a lost connection whose cause is a timeout otherwise.
+			c.writeExpiry.arm(deadline, func() {
+				_ = c.fail(wsWriteFailure(ctx, os.ErrDeadlineExceeded))
+			})
+		}
+		return c.interruptible(ctx, &c.writeExpiry)
 	}
+	_ = c.nc.SetWriteDeadline(deadline)
 	if c.arranged(ctx) {
 		return wsNothingToStop
 	}
-	if c.nc == nil {
-		return context.AfterFunc(ctx, func() { _ = c.rwc.Close() })
-	}
 	return context.AfterFunc(ctx, func() { _ = c.nc.SetWriteDeadline(time.Now()) })
+}
+
+// interruptible arranges for a transport with no deadlines to be interrupted
+// when ctx is cancelled, returning the function that undoes that and disarms
+// expiry.
+//
+// Without a network connection there are no deadlines to set, so the only way
+// to interrupt a blocked read or write is to close the transport, and the
+// connection ends with it.
+func (c *WSConn) interruptible(ctx context.Context, expiry *wsExpiry) func() bool {
+	if c.arranged(ctx) {
+		return expiry.disarm
+	}
+	stop := context.AfterFunc(ctx, func() { _ = c.rwc.Close() })
+	return func() bool {
+		expiry.disarm()
+		return stop()
+	}
+}
+
+// wsExpiry enforces a deadline on a transport that has none of its own, such
+// as the body of the response a [net/http.Client] hands back for a switched
+// connection.
+//
+// A deadline on a network connection interrupts the operation and leaves the
+// connection to decide what happens next. Nothing can interrupt a read or a
+// write on a transport without one except closing it, so an expiry runs a
+// function that ends the connection when its deadline passes, which is what
+// the connection would have done on seeing the deadline anyway. The zero value
+// is disarmed and ready to use.
+type wsExpiry struct {
+	mu sync.Mutex
+	// timer is the one armed timer, or nil. A timer that fires after it was
+	// replaced or disarmed finds it is no longer this one and does nothing,
+	// which is what keeps a deadline from ending an operation that finished
+	// in time but raced its own timer.
+	timer *time.Timer
+}
+
+// arm runs expire once deadline passes, unless the expiry is disarmed or armed
+// again first. A deadline already in the past fires at once.
+func (e *wsExpiry) arm(deadline time.Time, expire func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.stopLocked()
+	var timer *time.Timer
+	timer = time.AfterFunc(time.Until(deadline), func() {
+		e.mu.Lock()
+		current := e.timer == timer
+		if current {
+			e.timer = nil
+		}
+		e.mu.Unlock()
+		if current {
+			expire()
+		}
+	})
+	e.timer = timer
+}
+
+// disarm cancels the armed deadline, if there is one, and reports whether
+// there was. It has the signature of the function [context.AfterFunc] returns
+// so that it can stand in for one.
+func (e *wsExpiry) disarm() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.stopLocked()
+}
+
+// stopLocked is disarm for a caller that already holds the mutex.
+func (e *wsExpiry) stopLocked() bool {
+	armed := e.timer != nil
+	if armed {
+		e.timer.Stop()
+		e.timer = nil
+	}
+	return armed
 }
 
 // arranged reports whether a context needs no arrangement of its own.

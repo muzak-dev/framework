@@ -24,6 +24,11 @@ func TestInsertRejectsBadPatterns(t *testing.T) {
 		{"nested braces", "/users/{a{b}}", ErrInvalidPattern},
 		{"brace inside param name", "/users/{a{b}", ErrInvalidPattern},
 		{"wildcard not last", "/files/{rest...}/tail", ErrInvalidPattern},
+		{"encoded separator", "/a%2Fb", ErrInvalidPattern},
+		{"encoded separator lower case", "/a%2fb", ErrInvalidPattern},
+		{"bare percent", "/100%", ErrInvalidPattern},
+		{"truncated escape", "/a%4", ErrInvalidPattern},
+		{"non-hex escape", "/%zz", ErrInvalidPattern},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,6 +58,7 @@ func TestInsertRejectsConflicts(t *testing.T) {
 		{"duplicate wildcard", "/files/{rest...}", "/files/{rest...}", ErrDuplicateRoute},
 		{"param name conflict", "/users/{id}", "/users/{name}", ErrParamConflict},
 		{"wildcard name conflict", "/files/{a...}", "/files/{b...}", ErrParamConflict},
+		{"same static once decoded", "/users/admin", "/users/%61dmin", ErrDuplicateRoute},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,6 +189,68 @@ func TestLookupBacktracksIntoWildcard(t *testing.T) {
 	}
 }
 
+// TestLookupDecodesStaticSegments pins that a static segment is compared in
+// its decoded form. Comparing the escaped text instead is what let an encoded
+// byte steer a request away from a guarded static route and into a sibling
+// parameter that captured the same value.
+func TestLookupDecodesStaticSegments(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("a", 2*maxStackSegment)
+	tree := New[string]()
+	for _, pattern := range []string{
+		"/users/admin", "/users/{id}", "/files/{path...}", "/files/readme",
+		"/caf\u00e9", "/100%25", "/a b", "/" + long,
+	} {
+		if err := tree.Insert(pattern, pattern); err != nil {
+			t.Fatalf("Insert(%q) = %v", pattern, err)
+		}
+	}
+	tests := []struct {
+		name    string
+		path    string
+		want    string
+		capture string
+	}{
+		{name: "plain", path: "/users/admin", want: "/users/admin"},
+		{name: "one byte encoded", path: "/users/%61dmin", want: "/users/admin"},
+		{name: "last byte encoded", path: "/users/admi%6E", want: "/users/admin"},
+		{name: "every byte encoded", path: "/users/%61%64%6d%69%6e", want: "/users/admin"},
+		{name: "before a wildcard", path: "/files/%72eadme", want: "/files/readme"},
+		{name: "encoded utf-8", path: "/caf%C3%A9", want: "/caf\u00e9"},
+		{name: "encoded percent", path: "/100%25", want: "/100%25"},
+		{name: "encoded space", path: "/a%20b", want: "/a b"},
+		{name: "longer than the stack buffer", path: "/%61" + long[1:], want: "/" + long},
+		{name: "encoded separator stays a parameter", path: "/users/admin%2F", want: "/users/{id}", capture: "admin%2F"},
+		{name: "encoded separator alone", path: "/users/%2f", want: "/users/{id}", capture: "%2f"},
+		{name: "malformed escape stays a parameter", path: "/users/%zzadmin", want: "/users/{id}", capture: "%zzadmin"},
+		{name: "truncated escape stays a parameter", path: "/users/admin%6", want: "/users/{id}", capture: "admin%6"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var params Params
+			got, ok := tree.Lookup(tc.path, &params)
+			if !ok || got != tc.want {
+				t.Fatalf("Lookup(%q) = %q, %v; want %q", tc.path, got, ok, tc.want)
+			}
+			if tc.capture == "" {
+				if params.Len() != 0 {
+					t.Fatalf("a static match captured %d parameters", params.Len())
+				}
+				return
+			}
+			if value, _ := params.Get("id"); value != tc.capture {
+				t.Errorf("captured %q, want the escaped text %q", value, tc.capture)
+			}
+		})
+	}
+
+	var params Params
+	if got, ok := tree.Lookup("/100%", &params); ok {
+		t.Errorf("a malformed escape matched the static segment %q", got)
+	}
+}
+
 func TestParams(t *testing.T) {
 	t.Parallel()
 	var params Params
@@ -262,6 +330,15 @@ func TestLookupIsAllocationFree(t *testing.T) {
 	if allocs != 0 {
 		t.Errorf("Lookup allocated %.1f times per call, want 0", allocs)
 	}
+
+	// An encoded segment is decoded on the stack, so it costs nothing either.
+	allocs = testing.AllocsPerRun(200, func() {
+		params.Reset()
+		tree.Lookup("/users/%6De/posts", &params)
+	})
+	if allocs != 0 {
+		t.Errorf("Lookup of an encoded segment allocated %.1f times per call, want 0", allocs)
+	}
 }
 
 func FuzzLookup(f *testing.F) {
@@ -277,6 +354,7 @@ func FuzzLookup(f *testing.F) {
 	for _, seed := range []string{
 		"/", "", "/users", "/users/", "//", "/users//posts", "/users/%2F/posts",
 		"/files/a/b", strings.Repeat("/a", 200), "/users/\x00", "/users/{id}",
+		"/users/%6De", "/users/%6", "/users/%", "/users/%2F%6D",
 	} {
 		f.Add(seed)
 	}
@@ -308,6 +386,7 @@ func FuzzInsert(f *testing.F) {
 	for _, seed := range []string{
 		"/users/{id}", "/{a}/{b}", "/files/{rest...}", "/", "users", "/{",
 		"/}", "/{}", "/{...}", "/a/{b...}/c", strings.Repeat("/{a}", 40),
+		"/%61", "/100%25", "/a%2Fb", "/%",
 	} {
 		f.Add(seed)
 	}

@@ -9,9 +9,19 @@
 //
 // A pattern is a '/'-separated sequence of three kinds of segment:
 //
-//	/users/list        static     matches itself, byte for byte
+//	/users/list        static     matches itself, once percent-decoded
 //	/users/{id}        param      matches exactly one non-empty segment
 //	/files/{rest...}   wildcard   matches every remaining segment, greedily
+//
+// Lookup is given the escaped request path, so that an encoded "%2F" stays
+// inside the segment it belongs to. A static segment is nevertheless compared
+// in its decoded form, on both sides: "/users/%61dmin" matches the pattern
+// "/users/admin", exactly as it would under net/http.ServeMux, rather than
+// falling through to a sibling parameter that would capture "admin". A
+// segment that decodes to text containing '/', or that is not validly
+// encoded, never matches a static segment, and a pattern whose static segment
+// is either of those is refused. Parameters and wildcards capture the escaped
+// text as it is, and decoding it is left to the caller.
 //
 // A wildcard is only legal as the final segment of a pattern. Patterns are
 // matched exactly: "/items" and "/items/" are distinct routes, because the
@@ -38,7 +48,8 @@
 // own both a static and a dynamic child, so the worst case is O(S^2 * L) for a
 // pathological route set (every level ambiguous) and O(S*L) for realistic ones.
 // Matching never allocates: captured parameters are appended to a caller-owned
-// [Params] whose backing arrays are reused across requests.
+// [Params] whose backing arrays are reused across requests, and a segment is
+// decoded into a buffer on the stack, and only when it carries a '%'.
 //
 // # Usage
 //

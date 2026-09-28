@@ -907,7 +907,10 @@ func (a *App) release(c *Context) {
 
 // unescapeParams percent-decodes the captured path parameters in place. The
 // tree matches against the escaped path so that an encoded separator cannot
-// split a segment; decoding afterwards gives handlers the literal value.
+// split a segment; decoding afterwards gives handlers the literal value. The
+// tree compares static segments decoded as well, so a value captured here can
+// never be the spelling of a static sibling, which is what keeps a parameter
+// from answering a request a guarded static route was registered for.
 func unescapeParams(params *radix.Params) error {
 	for i := range params.Len() {
 		name, value := params.At(i)

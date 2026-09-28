@@ -84,6 +84,12 @@
 // that should outlive a request are published with [WithSingleton], and those
 // that need opening and closing implement [Lifecycle].
 //
+// A route that runs any guard or provider, its own or one it inherited, is
+// presumed to answer per user, so its response is sent with
+// "Cache-Control: private, no-cache" unless a middleware or the handler set a
+// Cache-Control of its own. A handler serving something every user may share
+// says so with [Context.SetHeader].
+//
 // # Uploads and forms
 //
 // A field tagged `file:"name"` is bound from a multipart upload, and its Go

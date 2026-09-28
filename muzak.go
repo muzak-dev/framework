@@ -804,9 +804,37 @@ func (a *App) run(c *Context, route *Route) {
 			return
 		}
 	}
+	if route.isGuarded() && !c.endsItsOwnResponse() {
+		// Set before the handler runs rather than when the response is
+		// written, so it covers a handler that writes its own body too, and
+		// only if absent, so a middleware's policy stands. A handler that
+		// sets its own Cache-Control replaces it; one serving something
+		// genuinely public says so there.
+		setIfAbsent(c.w.Header(), "Cache-Control", privateCacheControl)
+	}
 	if err := route.invoke(c); err != nil {
 		a.fail(c, err)
 	}
+}
+
+// privateCacheControl is what a guarded response is marked with unless its
+// handler says otherwise; see [Route.isGuarded].
+const privateCacheControl = "private, no-cache"
+
+// isGuarded reports whether the route runs any guard or provider, declared on
+// it or inherited from a router or the application.
+//
+// Such a response is presumed to depend on who asked: a guard decides whether
+// this client may see it and a provider typically resolves the client's own
+// session or account. Sent with no Cache-Control, a shared cache may store it
+// heuristically and hand one user's response to the next, so it is marked
+// "private, no-cache", which keeps it out of shared caches and has the
+// client's own cache revalidate it. It is the same value the guarded OpenAPI
+// document is served with. An event stream already sends its own
+// "no-cache, no-transform", which this would otherwise displace, and a
+// WebSocket upgrade is never cached, so both are left to their own headers.
+func (rt *Route) isGuarded() bool {
+	return len(rt.guards) > 0 || len(rt.providers) > 0
 }
 
 // recoverRoute turns a panic inside a handler or a dependency into the normal

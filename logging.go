@@ -74,7 +74,10 @@ const (
 	// Colour still follows [LoggerOptions.Color], which defaults to a terminal
 	// check, so a container wanting coloured output has to ask for both.
 	LogFormatConsole
-	// LogFormatJSON always writes one JSON object per record.
+	// LogFormatJSON always writes one JSON object per record. Like the console
+	// format it never writes a control character, C1 and DEL included, or a
+	// bidirectional control as itself: they are written as \u escapes, which a
+	// JSON reader decodes to the same text.
 	LogFormatJSON
 	// LogFormatNone discards every record. It is the fastest option and is
 	// what tests use to keep output clean.
@@ -200,7 +203,7 @@ func NewLogger(opts LoggerOptions) *slog.Logger {
 	case LogFormatNone:
 		return slog.New(discardHandler{})
 	case LogFormatJSON:
-		return slog.New(slog.NewJSONHandler(opts.Output, &slog.HandlerOptions{
+		return slog.New(slog.NewJSONHandler(jsonSafeWriter{opts.Output}, &slog.HandlerOptions{
 			Level:       opts.Level,
 			AddSource:   opts.AddSource,
 			ReplaceAttr: redact.replaceAttr,
@@ -208,6 +211,76 @@ func NewLogger(opts LoggerOptions) *slog.Logger {
 	default:
 		return slog.New(newConsoleHandler(opts, redact))
 	}
+}
+
+// jsonSafeWriter writes what the JSON handler renders with every rune the
+// console format escapes and JSON does not written as a \u escape instead.
+//
+// The handler escapes what JSON requires, the C0 controls and the two line
+// separators, and writes everything else as it is: a C1 control such as U+009B
+// (CSI, which some terminals act on when it arrives as decoded UTF-8), DEL, and
+// the bidirectional controls that reorder how a line is displayed. Attribute
+// values routinely carry what a client sent, the decoded request path among
+// them, so a log read with tail or kubectl logs could otherwise be steered by
+// a request.
+//
+// It works on the finished line rather than as a ReplaceAttr hook because a
+// hook sees only the strings an attribute holds directly, and not a message
+// built from one, a key, or a map or struct logged with slog.Any. On the
+// finished line every such rune is inside a string, since JSON's own syntax is
+// ASCII, and \u00XX means the same thing there as the rune does, so nothing
+// a reader decodes changes. The handler makes one Write per record, so a
+// record is still one write.
+type jsonSafeWriter struct{ w io.Writer }
+
+// Write escapes p and passes it on. It returns len(p) on success, as an
+// io.Writer must, whatever the escaping did to the length.
+func (j jsonSafeWriter) Write(p []byte) (int, error) {
+	escaped := appendJSONEscaped(nil, p)
+	if escaped == nil {
+		return j.w.Write(p)
+	}
+	n, err := j.w.Write(escaped)
+	if err != nil {
+		return min(n, len(p)), err
+	}
+	return len(p), nil
+}
+
+// appendJSONEscaped returns p with each rune [unsafeInConsole] rejects written
+// as a \u escape, or nil when there is none and p can be used as it is.
+//
+// Only the bytes that can begin such a rune are decoded: DEL, and the lead
+// bytes of U+0080 to U+009F, U+061C and the U+2000 block, which is where the
+// bidirectional controls live. Everything else, which is nearly all of any
+// line, is skipped a byte at a time.
+func appendJSONEscaped(dst, p []byte) []byte {
+	const hex = "0123456789abcdef"
+	copied := 0
+	for i := 0; i < len(p); {
+		switch p[i] {
+		case 0x7f, 0xc2, 0xd8, 0xe2:
+		default:
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRune(p[i:])
+		if r == utf8.RuneError || !unsafeInConsole(r) {
+			i += size
+			continue
+		}
+		if dst == nil {
+			dst = make([]byte, 0, len(p)+32)
+		}
+		dst = append(dst, p[copied:i]...)
+		dst = append(dst, '\\', 'u', hex[r>>12&0xf], hex[r>>8&0xf], hex[r>>4&0xf], hex[r&0xf])
+		i += size
+		copied = i
+	}
+	if dst == nil {
+		return nil
+	}
+	return append(dst, p[copied:]...)
 }
 
 // isTerminal reports whether w is a character device, which is the closest the

@@ -39,6 +39,13 @@ type configLoader struct {
 	sources []ConfigSource
 	skipEnv bool
 	prefix  string
+
+	// secretNames records every variable name a secret field reads, and
+	// valueErrors every parse failure that would otherwise show its value.
+	// Both are settled only after every field has been visited, because two
+	// fields may read the same variable and the secret one may come second.
+	secretNames map[string]bool
+	valueErrors []*configValueError
 }
 
 // envSource reads from the process environment.
@@ -73,7 +80,10 @@ func (m mapSource) Lookup(key string) (string, bool) {
 // a container runtime overrides the one checked into a development .env. A
 // missing file is not an error, which lets the same code run in development,
 // where the file exists, and in production, where the environment supplies
-// everything. A file that exists but cannot be parsed is an error.
+// everything. A file that exists but cannot be parsed is an error, reported
+// with the file name, the line number and, where there is one, the key, but
+// never the text of the line: a malformed line is often part of a secret, such
+// as the second line of an unquoted PEM key.
 func EnvFile(path string) ConfigOption {
 	return func(l *configLoader) {
 		values, err := readEnvFile(path)
@@ -146,7 +156,8 @@ func (f failingSource) Lookup(string) (string, bool) { return "", false }
 // Every problem found is reported together, so a first run in a new
 // environment lists all the missing variables at once instead of one per
 // attempt. Mark a field secret:"true" to keep its value out of the error
-// messages produced when it fails to parse.
+// messages produced when it fails to parse; the value is hidden from every
+// field that reads the same variable, not only the one marked.
 func LoadConfig[T any](opts ...ConfigOption) (T, error) {
 	var out T
 	loader := &configLoader{}
@@ -172,6 +183,11 @@ func LoadConfig[T any](opts ...ConfigOption) (T, error) {
 	}
 	value := reflect.ValueOf(&out).Elem()
 	loader.fill(t, value, nil, &problems)
+	for _, bad := range loader.valueErrors {
+		if loader.secretNames[bad.name] {
+			bad.shared = true
+		}
+	}
 	if len(problems) > 0 {
 		return out, errors.Join(problems...)
 	}
@@ -220,6 +236,13 @@ func (l *configLoader) fill(t reflect.Type, value reflect.Value, prefix []int, p
 // assign resolves one field's value and writes it, recording a problem instead
 // of stopping when the value is missing or unusable.
 func (l *configLoader) assign(field reflect.StructField, name string, target reflect.Value, problems *[]error) {
+	secret := field.Tag.Get(tagSecret) == "true"
+	if secret {
+		if l.secretNames == nil {
+			l.secretNames = map[string]bool{}
+		}
+		l.secretNames[name] = true
+	}
 	raw, found := l.lookup(name)
 	if !found {
 		if def, hasDefault := field.Tag.Lookup(tagDefault); hasDefault {
@@ -237,18 +260,53 @@ func (l *configLoader) assign(field reflect.StructField, name string, target ref
 		return
 	}
 	if err := set(target, splitConfigValue(field.Type, raw)); err != nil {
-		if field.Tag.Get(tagSecret) == "true" {
-			// A type implementing encoding.TextUnmarshaler writes its own
-			// error, which this package does not control and which may well
-			// echo the text it was given back into the message (a custom
-			// credential type reporting "invalid key %q" is a natural thing to
-			// write). Secret means secret from the setter's own errors too, not
-			// only from the value this loader would otherwise append itself.
-			*problems = append(*problems, fmt.Errorf("muzak: %s could not be parsed (value hidden because the field is marked secret)", name))
-			return
-		}
-		*problems = append(*problems, fmt.Errorf("muzak: %s %w%s", name, err, describeBadValue(raw)))
+		bad := &configValueError{name: name, err: err, raw: raw, secret: secret}
+		l.valueErrors = append(l.valueErrors, bad)
+		*problems = append(*problems, bad)
 	}
+}
+
+// configValueError is a value that was found but could not be converted to
+// its field's type.
+//
+// It is a type rather than a formatted string because whether the value may
+// be shown is not known when the failure happens: a secret field that reads
+// the same variable may not have been visited yet, and LoadConfig marks the
+// error shared once every field has been.
+type configValueError struct {
+	name   string
+	err    error
+	raw    string
+	secret bool // the failing field itself is marked secret
+	shared bool // another field reading the same variable is marked secret
+}
+
+// Error reports the failure, with the value only when no secret field reads
+// it.
+//
+// A type implementing encoding.TextUnmarshaler writes its own error, which
+// this package does not control and which may well echo the text it was given
+// back into the message (a custom credential type reporting "invalid key %q"
+// is a natural thing to write). Secret means secret from the setter's own
+// errors too, so a hidden value hides the setter's error along with it.
+func (e *configValueError) Error() string {
+	switch {
+	case e.secret:
+		return fmt.Sprintf("muzak: %s could not be parsed (value hidden because the field is marked secret)", e.name)
+	case e.shared:
+		return fmt.Sprintf("muzak: %s could not be parsed (value hidden because another field reading it is marked secret)", e.name)
+	default:
+		return fmt.Sprintf("muzak: %s %v%s", e.name, e.err, describeBadValue(e.raw))
+	}
+}
+
+// Unwrap exposes the setter's error only when the message shows it, so that
+// errors.As cannot reach a hidden value through the back door.
+func (e *configValueError) Unwrap() error {
+	if e.secret || e.shared {
+		return nil
+	}
+	return e.err
 }
 
 // lookup consults the sources in order and returns the first value found.
@@ -291,8 +349,9 @@ func splitConfigValue(t reflect.Type, raw string) []string {
 }
 
 // describeBadValue appends the offending value to an error message. The
-// caller has already turned a secret field's failure into a fixed message
-// before reaching here, so this always has a value safe to show.
+// caller has already turned a failure on a variable any secret field reads
+// into a fixed message before reaching here, so this always has a value safe
+// to show.
 func describeBadValue(raw string) string {
 	return fmt.Sprintf(" (got %q)", raw)
 }
@@ -344,6 +403,13 @@ func readEnvFile(path string) (map[string]string, error) {
 }
 
 // parseEnv reads KEY=VALUE lines from r.
+//
+// Its errors name the line number and, where the line has one that looks like
+// a variable name, the key, and never the text of the line or its value. A
+// line that fails to parse is exactly where a secret tends to be: the second
+// line of an unquoted multi-line PEM key, or "API_KEY: sk-..." typed with a
+// colon. The error travels into startup logs and crash reports, which are read
+// by more people than the file is.
 func parseEnv(r io.Reader) (map[string]string, error) {
 	values := map[string]string{}
 	scanner := bufio.NewScanner(r)
@@ -361,7 +427,8 @@ func parseEnv(r io.Reader) (map[string]string, error) {
 		text = strings.TrimPrefix(text, "export ")
 		key, raw, found := strings.Cut(text, "=")
 		if !found {
-			return nil, fmt.Errorf("line %d is not a KEY=VALUE pair: %q", line, text)
+			return nil, fmt.Errorf("line %d is not a KEY=VALUE pair (its text is not shown, since it may "+
+				"hold a secret); a value cannot span lines, so write a line break as \\n inside double quotes", line)
 		}
 		key = strings.TrimSpace(key)
 		if key == "" {
@@ -369,14 +436,35 @@ func parseEnv(r io.Reader) (map[string]string, error) {
 		}
 		value, err := parseEnvValue(strings.TrimSpace(raw))
 		if err != nil {
+			if envKeyShown(key) {
+				return nil, fmt.Errorf("line %d (%s): %w", line, key, err)
+			}
 			return nil, fmt.Errorf("line %d: %w", line, err)
 		}
 		values[key] = value
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		// The line being read when the scanner gave up is the one after the
+		// last it returned. Its text is not included, for the reason above.
+		return nil, fmt.Errorf("line %d: %w", line+1, err)
 	}
 	return values, nil
+}
+
+// envKeyShown reports whether a key is safe to repeat in an error. A real
+// variable name is made of letters, digits and underscores and is not secret;
+// anything else before an '=' may be a fragment of a value, such as a line of
+// base64 ending in padding, and is left out.
+func envKeyShown(key string) bool {
+	if len(key) > 64 {
+		return false
+	}
+	for _, r := range key {
+		if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // parseEnvValue unwraps a quoted value and strips a trailing comment from an

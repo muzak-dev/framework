@@ -280,6 +280,13 @@ func (w *compressWriter) WriteHeader(status int) {
 	if w.status != 0 {
 		return
 	}
+	if isInformational(status) {
+		// An interim response has no body to compress and settles nothing,
+		// so it goes straight through and the decision waits for the real
+		// status.
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
 	w.status = status
 
 	if w.encoding == "" || !w.worthCompressing(status) {

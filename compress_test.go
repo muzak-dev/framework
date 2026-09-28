@@ -428,8 +428,8 @@ func TestCompressWriterHandlesTheEdges(t *testing.T) {
 	}
 
 	bodiless := map[string]int{
-		"informational":   http.StatusContinue,
-		"partial content": http.StatusPartialContent,
+		"switching protocols": http.StatusSwitchingProtocols,
+		"partial content":     http.StatusPartialContent,
 	}
 	for name, status := range bodiless {
 		t.Run(name, func(t *testing.T) {
@@ -446,6 +446,25 @@ func TestCompressWriterHandlesTheEdges(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("interim status", func(t *testing.T) {
+		// A 103 goes out ahead of the response rather than being it, so the
+		// status and body that follow are judged as they would have been
+		// without it.
+		rec := httptest.NewRecorder()
+		w := newWriter(rec, "gzip")
+		w.WriteHeader(http.StatusEarlyHints)
+		_, _ = w.Write([]byte(prose))
+		w.finish()
+		// The recorder keeps the first code it is given, 1xx or not, so the
+		// status the writer settled on is read from the writer itself.
+		if w.status != http.StatusOK {
+			t.Errorf("status = %d, want the 200 that followed the hint", w.status)
+		}
+		if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
+			t.Errorf("Content-Encoding = %q, want the body after the hint compressed", got)
+		}
+	})
 
 	t.Run("repeated WriteHeader", func(t *testing.T) {
 		rec := httptest.NewRecorder()

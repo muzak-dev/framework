@@ -573,13 +573,33 @@ func (w *responseWriter) Status() int { return w.status }
 
 // WriteHeader records the status and forwards it, ignoring repeated calls the
 // way net/http does.
+//
+// An informational status is forwarded without being recorded; see
+// [isInformational].
 func (w *responseWriter) WriteHeader(status int) {
 	if w.written {
+		return
+	}
+	if isInformational(status) {
+		w.ResponseWriter.WriteHeader(status)
 		return
 	}
 	w.status = status
 	w.written = true
 	w.ResponseWriter.WriteHeader(status)
+}
+
+// isInformational reports whether status is an interim 1xx response, such as
+// 103 Early Hints, that precedes the real one rather than being it.
+//
+// net/http sends such a status on its own and still expects the final one, so
+// a wrapper that recorded it as the response would drop what the handler
+// returned afterwards, and abort the connection if the handler then failed,
+// as though a real response were already on the wire. 101 is excluded, as
+// net/http excludes it: Switching Protocols is the final response of the
+// exchange.
+func isInformational(status int) bool {
+	return status >= 100 && status < 200 && status != http.StatusSwitchingProtocols
 }
 
 // Write records the byte count and marks the response as started.

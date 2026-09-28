@@ -935,6 +935,19 @@ func (b *schemaBuilder) collectProperties(t reflect.Type, schema *Schema) {
 			b.collectProperties(field.Type, schema)
 			continue
 		}
+		if field.Anonymous && field.Type.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.Struct &&
+			field.Tag.Get(tagJSON) == "" && !isWellKnown(field.Type.Elem()) {
+			// An embedded pointer is inlined like an embedded value, and its
+			// members are where the client puts them, at the top level, not
+			// under a member named for the type. Each is optional, since the
+			// pointer stays nil when none of them is sent.
+			promoted := &Schema{Properties: map[string]*Schema{}}
+			b.collectProperties(field.Type.Elem(), promoted)
+			for name, property := range promoted.Properties {
+				schema.Properties[name] = property
+			}
+			continue
+		}
 		schema.Properties[name] = b.describeField(field)
 		if !optional {
 			schema.Required = append(schema.Required, name)

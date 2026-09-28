@@ -528,10 +528,11 @@
 //	app.Frontend("/", muzak.FrontendOptions{FS: assets, Dir: "dist"})
 //
 // Nothing is rendered on the server and nothing is built here. A directory is
-// never listed, a symbolic link cannot lead out of the build output, a path
-// naming a dotfile such as /.env or /.git/config answers 404 unless
-// [FrontendOptions.AllowDotfiles] is set (a leading /.well-known/ is served),
-// on Windows a segment shaped like an 8.3 short name such as /ENV~1 answers
+// never listed, a symbolic link cannot lead out of the build output (when it
+// is read from [FrontendOptions.Dir], or from an [os.Root]; [os.DirFS] follows
+// links), a path naming a dotfile such as /.env or /.git/config answers 404
+// unless [FrontendOptions.AllowDotfiles] is set (a leading /.well-known/ is
+// served), on Windows a segment shaped like an 8.3 short name such as /ENV~1 answers
 // 404 because it would open a long name no check has seen, a method other
 // than GET or HEAD on a file is refused with 405 rather than served, and a
 // directory that does not exist is reported when the application is built

@@ -47,6 +47,12 @@ type FrontendOptions struct {
 	// FS serves the frontend from a filesystem rather than from disk. An
 	// [embed.FS] is the usual one, which makes the binary the whole
 	// deployment.
+	//
+	// The promise that a symbolic link cannot lead out of the directory is
+	// kept by Dir, and by the FS of an [os.Root], but not by whatever else is
+	// given here: [os.DirFS] follows a link wherever it points, so a link
+	// planted in the directory serves the file it names. To serve a directory
+	// on disk, set Dir, or pass the FS of a root opened with [os.OpenRoot].
 	FS fs.FS
 
 	// Fallback is the file served, with 200, when a browser navigates to a
@@ -766,6 +772,13 @@ type StaticOptions struct {
 
 	// FS serves the files from a filesystem rather than from disk, which is
 	// what an [embed.FS] of assets belonging to a library looks like.
+	//
+	// The promise that a symbolic link cannot lead out of the directory is
+	// kept by Dir, and by the FS of an [os.Root], but not by whatever else is
+	// given here: [os.DirFS] follows a link wherever it points, so a link
+	// planted in a directory of uploads serves the file it names. To serve a
+	// directory on disk, set Dir, or pass the FS of a root opened with
+	// [os.OpenRoot].
 	FS fs.FS
 
 	// Index serves a directory with the index.html inside it, as a web server
@@ -813,8 +826,10 @@ type StaticOptions struct {
 // Everything else matches a frontend mount. Routes are matched first, the rate
 // limit, guards and providers of the router apply, a directory is never
 // listed, a dotfile is not served unless [StaticOptions.AllowDotfiles] says
-// so, a symbolic link cannot lead out of the directory, and a method other
-// than GET or HEAD on a file that exists is answered 405 rather than served.
+// so, a symbolic link cannot lead out of the directory named by
+// [StaticOptions.Dir] (or served from an [os.Root]; [os.DirFS] follows links),
+// and a method other than GET or HEAD on a file that exists is answered 405
+// rather than served.
 //
 // On both kinds of mount a file's type comes from its extension and never from
 // its content, so a file with no extension is application/octet-stream. One

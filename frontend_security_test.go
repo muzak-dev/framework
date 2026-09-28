@@ -381,3 +381,42 @@ func TestMountCaseVariantOnThisFilesystem(t *testing.T) {
 		assertStatus(t, do(t, app, "GET", target), http.StatusNotFound)
 	}
 }
+
+// TestStaticSymlinkContainmentNeedsARoot pins down where the promise that a
+// symbolic link cannot lead out of the directory holds. Dir and an os.Root's
+// FS both resolve inside the directory; os.DirFS does not, because it is
+// documented to follow links, so the docs point at the other two.
+func TestStaticSymlinkContainmentNeedsARoot(t *testing.T) {
+	t.Parallel()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("OUTSIDE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	served := t.TempDir()
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(served, "abs.txt")); err != nil {
+		t.Skipf("cannot create a symbolic link here: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(served, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+
+	app := New(quietOptions())
+	app.Static("/dir", StaticOptions{Dir: served})
+	app.Static("/root", StaticOptions{FS: root.FS()})
+	mustBuild(t, app)
+
+	for _, mount := range []string{"/dir", "/root"} {
+		for _, name := range []string{"/abs.txt", "/dirlink/secret.txt"} {
+			rec := do(t, app, "GET", mount+name)
+			assertStatus(t, rec, http.StatusNotFound)
+			if strings.Contains(rec.Body.String(), "OUTSIDE") {
+				t.Errorf("GET %s%s followed a link out of the directory", mount, name)
+			}
+		}
+	}
+}

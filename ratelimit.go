@@ -303,6 +303,10 @@ type RateLimitOptions struct {
 	// moment it stops answering. Setting FailOpen trades that for
 	// availability: a storage outage lets traffic through unmetered instead of
 	// turning into an outage of its own. The failure is logged either way.
+	//
+	// It leaves unmetered only the quota that could not be counted: the others
+	// of the policy are still counted and enforced, so a request over the limit
+	// of a quota that answered is refused even while another one is failing.
 	FailOpen bool
 
 	// DisableHeaders stops the RateLimit response headers from being set.
@@ -591,13 +595,21 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 
 	var worst outcome
 	var tightest outcome
-	for i, quota := range quotas {
+	counted := 0
+	for _, quota := range quotas {
 		count, reset, storageErr := cfg.storage.Increment(ctx, quota.Name, key, quota.Window)
 		if storageErr != nil {
-			return cfg.storageFailed(c, quota, storageErr)
+			if failure := cfg.storageFailed(c, quota, storageErr); failure != nil {
+				return failure
+			}
+			// Failing open means this quota goes unmetered, not that the
+			// others do: what they counted stands, so a request over the
+			// limit of a quota that could be counted is still refused.
+			continue
 		}
+		counted++
 		current := outcome{quota: quota, count: count, reset: reset}
-		if i == 0 || current.remaining() < tightest.remaining() ||
+		if counted == 1 || current.remaining() < tightest.remaining() ||
 			(current.remaining() == tightest.remaining() && current.reset > tightest.reset) {
 			tightest = current
 		}
@@ -617,7 +629,9 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 			"the %q rate limit of %d requests per %d seconds has been exceeded; retry in %d seconds",
 			worst.quota.Name, worst.quota.Limit, windowSeconds(worst.quota.Window), retry)
 	}
-	cfg.setHeaders(c, tightest, policy)
+	if counted > 0 {
+		cfg.setHeaders(c, tightest, policy)
+	}
 	return nil
 }
 

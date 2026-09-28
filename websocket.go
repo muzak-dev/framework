@@ -293,6 +293,11 @@ type WSConn struct {
 	mu        sync.Mutex
 	err       error
 	sentClose bool
+	// closing is closed once the goroutine that started sending the close
+	// frame has finished with it, so that a second closer can wait for the
+	// frame to be out before tearing the transport down under it. It is nil
+	// until a close frame is started, and is guarded by mu.
+	closing chan struct{}
 
 	// ended cancels the handler's context when the connection ends; see
 	// [WSConn.cancelOnEnd]. It is guarded by mu and called at most once.
@@ -822,7 +827,7 @@ func (c *WSConn) handleControl(ctx context.Context, header wsframe.Header) error
 		// fault of either end, and that must not overwrite the status the peer
 		// went to the trouble of sending.
 		_ = c.record(closure)
-		_ = c.sendClose(WSStatus(status), "")
+		_ = c.sendCloseAfterFailure(WSStatus(status), "")
 		return c.fail(closure)
 	}
 }
@@ -902,14 +907,42 @@ func (c *WSConn) writable() error {
 
 // sendClose writes the close frame, at most once for the life of the
 // connection.
+//
+// A caller that finds the frame already being sent by another goroutine waits
+// for that send to end before it returns, because what it does next is close
+// the transport, and closing it under a frame half written would show the peer
+// a lost connection instead of the status it was being told.
 func (c *WSConn) sendClose(status WSStatus, reason string) error {
+	return c.sendCloseFrame(status, reason, false)
+}
+
+// sendCloseAfterFailure is sendClose for the echo of a close frame the peer
+// sent, which is written after the connection's outcome has been recorded and
+// so has to go out although the connection already reads as ended. Without
+// that, an echo would be skipped whenever another goroutine held the write half
+// at that moment.
+func (c *WSConn) sendCloseAfterFailure(status WSStatus, reason string) error {
+	return c.sendCloseFrame(status, reason, true)
+}
+
+func (c *WSConn) sendCloseFrame(status WSStatus, reason string, afterFailure bool) error {
 	c.mu.Lock()
 	if c.sentClose {
+		closing := c.closing
 		c.mu.Unlock()
+		if closing != nil {
+			// The sender is bounded by the write timeout, which is what keeps
+			// this from waiting on a peer that has stopped reading for longer
+			// than a close is ever allowed to take.
+			<-closing
+		}
 		return nil
 	}
 	c.sentClose = true
+	c.closing = make(chan struct{})
+	closing := c.closing
 	c.mu.Unlock()
+	defer close(closing)
 
 	if !wsframe.ValidStatus(uint16(status)) {
 		// Three of the defined codes describe a local observation and must
@@ -921,7 +954,7 @@ func (c *WSConn) sendClose(status WSStatus, reason string) error {
 	var payload [wsframe.MaxControlPayload]byte
 	frame := wsframe.AppendClose(payload[:0], uint16(status), reason)
 
-	if err := c.acquireClose(); err != nil {
+	if err := c.acquireClose(afterFailure); err != nil {
 		return err
 	}
 	defer c.release(c.writeSem)
@@ -932,12 +965,18 @@ func (c *WSConn) sendClose(status WSStatus, reason string) error {
 }
 
 // acquireClose takes the write semaphore for a close frame, waiting no longer
-// than the write timeout for a peer that has stopped reading.
-func (c *WSConn) acquireClose() error {
+// than the write timeout for a peer that has stopped reading. It gives up early
+// when the connection fails while it waits, unless the frame is being sent
+// after a failure it was always going to follow.
+func (c *WSConn) acquireClose(afterFailure bool) error {
 	select {
 	case c.writeSem <- struct{}{}:
 		return nil
 	default:
+	}
+	done := c.done
+	if afterFailure {
+		done = nil
 	}
 	timeout := c.closeTimeout()
 	timer := time.NewTimer(timeout)
@@ -945,7 +984,7 @@ func (c *WSConn) acquireClose() error {
 	select {
 	case c.writeSem <- struct{}{}:
 		return nil
-	case <-c.done:
+	case <-done:
 		return c.failure()
 	case <-timer.C:
 		return fmt.Errorf("muzak: the websocket close frame could not be sent within %s", timeout)

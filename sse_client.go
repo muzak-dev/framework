@@ -138,8 +138,17 @@ func (m SSEMessage) Decode[T any]() (T, error) {
 // reports "no events" for what is actually a failure.
 //
 // Cancelling ctx ends the stream, whether the handshake or a later read is
-// waiting on it. Redirects are followed by whatever client is supplied;
-// net/http drops an Authorization header when one crosses to another host.
+// waiting on it.
+//
+// Redirects are not followed, whatever the supplied client would do, and a
+// redirect is refused like any other response that is not a stream, with the
+// Location it named left on the returned response. Following one would send
+// the request's headers to wherever the answer pointed: net/http drops an
+// Authorization header on the way to another host, but not one it does not
+// recognise as a credential, such as an API key header, and not an
+// Authorization header sent to the same host over plain HTTP after an https
+// origin redirected there. A caller that means to follow a redirect reads
+// the Location and dials it, deciding for itself which headers go along.
 func SSEDial(ctx context.Context, rawURL string, opts SSEDialOptions) (*SSEReader, *http.Response, error) {
 	method := opts.Method
 	if method == "" {
@@ -174,6 +183,10 @@ func SSEDial(ctx context.Context, rawURL string, opts SSEDialOptions) (*SSEReade
 
 // sseCheckResponse reports a response that is not an event stream.
 func sseCheckResponse(response *http.Response) error {
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		return fmt.Errorf("muzak: the event stream answered with a redirect (status %d) to %q, which is not followed; dial that address directly if it is trusted",
+			response.StatusCode, sseShorten(response.Header.Get("Location")))
+	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("muzak: the event stream was refused with status %d", response.StatusCode)
 	}
@@ -186,10 +199,13 @@ func sseCheckResponse(response *http.Response) error {
 
 // sseDialClient returns the client to open the stream with.
 //
-// The timeout goes, on a copy so that the caller's own client is left as it
-// was, because it would otherwise bound the whole life of the stream rather
-// than the request that opens it, and a stream that is meant to last for hours
-// would end at whatever the client was configured with.
+// Two things are changed about whatever the caller supplied, on a copy so that
+// the caller's own client is left as it was. The timeout goes, because it
+// would otherwise bound the whole life of the stream rather than the request
+// that opens it, and a stream that is meant to last for hours would end at
+// whatever the client was configured with. Redirects are refused, for the
+// reason [SSEDial] gives and exactly as [WSDial] refuses them: following one
+// would carry the request's credentials to whatever the answer named.
 func sseDialClient(client *http.Client) *http.Client {
 	dialer := &http.Client{}
 	if client != nil {
@@ -197,6 +213,9 @@ func sseDialClient(client *http.Client) *http.Client {
 		dialer = &copied
 	}
 	dialer.Timeout = 0
+	dialer.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return dialer
 }
 

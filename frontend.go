@@ -185,6 +185,7 @@ type frontend struct {
 // Problems with the mount, including a directory that does not exist, are
 // reported when the application is built rather than on the first request.
 func (r *Router) Frontend(mountPath string, opts FrontendOptions) {
+	r.mustBeOpen("mounting a frontend at " + mountPath)
 	if !strings.HasPrefix(mountPath, "/") {
 		r.errs = append(r.errs, fmt.Errorf("muzak: frontend at %q: path must begin with %q", mountPath, "/"))
 		return
@@ -823,6 +824,7 @@ type StaticOptions struct {
 // is set, so that markup a client uploaded cannot run script as the
 // application.
 func (r *Router) Static(mountPath string, opts StaticOptions) {
+	r.mustBeOpen("mounting static files at " + mountPath)
 	if !strings.HasPrefix(mountPath, "/") {
 		r.errs = append(r.errs, fmt.Errorf("muzak: static files at %q: path must begin with %q", mountPath, "/"))
 		return

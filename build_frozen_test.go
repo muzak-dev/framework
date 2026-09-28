@@ -27,6 +27,19 @@ func TestConfigurationAfterBuildPanics(t *testing.T) {
 		"DELETE /late":    func(app *App, _ *Router) { app.Delete("/late", okHandler) },
 		"Include":         func(app *App, _ *Router) { app.Include(NewRouter()) },
 		"GET /child/late": func(_ *App, child *Router) { child.Get("/child/late", okHandler) },
+		"WS /late": func(app *App, _ *Router) {
+			app.WS("/late", func(*Context, Empty, *WSConn) error { return nil })
+		},
+		"SSE GET /late": func(app *App, _ *Router) {
+			app.SSE("/late", func(*Context, Empty, *SSEStream[Empty]) error { return nil })
+		},
+		"SSE POST /late": func(app *App, _ *Router) {
+			app.SSEHandle("post", "/late", func(*Context, Empty, *SSEStream[Empty]) error { return nil })
+		},
+		"a frontend at /late": func(app *App, _ *Router) { app.Frontend("/late", FrontendOptions{FS: testDocsUI()}) },
+		"static files at /late": func(app *App, _ *Router) {
+			app.Static("/late", StaticOptions{FS: testDocsUI()})
+		},
 	}
 	builds := map[string]func(t *testing.T, app *App){
 		"Document": func(t *testing.T, app *App) {

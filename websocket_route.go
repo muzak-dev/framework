@@ -397,6 +397,7 @@ type wsConfig struct {
 // registration error rather than a request that mysteriously never arrives.
 // Configure the connection itself with [WithWebSocket].
 func (r *Router) WS[In any](path string, h WSHandler[In], opts ...RouteOption) *Route {
+	r.mustBeOpen("registering WS " + path)
 	rt := &Route{
 		Method:    http.MethodGet,
 		rawPath:   path,

@@ -265,6 +265,7 @@ func (r *Router) SSEHandle[In, Out any](method, path string, h SSEHandler[In, Ou
 // it needs the type parameters the caller inferred, which keeps each method
 // above a one-line delegation.
 func registerSSE[In, Out any](r *Router, method, path string, h SSEHandler[In, Out], opts []RouteOption) *Route {
+	r.mustBeOpen("registering SSE " + method + " " + path)
 	rt := &Route{
 		Method:   method,
 		rawPath:  path,

@@ -180,6 +180,239 @@ regression test. Several fixes tighten a default; each one is listed under
 - **The documentation counts against the application rate limit.** See
   **Security**. Migration: exempt it with `SkipRateLimit`, or disable the docs.
 
+- **`HTTPError`'s `WithDetails`, `WithCode`, `WithMessageKey` and `Wrap`
+  return a modified copy and leave the receiver untouched.** They edited the
+  error in place, so a package-level error decorated per request handed one
+  request's details to the next response, grew them with every request and
+  raced between concurrent ones. Migration: use the returned value (every
+  documented use already does); a call whose result is discarded, such as
+  `err.WithCode("x")` on its own line, no longer has any effect.
+
+- **A certificate without a key, or a key without a certificate, is a build
+  error.** With only one of `ServerOptions.CertFile` and `KeyFile` set the
+  server came up in plaintext on the port its operator believed was HTTPS,
+  with nothing said. Migration: set both, or neither.
+
+- **`required:"true"` on a config field refuses an empty value.** `API_KEY=`,
+  which Compose and Kubernetes produce when they expand an unset variable,
+  satisfied `required` and loaded an empty secret. An empty value is now
+  treated as missing, so a `default` applies if there is one and the load
+  fails otherwise. Fields that are not `required` are unchanged. Migration:
+  drop `required` from a field whose empty value is legitimate, or give it a
+  `default`.
+
+- **The context `Lifecycle.Start` receives stays live until the components
+  are stopped.** It was cancelled as soon as `Start` returned, so a component
+  that kept it for a background worker had the worker cancelled during boot.
+  It is still cancelled when a sibling fails to start and when the context
+  passed to `StartLifecycle` is; it is now also cancelled after `Stop` has
+  run.
+
+- **A route template that declares a parameter name twice is a build error.**
+  `/orgs/{id}/users/{id}` used to build, and a handler binding `path:"id"`
+  silently received the first segment, so a check on "the user's id" was made
+  against the organisation's. Migration: give each parameter its own name.
+
+- **Two static mounts at one path are a build error.** A second `Static` or
+  `Frontend` at a path used to lose to the first without a word, guards
+  included. Migration: keep one mount per path, or give them different paths.
+
+- **`Accept-Encoding: deflate` is answered in the zlib format.** RFC 9110
+  defines the `deflate` content coding as zlib around DEFLATE, and the bare
+  DEFLATE stream sent before was refused by strict decoders. A client that
+  decodes it as raw DEFLATE, which was only ever a lenient guess, should
+  decode zlib; every conforming client already does.
+
+- **A version is read from `Accept` and from a version header more strictly.**
+  With media type versioning, each range of `Accept` is parsed as a media
+  range: the parameter name is matched without regard to case, a quoted value
+  is unquoted, the range with the highest `q` picks the version (one refused
+  with `q=0` is ignored), every `Accept` line is read, and a bare `v=1` that is
+  not a media range no longer names a version. `Key` may be written with or
+  without its `=`. With header versioning, a header sent on several lines is
+  one list and names no version, so it matches no route rather than the first
+  line's. A proxy that reads the same header the standard way now agrees with
+  the application about which version, and so which guards, a request reached.
+  Migration: send one `Accept` range per version, in the form
+  `application/json;v=2`, and one line of the version header.
+
+- **A multipart body sent to a route that binds no file is bounded by
+  `MaxBodySize`, not `MaxUploadSize`.** A login or sign-up form that binds only
+  `form:` values took its `multipart/form-data` body under the 32 MiB upload
+  limit, so net/http held up to 20 MiB of text values (about 49 MiB of heap per
+  in-flight request) before any rule could run, and a file sent to it, which
+  nothing reads, was spooled to disk first. The urlencoded encoding of the same
+  route was already bounded by `MaxBodySize`. A route that declares a `file:`
+  field keeps `MaxUploadSize`. Migration: a form-only route that legitimately
+  receives more than `MaxBodySize` (1 MiB by default) as multipart must raise
+  `MaxBodySize` for it.
+
+- **`Required()` fails a nil pointer field.** Every rule was skipped for a nil
+  pointer, `Required()` included, so `v.String(&in.Name).Required()` on a
+  `*string` accepted `{}` and `{"name":null}` while the generated document
+  listed the field as required. A nil pointer now reports the field's
+  `Required()` rule (`is required`, with its custom message if it has one); its
+  other rules are still skipped. Migration: a pointer field that is meant to be
+  optional must not declare `Required()`.
+
+- **`Nested` that would validate nothing is a build error.** `v.Nested(in.Addr)`
+  with a value instead of a pointer was skipped without a word, and a model
+  whose `Validate` has a value receiver bound its rules to a copy, so
+  `{"addr":{"city":""}}` passed a `Required()` city and its transforms were
+  lost. Both are now refused when the route is compiled, for the input and for
+  every model it nests. Migration: pass the model's address, `v.Nested(&in.Addr)`,
+  and declare `Validate` on the pointer receiver.
+
+- **`Unique()` treats two `time.Time` values as equal when they are the same
+  instant.** It used `reflect.DeepEqual`, which compares zone pointers, so
+  `12:00Z` and `13:00+01:00` were distinct. They are now a repeat, as
+  `time.Time.Equal` has it. `[]time.Time` and `[]netip.Addr`, `[]netip.AddrPort`
+  and `[]netip.Prefix` are checked in linear time (see Fixed).
+
+- **`UUID()` accepts only the canonical 8-4-4-4-12 form.** It read a URN, braces
+  and 32 bare digits as the same identifier, which the generated document's
+  `format: uuid` does not describe and which let one UUID be held under several
+  strings. Migration: normalise the spelling before validating, or use
+  `Matches` for a wider set.
+
+- **`Base64()`, `URL()`, `HTTPS()`, `URLWithSchemes()` and `NotBlank()` are
+  stricter.** `Base64()` rejects a value with a CR or LF (Go's decoder skips
+  them). The URL rules reject a port above 65535 and a value containing a
+  control, format or separator character (bidirectional overrides, zero-width
+  characters). `NotBlank()` treats a value of only invisible characters (zero
+  width space, Hangul filler, braille blank, format characters) as blank.
+
+- **`default:"..."` on a member of a JSON body is applied, and documented as
+  its type.** The document listed the default and marked the member optional
+  while the binder never filled it in. A top-level member (or one promoted from
+  an embedded struct) that the client omits now takes the default; one it sends
+  wins. A default that does not parse as its field's type is a build error, and
+  a member whose type cannot be written from text (a struct, a map) still has no
+  default. Defaults are now emitted as the JSON type of the member (`10`, not
+  `"10"`) for query, header, form and body, and are no longer emitted on a
+  nested member or on a response type, where nothing applies them.
+
+- **The OpenAPI document no longer describes a `Clamp` as a range.** `Clamp`
+  moves a value into range rather than rejecting one outside it, so `minimum`
+  and `maximum` told a client that 500 is refused.
+
+- **A WebSocket handshake's `Origin` is read strictly.** The same-origin rule
+  took the host out of any value a lenient URL parse could find one in, so
+  `http://attacker@host`, `http://host/path`, `http://host?x` and `//host`
+  passed as the server's own origin, and only the first of several `Origin`
+  headers was looked at. An origin is now a scheme and a host with nothing after
+  it, and a handshake with more than one `Origin` header is refused with 400.
+  Values listed in `AllowedOrigins`, and the ones `AllowOriginFunc` sees, are
+  still compared exactly as they arrived. Migration: none for browsers, which
+  send neither shape. A non-browser client that sent a decorated `Origin`
+  must send a bare `scheme://host[:port]` or none at all.
+
+- **A websocket connection that sends more than 65536 pings, pongs and empty
+  fragments in a minute is closed with 1008.** The frame guard restarted with
+  every message, so a peer completing one empty message per 65535 pings was
+  answered without end while `MessageLimits` saw a single message per round.
+  Migration: none for an honest peer, whose keepalive sends one ping every few
+  seconds.
+
+- **A negative `WSOptions.PongTimeout` means the default.** It was read as zero,
+  so the first keepalive ping closed every connection whose peer could not
+  answer instantly. Migration: none.
+
+- **`SSEDial` bounds how long opening a stream may take.** It removed the
+  supplied client's `Timeout` so that it would not cut the stream short, and
+  put nothing in its place, so a server that accepted the request and never
+  answered, or trickled the body of a refusal, held the call for as long as a
+  context without a deadline lasts. Opening is now bounded by the new
+  `SSEDialOptions.HandshakeTimeout`, which defaults to the `Timeout` of the
+  supplied `HTTPClient` when it has one and otherwise to
+  `DefaultSSEHandshakeTimeout` (30 seconds); a negative value removes the
+  bound. The bound ends when the stream is open and says nothing about how
+  long the stream lasts or idles. Migration: a server that takes longer than
+  30 seconds to send response headers needs `HandshakeTimeout` set higher, or
+  negative.
+
+- **`SSEReader.Retry` is capped at an hour and accepts digits only.** A
+  `retry:` field was parsed with `ParseInt` and multiplied into a duration, so
+  a server sending `9223372036855` made `Retry()` negative, and a client that
+  sleeps for it reconnected in a tight loop. A value with a sign, a space or
+  an exponent is now ignored as the format requires, and a value beyond an
+  hour is reported as an hour. Migration: none for a server that asks for a
+  sensible delay.
+
+- **Default log redaction covers more secret-bearing keys.** `DefaultRedactedKeys`
+  now also matches `passphrase`, `pwd`, `dsn`, `connection-string`,
+  `access-key`, `signing-key`, `master-key`, `encryption-key`, `hmac`, `totp`,
+  `otp-code`, `basic-auth`, `auth-header` and `x-auth`, in any case and with
+  any of `-`, `_`, `.` or space between the words. `auth`, `pass`, `sig` and
+  `otp` are left out on purpose, since they sit inside `author`, `passenger`,
+  `design` and `hot_path`. Migration: a key that these now hide and that is
+  not a secret can be kept by passing `LoggerOptions.RedactKeys` without the
+  term; a secret under a shorter name is added the same way.
+
+- **A recovered panic's value is cut to 4 KiB in the log.** The value was
+  logged whole, so a panic message built from a request's input made a log
+  line as large as the input. It is now rendered with `fmt` and cut, with a
+  `...(truncated)` marker, in both `Recovery` and the router's own recovery.
+  The `panic` attribute is a string in the JSON format for every kind of
+  value; it used to be the marshalled value for one that was not a string or
+  an error.
+
+- **A stream that cannot carry write deadlines logs a warning.** Middleware
+  that wraps the response writer, forwards `Flush` and has no
+  `Unwrap() http.ResponseWriter` hides the connection's deadlines, so the
+  stream's `WriteTimeout` was silently not enforced and a client that stopped
+  reading held its stream indefinitely. The stream is still served, because a
+  writer supplied by a test cannot carry deadlines either, but the first one on
+  each route now logs which writer stopped the chain. Migration: give the
+  wrapper an `Unwrap` method.
+
+- **The default rate limit tracker counts an IPv6 client by its /56, not its
+  /64.** A /56 is what providers delegate to one home or small site (RFC 6177),
+  so keying on the /64 still handed one subscriber 256 budgets: rotating the
+  low bits of the fourth group of an address, all inside their own /56, turned a
+  limit of 5 a minute into more than a thousand. The per-client connection caps
+  already counted a /56 for exactly this reason; the rate limiter now uses the
+  same prefix, and the same setting. `ClientIPOptions.ConnectionIPv6Prefix`
+  (default 56) now also sets the prefix `IPTracker` counts, so one subscriber
+  has one budget however it is limited. IPv4 is unchanged, and its keys are
+  spelled as before.
+
+  Migration: a counter kept in a shared storage under an IPv6 client's old
+  `ip:2001:db8:1:2::/64` key is not carried over, so IPv6 clients start with a
+  full budget once after the upgrade. Where many unrelated users share one /56
+  (a campus, or a carrier that gives each device a /64), set
+  `ClientIPOptions.ConnectionIPv6Prefix: 64` to keep the old grouping, which
+  also loosens the connection caps to match; for one route only,
+  `IPPrefixTracker(32, 64)` (any length from 0 to 128) still chooses its own.
+  Where sites are delegated a /48, or the deployment is hostile to begin with,
+  set 48 (anything from 32 to 128 is accepted).
+
+- **A locale file that reaches one key two ways is refused.** A key that
+  contains a dot (`"a.b": one`) next to a namespace that spells the same path
+  out (`a: {b: two}`) is the key `a.b` twice, and which of the two a lookup
+  returned was decided by the order Go ranged the map in, so the same file
+  answered differently after each restart and one translator's entry could
+  silently shadow another's. Loading it is now an error naming the key, whether
+  the two are in one file or in two files loaded into the same locale, and the
+  locale is left as it was. A locale tree that nests more than 100 levels (the
+  depth the YAML reader already stops at) is refused as well; see below.
+  Migration: write each key one way. Dotted keys that collide with nothing keep
+  working.
+
+- **YAML aliases are bounded.** The aliases of one document may copy at most
+  `yaml.MaxAliasNodes` (100,000) values between them, and an alias adds the
+  depth of the value it names to its own, so it counts against `MaxDepth`. A
+  document that exceeds either is refused with a located syntax error. Sharing
+  a block of defaults between locales, which is what aliases are for in a
+  locale file, is far below either limit. Migration: none for a real file.
+
+- **Strftime patterns, and `%<name>d` interpolation directives, are bounded.**
+  A strftime width is at most 64, a pattern's nesting through `%c` and `%x` at
+  most four levels, one expansion reads at most 16,384 characters and writes at
+  most 16 KiB (cut at a character boundary). A `%<name>` directive with a
+  width or precision above 64, or a `*` width, is left as literal text rather
+  than rendered. Migration: none for a real pattern or message.
+
 ### Security
 
 - **A WebSocket message can no longer slip past the read limit.** The limit
@@ -370,6 +603,281 @@ regression test. Several fixes tighten a default; each one is listed under
   wall-clock step cannot starve keepalives or close healthy connections.
 
 - **A 103 Early Hints no longer swallows the response after it.**
+
+### Fixed
+
+- **A failure after a `Flush` that came before the first `Write` aborts the
+  connection.** The implicit `200` a flush sends was not recorded, so a
+  handler or middleware that flushed its headers early and then failed had the
+  JSON error envelope appended to the stream as though it were the body, and
+  `SetStatus` after the flush was silently accepted and logged as the status.
+  The response is now treated as started from the flush, so the failure is
+  logged once, the transfer fails for the client and the access log says
+  `aborted`.
+
+- **`Run` stops the lifecycle components when the server fails to serve.** A
+  certificate that would not load, or an accept error that cannot be retried,
+  returned the error with every component that had started before the socket
+  opened still running. The components are now stopped as a shutdown stops
+  them, and the listener is closed.
+
+- **A second `SIGINT` or `SIGTERM` while `RunSignals` is draining ends the
+  process.** `signal.NotifyContext` kept swallowing signals until `RunSignals`
+  returned, so a second Ctrl-C during a drain of up to `ShutdownTimeout`, or
+  without limit when it is negative, did nothing.
+
+- **`TryFrom` and `From` accept a nil interface value from a provider.** A
+  provider of an interface type returning `nil, nil`, the natural encoding of
+  an anonymous caller, made every request a 500 because the stored `nil` failed
+  the type assertion. It now returns the nil the provider produced.
+
+- **A CORS policy that cannot be served is logged as a build failure.** It was
+  recorded after the start-up log had reported the routes registered, so
+  `ServeHTTP` answered every request with a bare 500 and the log named no
+  reason. It is now reported with the other build errors.
+
+- **An `App` that was shut down can be run again.** The WebSocket and event
+  stream registries stayed in the draining state, so the second run answered
+  every WebSocket and event stream with 503. They are reopened when the
+  application starts running.
+
+- **`Context.Context`'s documentation says when the context is cancelled.** It
+  claimed the context is cancelled when the server begins shutting down, but
+  `Shutdown` leaves an ordinary request to finish and cancels its context only
+  with its connection at the deadline. The behaviour is unchanged; the
+  documentation now says so and points long-lived responses at event streams
+  and WebSocket routes, whose contexts do end when shutdown begins.
+
+- **A lookup path that does not begin with `/` matches nothing.** The router
+  dropped the first byte of one, so behind `http.StripPrefix("/api", app)` a
+  request for `/apiXadmin/panel` was served as `/admin/panel`, and an
+  `OPTIONS *` request matched a root wildcard. Guards still ran, but a
+  firewall or cache keyed on the URL saw a different path from the one the
+  application routed on.
+
+- **The IPv6 zone is dropped from a client address, and a trusted proxy written
+  as an IPv4-in-IPv6 CIDR is honoured.** A zoned address (`fe80::1%eth0`) was
+  never inside a trusted prefix, so a trusted proxy that reported itself with a
+  zone was taken for the client, and `Context.ClientIP()` and the per-client
+  connection key at a full-length prefix were a different string for every
+  zone suffix, so one client could mint any number of them. A trusted proxy
+  written as `::ffff:10.0.0.0/104` parsed and then matched nothing, leaving the
+  proxy it named untrusted without a message; it now means `10.0.0.0/8`.
+
+- **`Unique()` over `[]time.Time` was quadratic.** `time.Time` holds a
+  `*Location`, so it was not hashable and 16000 timestamps (368 KB) cost 12 s of
+  CPU. Times are keyed by instant, and `netip` addresses by themselves.
+  Element types that cannot be keyed (`[]*T`, `[]any`, nested slices) are still
+  compared pair by pair and should carry a `MaxItems` bound.
+
+- **`Matches()` and `MatchesNot()` recompiled their expression on every
+  request.** Rules are declared inside `Validate`, which runs per request, so a
+  slug pattern cost 83 microseconds and 491 allocations, twenty times the rest
+  of the validation. Compiled expressions are kept by pattern text, up to 1024
+  distinct patterns.
+
+- **A negative `MaxBodySize` refused every JSON body.** It is documented to
+  remove the limit, but `http.MaxBytesReader` clamps a negative limit to zero,
+  and a `CaptureBody` route with `MaxBodySize(math.MaxInt64)` overflowed
+  `limit+1` and read the body as empty. A limit that is not positive now leaves
+  the body unwrapped, and one too large to add a byte to is unbounded.
+
+- **`MultipleOf` used an absolute tolerance of 1e-9.** `19.99` failed
+  `MultipleOf(0.01)`, `5.0000000001` passed `MultipleOf(5)`, and any value
+  passed a factor below 1e-9. The quotient is now compared with its nearest
+  whole number within a few units of float64 precision.
+
+- **Registering a route on a self-referential collection type hung or
+  overflowed the stack.** `type Tree map[string]Tree` as a body field looped in
+  `locatedWithin`, `type List []List` as a query field overflowed `setterFor`,
+  and both looped in the schema builder. Registration now terminates: a body
+  field is accepted and described once, a parameter is refused with an error.
+
+- **A `time.Duration` in a JSON body was a 422 for every value and a 500 in a
+  response.** encoding/json/v2 has no representation for it and accepts no
+  `format` tag. It is now a string such as `"1500ms"`, both ways, as the
+  document says. SSE and WebSocket payloads are not covered.
+
+- **OpenAPI: an embedded `*T` is described as a top-level, optional set of
+  members** instead of a nullable member named for the type, matching what the
+  decoder accepts.
+
+- **OpenAPI: a generic type has a component key a `$ref` can resolve.**
+  `Page[example.com/app.Item]` was used as the key as it stood, so its
+  reference held a slash and brackets; it is now `Page_app.Item`.
+
+- **OpenAPI: the rules of a nested model are documented.** `describeConstraints`
+  returned before descending. The rules of every model that `Nested` reaches
+  from a zero value are written onto the schema of its type; a model nested once
+  per element of a collection is not among them.
+
+- **A websocket connection now holds its slot until its socket is closed.**
+  The slot was returned when the handler did, but closing waits for the peer's
+  close frame (`CloseGracePeriod`) and, when another goroutine is writing to a
+  peer that does not read, for the write half (`WriteTimeout`), so a peer that
+  withheld its close frame held sockets and goroutines that `MaxConnections` and
+  `MaxConnectionsPerIP` say nobody may: about 300 sockets against a limit of 4.
+  Shutdown now also waits for connections that are closing.
+
+- **A websocket's room is taken before the handshake is answered.** The
+  connection was recorded after the 101 had told the peer it was connected, so
+  a client dialling again as soon as it read the response could be admitted past
+  the connection limits. Room is reserved under the register's lock before the
+  upgrade.
+
+- **A refused websocket handshake no longer runs the route's guards and
+  dependencies first.** A cross-origin handshake, or one arriving at a full
+  server, answered 403 or 503 only after the session dependency had run with the
+  visitor's cookie, so a refused handshake still cost a store lookup and any
+  side effect it has. A request that asks to upgrade is now judged for its
+  origin and the connection limits first. A plain GET still reaches the guards
+  first, so a client without credentials still gets 401.
+
+- **A websocket's close status reaches the peer when two closers race.** A
+  second `Close` (shutdown, a keepalive timeout, a returning handler) tore the
+  transport down under the first one's close frame, so the peer saw 1006. It
+  now waits for that frame. A peer's own close is also echoed when another
+  goroutine is writing at that moment; it used to be skipped.
+
+- **A close reason that is not UTF-8 is repaired before it is sent.** A reason an
+  application forwarded from elsewhere went out as it was, obliging the peer to
+  fail the connection instead of reading the status. Invalid bytes become U+FFFD.
+
+- **An idle event stream over HTTP/2 was reset one `WriteTimeout` after its
+  last event.** A stream armed a write deadline before every event and never
+  took it off. On HTTP/2 that deadline is a timer that resets the stream when
+  it fires, so with the default 10 second `WriteTimeout` and 15 second
+  keepalive every idle stream died before its first keepalive, and browsers
+  reconnected in a loop. A deadline now exists only while a write is in
+  progress. On HTTP/1 the same change stops the bytes that end a response from
+  meeting a deadline that had long expired, and a graceful shutdown or a
+  handler's return now ends an idle stream cleanly rather than aborting it,
+  since an interrupt is applied only to a write that is in flight.
+
+- **A stream's deadline state raced with shutdown.** A stream is in the
+  register before its header is written, so a shutdown could end it while it
+  was still opening. `open` wrote the field recording whether the response
+  carries deadlines without the lock that `interrupt` read it under, which
+  the race detector reported, and the header was written with no deadline at
+  all, so an interrupt landing in that window was lost. It is now decided under
+  the lock and the header is written as an armed write that a shutdown can
+  stop; a stream that has already ended never writes it.
+
+- **JSON log output escapes C1 controls, DEL and bidirectional controls.** The
+  JSON handler wrote U+0080 to U+009F, DEL and the bidirectional controls as
+  themselves, so a decoded request path carrying a CSI reached a terminal
+  reading the log with `tail`. The finished record is now escaped as `\uXXXX`,
+  which a JSON reader decodes to the same text, covering messages, keys and
+  values logged with `slog.Any`. The console format already did this.
+
+- **A handler that sets `Vary` no longer erases the `Vary` the framework had
+  added.** CORS (`Origin`, and the preflight request headers), the `Locale`
+  middleware (`Accept-Language`, `Cookie` or the locale header, whichever
+  sources are configured) and header or media-type versioning added their field
+  before the handler ran, into a header the handler owns, so a handler doing
+  ordinary content negotiation with `ctx.SetHeader("Vary", "Accept")` replaced
+  it. The response then carried a reflected `Access-Control-Allow-Origin` or a
+  `Content-Language` chosen from `Accept-Language` with nothing telling a
+  shared cache what it depended on, and the cache stored it for every client.
+  The fields are now recorded on the response writer and merged into `Vary`
+  when the response is written (and when a response with no body is committed),
+  as compression already did for `Accept-Encoding`; a handler's own `Vary`
+  adds to them.
+
+- **A locale whose strftime format names itself no longer kills the process.**
+  `time.formats.default: "%c"`, or a date and a time format that name each
+  other, recursed until the stack was exhausted, which Go reports as a fatal
+  error that no `recover` catches, on the first request that localized a time in
+  that locale rather than when the file was loaded. Expansion is now bounded, so
+  the directive is written out as it stands past four levels.
+
+- **A locale file can no longer amplify its own text without bound.** A strftime
+  width was read as written, so `%500000000Y`, eleven bytes, made half a
+  gigabyte; a hundred `%<n>1000000d` placeholders, twelve hundred bytes of
+  translation, rendered ninety-five megabytes and left the pooled buffer holding
+  that capacity; and a JSON locale nested to the decoder's own limit of ten
+  thousand levels kept a dotted path of every level above each node, so a 54 KB
+  file was retained as 85 MB. Each is now bounded (see above). A format name
+  with no pattern under it is still used as the pattern by `Localize`, which
+  made the width reachable from a value an application took from a client; the
+  bound is what makes that safe, and the documentation now says so.
+
+- **YAML alias bomb.** A 330-byte file of seven levels of aliases, each
+  aliasing the one above it ten times, allocated 216 MB while loading and each
+  further level cost ten times as much for 45 more bytes; a chain of 5,000
+  single aliases parsed to a depth of 5,000 under a `MaxDepth` of 100 and copied
+  the whole chain at every step.
+
+- **`FailOpen` no longer discards a quota that had already said no.** A storage
+  error on one quota of a policy returned from the check, so a request over the
+  limit of an earlier quota was served, and a store that fails for some
+  counters only (one shard of a cluster) stopped every other limit of the route
+  from holding. The failing quota now goes unmetered and the others still
+  decide; with none counted, no `RateLimit` headers are sent.
+
+- **Quotas returned by a `QuotaResolver` are held to the rules static ones
+  follow.** A resolved quota was checked for a name, a window and a limit, and
+  nothing else. A name with a colon collides with the storage key of another
+  quota (`plan:x` for client `y` is `plan` for client `x:y` in the key the
+  storage documentation recommends), a NUL does the same in the in-process
+  storage, and a name repeated within one policy, or repeating a static one,
+  counted every request once per copy against one counter, so a limit of two
+  refused the second request. Both paths now share one check, and a resolver
+  that returns an invalid or repeated name fails the request with a 500, as a
+  zero limit already did.
+
+- **`Accept-Language` negotiation no longer costs more the more locales there
+  are.** Every range of the header was compared with every available locale by
+  lower-casing and splitting the locale again, so a 700-byte header against 300
+  locales cost about 19,000 allocations and 750 microseconds per request, ahead
+  of routing and of the rate limit. The lower-cased and split forms are
+  computed once when the middleware is built.
+
+- **A flush that failed is reported through the compression wrapper.** The
+  wrapper had only `Flush()`, so `http.ResponseController` got nil whatever
+  became of the bytes underneath and a stream could not tell the client had
+  gone. It now has `FlushError`.
+
+- **An event's `Retry` shorter than a millisecond is written as 1, not 0.** The
+  field is whole milliseconds and the duration was truncated, so a positive
+  delay under a millisecond told a client to reconnect at once.
+
+### Documentation
+
+- **The symbolic-link guarantee holds for `Dir` and for the `FS` of an
+  `os.Root`, not for `os.DirFS`.** `os.DirFS` follows a link out of its
+  directory, so a link planted in a directory served through it serves the
+  file it names. The `Static`, `Frontend` and package documentation now say
+  so and point at `Dir` and `os.OpenRoot(...).FS()`.
+
+- **OPTIONS and 405 answers skip a route's guards and rate limit, and the
+  documentation now says what that discloses.** They are answered from the
+  route table alone, as `net/http.ServeMux` does, so an unauthenticated client
+  learns which paths exist and which methods they take, and never a route's
+  data. Middleware installed with `App.Use` still covers them; put a guard or
+  a limit there when the existence of a path is itself a secret.
+
+- **A decoded path parameter can contain `/`, `..` and NUL.** A wildcard value
+  is percent-decoded once, so `/files/a%2F..%2Fb` binds `a/../b`. The route
+  documentation says to validate one before using it as a file name.
+
+- An event stream has no maximum lifetime: the write timeout bounds one write,
+  the keepalive bounds silence, and a client that keeps reading holds its
+  stream and its slot until the handler returns. `SSEStream` now says so, and
+  how a handler sets a ceiling of its own.
+
+### Known limits
+
+The latest review found these and left them, each with the reason.
+
+- The document still emits no `securitySchemes` or `security`: a guard is a
+  function the framework can run but not read, so it does not know whether it
+  wants a bearer token, an API key or a cookie. `Document` says so.
+- Every non-pointer body member is still listed `required`, a statement about
+  the shape of the Go type; the decoder accepts an absent member and only a
+  `Required()` rule refuses it. `Document` says so.
+- A `Unique()` on an element type that cannot be keyed still needs a `MaxItems`
+  bound; no build error demands one.
 
 ## [0.2.7] - 2026-09-03
 

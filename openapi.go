@@ -450,6 +450,14 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		body := builder.bodySchema(rt.plan)
 		builder.applyBodyDefaults(body, rt.plan.body.defaults)
 		builder.applyBodyConstraints(body, constraints, elements, true)
+		for _, nested := range rt.nestedModelsForDocs() {
+			// A nested model's rules land on the component of its type, which
+			// is where a reference to it leads. One that was described inline,
+			// as an anonymous struct is, has no component to carry them.
+			if ref, described := builder.byType[nested.typ]; described {
+				builder.applyBodyConstraints(ref, nested.constraints, nested.elements, true)
+			}
+		}
 		op.RequestBody = &RequestBody{
 			Required: rt.plan.body.required,
 			Content:  map[string]MediaType{"application/json": {Schema: body}},

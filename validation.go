@@ -899,6 +899,83 @@ func (p *bindPlan) elementConstraints() map[string]validate.Constraints {
 	return out
 }
 
+// nestedModelDoc is what the rules of a model nested in another demand of its
+// fields, for the schema that describes the nested type.
+type nestedModelDoc struct {
+	typ         reflect.Type
+	constraints map[string]validate.Constraints
+	elements    map[string]validate.Constraints
+}
+
+// describeNestedModels reports the rules of every model the input nests, and
+// of every model those nest in turn, found the way the compile-time check finds
+// them: by running Validate against a zero value and noting each Nested call.
+//
+// A model nested once per element of a collection is not among them, since a
+// zero value has no elements to nest, and neither is one nested only under a
+// condition. What is described is what the schema of a single nested object
+// can say, which is what a client needs to build one.
+func (p *bindPlan) describeNestedModels() []nestedModelDoc {
+	if p.validation == nil {
+		return nil
+	}
+	var out []nestedModelDoc
+	seen := map[reflect.Type]bool{p.typ: true}
+	var walk func(typ reflect.Type, plan *validationPlan)
+	walk = func(typ reflect.Type, plan *validationPlan) {
+		scratch := reflect.New(typ)
+		model, ok := scratch.Interface().(Validatable)
+		if !ok {
+			// coverage: only a type that implements Validatable is recorded.
+			return
+		}
+		v := &Validation{plan: plan, base: scratch.Pointer(), size: typ.Size(), value: scratch.Elem(), dry: &dryRun{}}
+		model.Validate(v)
+		for _, nested := range v.dry.nested {
+			if seen[nested] {
+				continue
+			}
+			seen[nested] = true
+			nestedPlan := planForType(nested)
+			doc := nestedModelDoc{typ: nested}
+			doc.constraints, doc.elements = describeRules(nested, nestedPlan)
+			out = append(out, doc)
+			walk(nested, nestedPlan)
+		}
+	}
+	walk(p.typ, p.validation)
+	return out
+}
+
+// describeRules runs the Validate of a model type against a zero value and
+// reports the constraints of its fields and of the elements of its collections.
+func describeRules(typ reflect.Type, plan *validationPlan) (constraints, elements map[string]validate.Constraints) {
+	scratch := reflect.New(typ)
+	model, ok := scratch.Interface().(Validatable)
+	if !ok {
+		// coverage: only a type that implements Validatable is recorded.
+		return nil, nil
+	}
+	v := &Validation{plan: plan, base: scratch.Pointer(), size: typ.Size(), value: scratch.Elem()}
+	model.Validate(v)
+
+	constraints = map[string]validate.Constraints{}
+	elements = map[string]validate.Constraints{}
+	for _, rules := range v.rules {
+		name, _ := v.describe(rules.Target(), rules.Label())
+		if name == "" {
+			continue
+		}
+		constraints[name] = rules.Describe()
+		if describer, ok := rules.(interface{ DescribeElement() validate.Constraints }); ok {
+			if c := describer.DescribeElement(); !c.IsZero() {
+				elements[name] = c
+			}
+		}
+	}
+	return constraints, elements
+}
+
 // constraintsForDocs reports the field constraints for the OpenAPI document,
 // or nothing when the route skips validation, because a document should
 // describe what the route actually enforces.
@@ -907,6 +984,14 @@ func (rt *Route) constraintsForDocs() map[string]validate.Constraints {
 		return nil
 	}
 	return rt.plan.describeConstraints()
+}
+
+// nestedModelsForDocs reports the rules of the models the input nests.
+func (rt *Route) nestedModelsForDocs() []nestedModelDoc {
+	if rt.skipValidation {
+		return nil
+	}
+	return rt.plan.describeNestedModels()
 }
 
 // elementConstraintsForDocs reports the constraints on collection elements.

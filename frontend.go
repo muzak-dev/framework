@@ -357,32 +357,13 @@ func (f *frontend) admit(c *Context) error {
 			return err
 		}
 	}
-	if err := resolveInheritedProviders(c, f.providers); err != nil {
+	if err := resolveProviders(c, f.providers); err != nil {
 		return err
 	}
 	if limits != nil && limits.afterDependencies {
 		if err := limits.check(c); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// resolveInheritedProviders runs every provider a mount or the documentation
-// inherited, outermost first, recording each value on the request, and stops
-// at the first error.
-//
-// Every provider runs, not one per type. Nothing served here has a handler
-// that could prefer an inner provider's value, so what is left to decide is
-// which verdicts count, and counting every one is the choice that cannot let
-// a request through that some router meant to stop.
-func resolveInheritedProviders(c *Context, providers []*provider) error {
-	for _, p := range providers {
-		v, err := p.get(c)
-		if err != nil {
-			return err
-		}
-		c.deps = append(c.deps, depValue{typ: p.typ, val: v})
 	}
 	return nil
 }

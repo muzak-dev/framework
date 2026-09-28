@@ -295,7 +295,7 @@ func (a *App) serveGuardedAsset(as *asset, w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	if err := resolveInheritedProviders(c, providers); err != nil {
+	if err := resolveProviders(c, providers); err != nil {
 		a.fail(c, err)
 		return
 	}

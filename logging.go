@@ -87,6 +87,11 @@ const (
 // "api_key" and "apikey" are all caught. The list exists because credentials
 // reach logs by accident far more often than by design, most often through an
 // attribute carrying a whole header map or request struct.
+//
+// A key names a group as well as a single value. A group whose key matches,
+// whether it was built with [slog.Group], produced by a [slog.LogValuer], or
+// opened with [slog.Logger.WithGroup], has every value inside it redacted, in
+// the JSON format and the console format alike.
 var DefaultRedactedKeys = []string{
 	"authorization",
 	"proxy-authorization",
@@ -251,10 +256,29 @@ func (r *redactor) shouldRedact(key string) bool {
 	return ok
 }
 
+// anyRedacted reports whether any of the enclosing group names carries a
+// secret, which makes every value inside the group one.
+func (r *redactor) anyRedacted(groups []string) bool {
+	for _, group := range groups {
+		if r.shouldRedact(group) {
+			return true
+		}
+	}
+	return false
+}
+
 // replaceAttr is the slog.HandlerOptions hook that applies redaction to the
 // JSON handler.
-func (r *redactor) replaceAttr(_ []string, a slog.Attr) slog.Attr {
-	if r.shouldRedact(a.Key) {
+//
+// slog never passes a group to this hook: it resolves a [slog.LogValuer],
+// and when the result is a group it descends into it and passes each member
+// instead, with the group's name in groups. Checking the key alone therefore
+// let slog.Group("credentials", ...) and a LogValuer under "authorization"
+// write every value in full. The enclosing names are checked as well, which
+// covers a group opened with WithGroup too, and a match hides each member's
+// value, so the group's shape is still logged but nothing inside it is.
+func (r *redactor) replaceAttr(groups []string, a slog.Attr) slog.Attr {
+	if r.shouldRedact(a.Key) || r.anyRedacted(groups) {
 		return slog.String(a.Key, RedactedPlaceholder)
 	}
 	return a
@@ -301,6 +325,9 @@ type consoleHandler struct {
 	scope    string
 	preAttrs []byte
 	groups   []string
+	// sealed reports that a group opened with WithGroup carries a name that
+	// is redacted, so every value logged inside it is.
+	sealed bool
 }
 
 // newConsoleHandler resolves the colour decision once and returns a ready
@@ -354,6 +381,7 @@ func (h *consoleHandler) WithGroup(name string) slog.Handler {
 	}
 	clone := h.clone()
 	clone.groups = append(clone.groups, name)
+	clone.sealed = h.sealed || h.redact.shouldRedact(name)
 	return clone
 }
 
@@ -370,6 +398,7 @@ func (h *consoleHandler) clone() *consoleHandler {
 		scope:    h.scope,
 		preAttrs: slices.Clip(h.preAttrs),
 		groups:   slices.Clip(h.groups),
+		sealed:   h.sealed,
 	}
 }
 
@@ -501,6 +530,14 @@ func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, groups []string) []
 		if len(attrs) == 0 {
 			return buf
 		}
+		if a.Key != "" && h.redact.shouldRedact(a.Key) {
+			// The check has to come before the descent: once inside, only
+			// the members' own keys would be looked at, and a group named
+			// "credentials" holding "user" and "pass" would be written in
+			// full. The whole group is replaced, which also keeps the
+			// names of its members out of the line.
+			return h.appendRedactedKey(buf, a.Key, groups)
+		}
 		nested := groups
 		if a.Key != "" {
 			nested = append(slices.Clip(groups), a.Key)
@@ -511,6 +548,12 @@ func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, groups []string) []
 		return buf
 	}
 
+	buf = h.appendKey(buf, a.Key, groups)
+	return h.appendValue(buf, a.Key, a.Value)
+}
+
+// appendKey writes the " group.key=" part of a pair.
+func (h *consoleHandler) appendKey(buf []byte, key string, groups []string) []byte {
 	buf = append(buf, ' ', ' ')
 	if h.color {
 		buf = append(buf, ansiDim...)
@@ -519,18 +562,23 @@ func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, groups []string) []
 		buf = appendConsoleEscaped(buf, g)
 		buf = append(buf, '.')
 	}
-	buf = appendConsoleEscaped(buf, a.Key)
+	buf = appendConsoleEscaped(buf, key)
 	buf = append(buf, '=')
 	if h.color {
 		buf = append(buf, ansiReset...)
 	}
-	return h.appendValue(buf, a.Key, a.Value)
+	return buf
+}
+
+// appendRedactedKey writes a pair whose value, a whole group, is redacted.
+func (h *consoleHandler) appendRedactedKey(buf []byte, key string, groups []string) []byte {
+	return append(h.appendKey(buf, key, groups), RedactedPlaceholder...)
 }
 
 // appendValue writes an attribute value, quoting it when it contains anything
 // that would make the key=value pair ambiguous.
 func (h *consoleHandler) appendValue(buf []byte, key string, v slog.Value) []byte {
-	if h.redact.shouldRedact(key) {
+	if h.sealed || h.redact.shouldRedact(key) {
 		return append(buf, RedactedPlaceholder...)
 	}
 	switch v.Kind() {

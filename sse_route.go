@@ -122,7 +122,9 @@ type SSEOptions struct {
 	// this many of them.
 	//
 	// The address used is the one [Context.ClientIP] resolves; see
-	// [ClientIPOptions] to configure it behind a proxy. Like MaxStreams, this
+	// [ClientIPOptions] to configure it behind a proxy. An IPv4 address is
+	// counted exactly and an IPv6 address by its /64, for the reason given on
+	// [WSOptions.MaxConnectionsPerIP]. Like MaxStreams, this
 	// may only be set on the application, because the dimension it bounds is
 	// a client's share of the process, not of one route: a router or a route
 	// that sets it is refused when the application is built. A negative

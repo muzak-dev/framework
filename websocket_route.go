@@ -150,7 +150,10 @@ type WSOptions struct {
 	//
 	// The address used is the one [Context.ClientIP] resolves, the same
 	// spoof-resistant resolution the rate limiter's default [IPTracker] uses;
-	// see [ClientIPOptions] to configure it behind a proxy. Like
+	// see [ClientIPOptions] to configure it behind a proxy. An IPv4 address
+	// is counted exactly and an IPv6 address by its /64, because a client
+	// holding a /64 can open each connection from a different address in it
+	// and would otherwise get a fresh allowance from every one. Like
 	// MaxConnections, this may only be set on the application, because the
 	// dimension it bounds is a client's share of the process, not of one
 	// route: a router or a route that sets it is refused when the

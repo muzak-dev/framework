@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,7 +22,25 @@ import (
 // isHTTPSURL reports whether a value is an absolute https URL with a host.
 func isHTTPSURL(value string) bool {
 	parsed, err := url.Parse(value)
-	return err == nil && strings.EqualFold(parsed.Scheme, "https") && parsed.Host != ""
+	return err == nil && strings.EqualFold(parsed.Scheme, "https") && parsed.Host != "" && isSoundURL(value, parsed)
+}
+
+// isSoundURL reports whether an absolute URL that parsed is one a person could
+// have meant. url.Parse checks the syntax of a port and not its value, so
+// "http://host:99999/" parses, and it passes any character through that renders
+// as nothing or as something else: a bidirectional override in a host reads as
+// a different name, and a zero-width character makes two addresses that look
+// the same differ. Neither is a URL anyone types on purpose, and both are what
+// a lookalike address is made of.
+func isSoundURL(raw string, parsed *url.URL) bool {
+	if hasHiddenRune(raw) {
+		return false
+	}
+	if port := parsed.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		return err == nil && n <= 65535
+	}
+	return true
 }
 
 // isURLWithScheme reports whether a value is an absolute URL using one of the
@@ -41,7 +60,7 @@ func isURLWithScheme(value string, schemes []string) bool {
 			break
 		}
 	}
-	return permitted && (parsed.Host != "" || parsed.Opaque != "")
+	return permitted && (parsed.Host != "" || parsed.Opaque != "") && isSoundURL(value, parsed)
 }
 
 // isHostname reports whether a value is a valid DNS hostname.
@@ -124,13 +143,35 @@ func isMAC(value string) bool {
 	return err == nil
 }
 
-// isBlank reports whether a value is nothing but whitespace.
+// isBlank reports whether a value is nothing but whitespace, or characters that
+// render as whitespace.
 //
 // It is the check a presence rule cannot make. Required rejects the empty
 // string, and a field of three spaces is not empty, so it satisfies Required
-// while carrying nothing a person would call a value.
+// while carrying nothing a person would call a value. Neither is a field of
+// zero-width spaces, a Hangul filler or a braille blank, which unicode.IsSpace
+// does not count as whitespace and which look the same as a field left empty.
 func isBlank(value string) bool {
-	return strings.TrimSpace(value) == ""
+	for _, r := range value {
+		if !unicode.IsSpace(r) && !isInvisible(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// isInvisible reports whether a character draws nothing: a control or format
+// character, a separator, or one of the letters and symbols whose glyph is
+// blank by design.
+func isInvisible(r rune) bool {
+	switch r {
+	case 0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800:
+		// The Hangul choseong and jungseong fillers, the halfwidth Hangul
+		// filler and the braille pattern blank: categories Lo and So, so no
+		// category test finds them.
+		return true
+	}
+	return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zs, unicode.Zl, unicode.Zp)
 }
 
 // hasControl reports whether a value holds a control character.
@@ -253,9 +294,43 @@ func isHexColour(value string) bool {
 }
 
 // isBase64 reports whether a value decodes as standard base64.
+//
+// The decoder skips a carriage return and a line feed wherever they fall, so
+// "aGk=\r\n" decodes, and a value approved here would carry a line break into
+// whatever it is written to next. The format the document names, byte, has
+// none.
 func isBase64(value string) bool {
+	if strings.ContainsAny(value, "\r\n") {
+		return false
+	}
 	_, err := base64.StdEncoding.DecodeString(value)
 	return err == nil
+}
+
+// isCanonicalUUID reports whether a value is a UUID in the 8-4-4-4-12 form,
+// which is the only spelling the document's uuid format describes.
+//
+// A parser is generous, and reads a URN, braces and thirty-two bare digits as
+// the same identifier, so a value approved in any of them is one UUID under
+// several strings. A set or a key built on the string then holds it more than
+// once, and a check that the identifier is new passes for a spelling it has
+// already seen.
+func isCanonicalUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return false
+			}
+		case !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'):
+			return false
+		}
+	}
+	return true
 }
 
 // isJSON reports whether a value is a well-formed JSON document.

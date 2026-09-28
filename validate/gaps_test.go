@@ -2,6 +2,7 @@ package validate
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -172,4 +173,40 @@ func TestOptionalCollectionSkipsItsChecks(t *testing.T) {
 	if err := Value[string]().Equal("x").Check(""); err != nil {
 		t.Errorf("Check on an optional value = %v, want it accepted", err)
 	}
+}
+
+// A value a rule approves is used as it stands, so a rule is no better than the
+// characters it lets a "valid" value carry.
+func TestFormatsRejectWhatOnlyLooksValid(t *testing.T) {
+	t.Parallel()
+	const (
+		canonical = "0611f4b2-2f0a-4b57-9c1a-6e6a2e2f9b31"
+		bidi      = "\u202e"
+		zeroWidth = "\u200b"
+	)
+
+	accepts(t, "isBase64", isBase64,
+		[]string{"aGk=", "aGVsbG8="},
+		[]string{"aGk=\r\n", "aG\nk=", "aGk=\n", "\raGk="})
+
+	accepts(t, "isCanonicalUUID", isCanonicalUUID,
+		[]string{canonical, strings.ToUpper(canonical)},
+		[]string{"urn:uuid:" + canonical, "{" + canonical + "}", strings.ReplaceAll(canonical, "-", ""),
+			canonical + "\n", "0611f4b2-2f0a-4b57-9c1a-6e6a2e2f9b3", "0611f4b2-2f0a-4b57-9c1a-6e6a2e2f9b3g"})
+
+	accepts(t, "URL", func(v string) bool { return String().URL().Check(v) == nil },
+		[]string{"https://example.com/", "http://example.com:8080/x", "https://[::1]:443/", "http://example.com:65535/"},
+		[]string{"http://[::1]:99999/", "http://example.com:65536/", "https://example.com:99999",
+			"http://ex" + bidi + "ample.com/", "http://example.com/a" + zeroWidth + "b", "https://example.com/" + bidi})
+	accepts(t, "HTTPS", func(v string) bool { return String().HTTPS().Check(v) == nil },
+		[]string{"https://example.com:8443/"},
+		[]string{"https://example.com:99999/", "https://exa" + zeroWidth + "mple.com/"})
+	accepts(t, "URLWithSchemes", func(v string) bool { return String().URLWithSchemes("ftp").Check(v) == nil },
+		[]string{"ftp://example.com:21/"},
+		[]string{"ftp://example.com:70000/", "ftp://example.com/a" + bidi})
+
+	// A field of nothing that renders is as blank as one of spaces.
+	accepts(t, "isBlank", isBlank,
+		[]string{"", " ", "\u200b", "\u200d\u200b", "\u3164", " \u200b\u00a0\u2800 ", "\u115f\u1160", "\ufeff", "\u2028"},
+		[]string{"a", "a\u200b", "\u200ba", "0", "\u4f60"})
 }

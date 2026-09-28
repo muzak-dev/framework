@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
-	"uuid"
 )
 
 // StringRules collects the transforms and checks applied to a string field.
@@ -227,7 +226,12 @@ func (r *StringRules) URL() *StringRules {
 	return r.add(step[string]{kind: kindURL})
 }
 
-// UUID requires a value that parses as a UUID in any of its usual spellings.
+// UUID requires a value in the canonical 8-4-4-4-12 form, the one the
+// generated document's uuid format describes, in either case.
+//
+// A URN, braces and bare digits are not accepted. They name the same
+// identifier, which is the trouble: a value kept as the client wrote it would
+// hold one UUID under several strings.
 func (r *StringRules) UUID() *StringRules {
 	return r.add(step[string]{kind: kindUUID})
 }
@@ -428,7 +432,8 @@ func (r *StringRules) MatchesNot(pattern string) *StringRules {
 	})
 }
 
-// NotBlank rejects a value that is nothing but whitespace.
+// NotBlank rejects a value that is nothing but whitespace, or characters that
+// draw nothing, such as a zero-width space.
 //
 // It is the check [StringRules.Required] cannot make. Required rejects the
 // empty string, and a field of three spaces is not empty, so it satisfies
@@ -732,11 +737,11 @@ func applyStringStep(s *step[string], value *string) error {
 		}
 	case kindURL:
 		parsed, err := url.Parse(*value)
-		if err != nil || parsed.Host == "" || !isHTTPScheme(parsed.Scheme) {
+		if err != nil || parsed.Host == "" || !isHTTPScheme(parsed.Scheme) || !isSoundURL(*value, parsed) {
 			return errors.New("must be a valid absolute http or https URL")
 		}
 	case kindUUID:
-		if _, err := uuid.Parse(*value); err != nil {
+		if !isCanonicalUUID(*value) {
 			return errors.New("must be a valid UUID")
 		}
 	case kindMatches:

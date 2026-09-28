@@ -497,6 +497,26 @@ func TestTruncateReason(t *testing.T) {
 	}
 }
 
+func TestTruncateReasonRepairsInvalidUTF8(t *testing.T) {
+	t.Parallel()
+	// A reason a caller forwarded from somewhere else may not be UTF-8, and a
+	// close frame carrying one obliges the peer to fail the connection rather
+	// than read the status, so it is repaired on the way out.
+	for _, reason := range []string{"bad \xff byte", "\xc3", strings.Repeat("\xff", MaxCloseReason)} {
+		got := TruncateReason(reason)
+		if !utf8.ValidString(got) {
+			t.Errorf("TruncateReason(%q) = %q, want valid UTF-8", reason, got)
+		}
+		payload := AppendClose(nil, StatusNormalClosure, reason)
+		if len(payload) > MaxControlPayload {
+			t.Errorf("AppendClose(%q) produced %d bytes, more than a control frame can carry", reason, len(payload))
+		}
+		if _, _, err := ParseClose(payload); err != nil {
+			t.Errorf("ParseClose(AppendClose(%q)) = %v, want a frame a peer accepts", reason, err)
+		}
+	}
+}
+
 func FuzzReadHeader(f *testing.F) {
 	for _, seed := range [][]byte{
 		{0x81, 0x00},

@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -356,7 +357,14 @@ func AppendClose(dst []byte, status uint16, reason string) []byte {
 
 // TruncateReason shortens a close reason to what a control frame can carry,
 // cutting on a rune boundary so that the result stays valid UTF-8.
+//
+// A reason that is not valid UTF-8 to begin with has each invalid byte replaced
+// by U+FFFD first, because a peer must fail a connection whose close frame
+// carries one, which would cost it the status the frame exists to deliver.
 func TruncateReason(reason string) string {
+	if !utf8.ValidString(reason) {
+		reason = strings.ToValidUTF8(reason, "\uFFFD")
+	}
 	if len(reason) <= MaxCloseReason {
 		return reason
 	}

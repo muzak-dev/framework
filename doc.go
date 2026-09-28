@@ -515,10 +515,12 @@
 //	app.Frontend("/", muzak.FrontendOptions{FS: assets, Dir: "dist"})
 //
 // Nothing is rendered on the server and nothing is built here. A directory is
-// never listed, a symbolic link cannot lead out of the build output, a method
-// other than GET or HEAD on a file is refused with 405 rather than served, and
-// a directory that does not exist is reported when the application is built
-// rather than on the first request.
+// never listed, a symbolic link cannot lead out of the build output, a path
+// naming a dotfile such as /.env or /.git/config answers 404 unless
+// [FrontendOptions.AllowDotfiles] is set (a leading /.well-known/ is served),
+// a method other than GET or HEAD on a file is refused with 405 rather than
+// served, and a directory that does not exist is reported when the
+// application is built rather than on the first request.
 //
 // [Router.Static] mounts a directory of files on the same machinery, without
 // the part that makes a frontend work:

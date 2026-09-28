@@ -3,6 +3,8 @@ package muzak
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -201,5 +203,108 @@ func TestMountRateLimitMisconfiguration(t *testing.T) {
 	err := conflict.Build()
 	if err == nil || !strings.Contains(err.Error(), "frontend /ui") || !strings.Contains(err.Error(), `quota "shared"`) {
 		t.Errorf("build error = %v, want the conflicting quota reported against the mount", err)
+	}
+}
+
+// dotfileTree writes a build output with the files that end up beside one by
+// accident, and returns its directory.
+func dotfileTree(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"index.html":                  "<p>app</p>",
+		".env":                        "DB_PASSWORD=hunter2",
+		".git/config":                 "[remote \"origin\"]\nurl=git@example.com:corp/secret.git",
+		"assets/.htpasswd":            "admin:$apr1$hash",
+		"assets/app.js":               "export {}",
+		".well-known/security.txt":    "Contact: mailto:security@example.com",
+		".well-known/.secret/key.pem": "PRIVATE",
+	} {
+		full := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestMountRefusesDotfiles is the regression test for a mount that served
+// whatever the directory held, /.env and /.git/config included. A dotfile
+// answers 404, without the single page application fallback standing in for
+// it, while /.well-known/ keeps working.
+func TestMountRefusesDotfiles(t *testing.T) {
+	t.Parallel()
+	dir := dotfileTree(t)
+	app := New(quietOptions())
+	app.Frontend("/", FrontendOptions{Dir: dir})
+	app.Static("/static", StaticOptions{Dir: dir})
+	mustBuild(t, app)
+
+	for _, target := range []string{
+		"/.env", "/%2Eenv", "/.git/config", "/.git/", "/.git", "/assets/.htpasswd",
+		"/.well-known/.secret/key.pem", "/assets/.missing",
+		"/static/.env", "/static/assets/.htpasswd", "/static/.git/config",
+	} {
+		for _, method := range []string{"GET", "HEAD", "POST"} {
+			req := httptest.NewRequest(method, target, nil)
+			req.Header.Set("Accept", "text/html")
+			rec := doRequest(t, app, req)
+			assertStatus(t, rec, http.StatusNotFound)
+			if body := rec.Body.String(); strings.Contains(body, "hunter2") || strings.Contains(body, "secret.git") || strings.Contains(body, "$apr1") ||
+				strings.Contains(body, "<p>app</p>") || strings.Contains(body, "PRIVATE") {
+				t.Fatalf("%s %s answered with %q", method, target, body)
+			}
+		}
+	}
+	for _, target := range []string{"/.well-known/security.txt", "/static/.well-known/security.txt", "/assets/app.js"} {
+		assertStatus(t, do(t, app, "GET", target), http.StatusOK)
+	}
+	// An ordinary miss still gets the fallback it always did.
+	req := httptest.NewRequest("GET", "/some/page", nil)
+	req.Header.Set("Accept", "text/html")
+	assertStatus(t, doRequest(t, app, req), http.StatusOK)
+}
+
+// TestMountAllowDotfiles checks the opt-in on both kinds of mount.
+func TestMountAllowDotfiles(t *testing.T) {
+	t.Parallel()
+	dir := dotfileTree(t)
+	app := New(quietOptions())
+	app.Frontend("/", FrontendOptions{Dir: dir, AllowDotfiles: true})
+	app.Static("/static", StaticOptions{Dir: dir, AllowDotfiles: true})
+	mustBuild(t, app)
+	for _, target := range []string{"/.env", "/.git/config", "/static/assets/.htpasswd"} {
+		assertStatus(t, do(t, app, "GET", target), http.StatusOK)
+	}
+	// Allowing dotfiles is not allowing traversal: ".." is still no file.
+	assertStatus(t, do(t, app, "GET", "/static/%2E%2E/index.html"), http.StatusNotFound)
+}
+
+func TestNamesDotfile(t *testing.T) {
+	t.Parallel()
+	for relative, want := range map[string]bool{
+		"":                          false,
+		"index.html":                false,
+		"a/b.c/d.txt":               false,
+		".env":                      true,
+		"a/.env":                    true,
+		".git/config":               true,
+		"a\\.env":                   true,
+		"..":                        true,
+		".well-known":               false,
+		".well-known/x.txt":         false,
+		".well-known/.x":            true,
+		"a/.well-known/x":           true,
+		".well-knownx/y":            true,
+		"assets/":                   false,
+		"assets/v1.2/app.js":        false,
+		".well-known\\security.txt": false,
+	} {
+		if got := namesDotfile(relative); got != want {
+			t.Errorf("namesDotfile(%q) = %v, want %v", relative, got, want)
+		}
 	}
 }

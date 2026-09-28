@@ -71,6 +71,20 @@ type FrontendOptions struct {
 	// built, for a directory that something else fills in later. A request
 	// arriving before that happens fails with 500 and the reason logged.
 	SkipCheck bool
+
+	// AllowDotfiles serves files and directories whose name begins with a
+	// dot. By default a request naming one anywhere in its path is answered
+	// 404, as though it were not there, and the fallback is not offered in its
+	// place; a leading ".well-known" directory is the one exception, because
+	// that is where a site publishes files meant to be found.
+	//
+	// Relaxing it costs whatever the directory holds under such names. A
+	// build output or a deployment directory is where a .env, a .git
+	// directory, an .htpasswd or an editor's swap file ends up by accident,
+	// and serving one publishes credentials and source history to anyone who
+	// guesses the name, which every scanner does. Turn it on only for a
+	// directory whose every dotfile is meant to be public.
+	AllowDotfiles bool
 }
 
 // frontend is one resolved frontend mount: a path, the filesystem behind it,
@@ -139,6 +153,11 @@ type frontend struct {
 //	ui := muzak.NewRouter()
 //	ui.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
 //	app.Include(ui, muzak.WithPrefix("/app"))
+//
+// A path naming a file or directory that begins with a dot, such as /.env or
+// /.git/config, answers 404 and is not given the fallback, since a build
+// output is where such files end up by accident; a leading /.well-known/ is
+// served as usual. See [FrontendOptions.AllowDotfiles].
 //
 // Problems with the mount, including a directory that does not exist, are
 // reported when the application is built rather than on the first request.
@@ -272,6 +291,13 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 		a.fail(c, err)
 		return
 	}
+	if !f.opts.AllowDotfiles && namesDotfile(relative) {
+		// Answered as though nothing were there, and without the fallback: a
+		// 200 carrying the application document for /.env reads to a scanner
+		// as a hit and to a person as the file being served.
+		a.fail(c, frontendNotFound(c.r))
+		return
+	}
 
 	files, err := f.fsys()
 	if err != nil {
@@ -361,6 +387,28 @@ func (a *App) rateLimitOwners(mounts []*frontend) []*Route {
 		owners = append(owners, mount.limits)
 	}
 	return owners
+}
+
+// namesDotfile reports whether any segment of a path relative to a mount
+// begins with a dot, other than a leading ".well-known".
+//
+// Both separators count, because a filesystem on Windows reads a backslash as
+// one, and a name hidden behind it would otherwise pass as part of an
+// innocent segment. The path is walked in place rather than split, so the
+// check allocates nothing.
+func namesDotfile(relative string) bool {
+	start := 0
+	for i := 0; i <= len(relative); i++ {
+		if i < len(relative) && relative[i] != '/' && relative[i] != '\\' {
+			continue
+		}
+		segment := relative[start:i]
+		if strings.HasPrefix(segment, ".") && (start != 0 || segment != ".well-known") {
+			return true
+		}
+		start = i + 1
+	}
+	return false
 }
 
 // errFrontendUnavailable stands in for a frontend whose files cannot be read,
@@ -552,6 +600,12 @@ type StaticOptions struct {
 	// SkipCheck stops the directory being verified when the application is
 	// built, for one that something else fills in later.
 	SkipCheck bool
+
+	// AllowDotfiles serves files and directories whose name begins with a
+	// dot, which are otherwise answered 404 except under a leading
+	// ".well-known" directory. See [FrontendOptions.AllowDotfiles] for what
+	// relaxing it costs.
+	AllowDotfiles bool
 }
 
 // Static serves a directory of files at path.
@@ -565,9 +619,10 @@ type StaticOptions struct {
 // browser.
 //
 // Everything else matches a frontend mount. Routes are matched first, the rate
-// limit, guards and providers of the router apply, a directory is never listed, a symbolic link
-// cannot lead out of the directory, and a method other than GET or HEAD on a
-// file that exists is answered 405 rather than served.
+// limit, guards and providers of the router apply, a directory is never
+// listed, a dotfile is not served unless [StaticOptions.AllowDotfiles] says
+// so, a symbolic link cannot lead out of the directory, and a method other
+// than GET or HEAD on a file that exists is answered 405 rather than served.
 func (r *Router) Static(mountPath string, opts StaticOptions) {
 	if !strings.HasPrefix(mountPath, "/") {
 		r.errs = append(r.errs, fmt.Errorf("muzak: static files at %q: path must begin with %q", mountPath, "/"))
@@ -582,10 +637,11 @@ func (r *Router) Static(mountPath string, opts StaticOptions) {
 		index: opts.Index,
 		kind:  "static files",
 		opts: FrontendOptions{
-			Dir:        opts.Dir,
-			FS:         opts.FS,
-			NoFallback: true,
-			SkipCheck:  opts.SkipCheck,
+			Dir:           opts.Dir,
+			FS:            opts.FS,
+			NoFallback:    true,
+			SkipCheck:     opts.SkipCheck,
+			AllowDotfiles: opts.AllowDotfiles,
 		},
 	})
 }

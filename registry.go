@@ -190,6 +190,20 @@ func (g *liveRegistry[T]) shutdown(timeout time.Duration, end func(T)) int {
 	return len(open)
 }
 
+// reopen makes a registry that a shutdown closed admit entries again, for an
+// application that is run a second time.
+//
+// The draining flag is otherwise one-way, which is right for the run that set
+// it, since nothing may join a shutdown already under way; but the registry
+// belongs to the application rather than to one run of it, and one left
+// draining would answer every connection and stream of the next run with a 503
+// for a shutdown that finished long ago.
+func (g *liveRegistry[T]) reopen() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.draining = false
+}
+
 // errConnectionLimitNoAddress reports a request that cannot be attributed to
 // an address once a per-client connection limit needs one to check against.
 //

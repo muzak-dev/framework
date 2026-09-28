@@ -340,6 +340,11 @@ func (a *App) listen(ctx context.Context, runner *serverRunner) (net.Listener, e
 	if err := a.Build(); err != nil {
 		return nil, err
 	}
+	// An application that was shut down and is being run again must admit
+	// WebSockets and event streams again; only a run in progress may refuse
+	// them for shutting down.
+	a.websockets.reopen()
+	a.streams.reopen()
 	// Components come up before the socket opens, so the first request can
 	// never reach a handler whose database pool is still dialling.
 	if err := a.StartLifecycle(runner.startCtx); err != nil {
@@ -461,7 +466,7 @@ func (a *App) servesTLS() bool {
 // Shutdown is safe to call more than once and from more than one goroutine;
 // only the first call does the work. Calling it on a server that was never
 // started returns nil. A run method that was serving returns once the
-// shutdown has finished.
+// shutdown has finished, after which the application may be run again.
 //
 // Called while a run method is still starting, before its socket is open,
 // Shutdown records the request, cancels the context the lifecycle components

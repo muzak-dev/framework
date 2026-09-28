@@ -9,8 +9,9 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
-This release is the result of an adversarial review of the framework, run as
-an attacker would against a service built on it. Every finding below was
+This release is the result of two rounds of adversarial review of the
+framework, run as an attacker would against a service built on it, the second
+of them also against the first round's fixes. Every finding below was
 reproduced with a test before it was fixed, and each of those tests is now a
 regression test. Several fixes tighten a default; each one is listed under
 **Changed** with its migration.
@@ -99,6 +100,85 @@ regression test. Several fixes tighten a default; each one is listed under
   a build error, and two spellings of one path (`/a`, `/%61`) conflict.
   Migration: write `%25` for a literal percent sign, and use a parameter for a
   value that may contain `/`.
+
+- **Validation reports at most 100 failures, and follows nested models at
+  most 32 levels deep.** A full report ends with a detail of kind
+  `too_many_problems` and stops evaluating, and a model nested past the limit
+  is refused as `too_deep`. The limits are `MaxValidationDetails` and
+  `MaxNestedDepth`. `Nested` now validates the model when it is called, so
+  code after it sees the nested model's transforms applied, and a model nested
+  per element is named by its position (`items[3].name`). Migration: read the
+  marker and resubmit to see further failures; a recursive model that must go
+  deeper bounds its own depth; clients matching field names match the indexed
+  ones.
+
+- **`Timezone()` accepts only zone names spelled as the IANA database spells
+  them.** Case variants, doubled or trailing slashes, `Local`, `posix/` and
+  `right/` names, and zones newer than tzdata 2026c are refused. Migration:
+  send canonical names.
+
+- **A 422 no longer quotes the client's value or a parser's own error.** A
+  rejected entry of a repeated parameter is named by position ("entry 2 must
+  be a valid integer"), and a failing `encoding.TextUnmarshaler` reads "is not
+  in the expected format" (`muzak.binding.format`). Migration: return an
+  `*HTTPError` from `UnmarshalText` to send your own wording.
+
+- **A urlencoded form body is bounded by `MaxBodySize` (1 MiB by default), not
+  `MaxUploadSize` (32 MiB).** Multipart bodies keep `MaxUploadSize`.
+  Migration: set `MaxBodySize` on a form route that takes larger urlencoded
+  bodies.
+
+- **Error responses drop the headers set for the response they replace, and
+  are sent with `Cache-Control: no-store`.** Content-Type, Content-Length,
+  Content-Disposition, Content-Encoding, Content-Range, ETag, Last-Modified,
+  Cache-Control and Expires are removed, and Content-Language is reset to the
+  request's locale. Vary, Retry-After, Allow, WWW-Authenticate, Set-Cookie and
+  security headers are kept. Migration: a custom `ErrorRenderer` sets any
+  header it wants.
+
+- **Routes and file mounts behind a guard or a request-scoped provider are
+  sent `Cache-Control: private, no-cache`.** A route keeps a value its handler
+  or a middleware set; a mount replaces one. A singleton alone does not count.
+  Event streams and WebSocket upgrades are unchanged. Migration: a handler
+  serving public data sets its own `Cache-Control`.
+
+- **A static mount serves HTML, SVG and other XML under
+  `Content-Security-Policy: sandbox`, and no mount guesses a type from
+  content.** A file with no extension or an unknown one is
+  `application/octet-stream`. Migration: set `StaticOptions.AllowActiveContent`
+  for a static site whose scripts must run, and give files an extension.
+
+- **The WebSocket and SSE per-client caps count an IPv6 client by its /56,
+  and the prefix is configurable.** New `ClientIPOptions.ConnectionIPv6Prefix`
+  (default 56) and `ConnectionIPv4Prefix` (default 32) are checked at build.
+  Migration: set `ConnectionIPv6Prefix: 64` to keep the previous grouping.
+
+- **`SSEDial` does not follow redirects.** A 3xx is refused and the response
+  returned with the error. Migration: dial the `Location` yourself if it is
+  trusted.
+
+- **Configuring an application after it was built panics.** `Use`,
+  `Options`, `Include`, route, WebSocket and SSE registration, and `Frontend`
+  and `Static` mounts after `Build`, `ServeHTTP`, `Document` or a run method
+  used to be dropped silently, so a guard added late left routes open.
+  Migration: make every configuration call before the first build.
+
+- **Shutdown is bounded by one `ShutdownTimeout` deadline, and lifecycle
+  `Stop` gets what remains.** The WebSocket, SSE and HTTP drains used to take a
+  full timeout each, and `Stop` had no deadline and could run under live
+  handlers. `Stop` now runs after in-flight handlers (hijacked ones included)
+  return or a short grace past the deadline ends, with at least one second;
+  `Run` returns once `Shutdown` has finished. Migration: make `Stop` honour its
+  context, or raise `ShutdownTimeout`.
+
+- **Log redaction matches keys that contain a sensitive term.** `db_password`,
+  `X-Api-Key`, `jwt` and `session_id` are now redacted, and `jwt`, `bearer`,
+  `signature` and `credential` join the defaults. A custom `RedactKeys` list is
+  matched the same way. Migration: rename a non-secret key containing a term
+  if it must be logged.
+
+- **The documentation counts against the application rate limit.** See
+  **Security**. Migration: exempt it with `SkipRateLimit`, or disable the docs.
 
 ### Security
 
@@ -205,6 +285,91 @@ regression test. Several fixes tighten a default; each one is listed under
 - **`json:"-"` on a located field no longer disables its binding.** The header
   or query value, its default and its required check were all dropped; the
   tag now only keeps the field out of the JSON body and schema.
+
+- **Validation work and output are bounded.** `Each`, or `Nested` called per
+  element, reported every failing element, so a 1 MiB body produced a 22 MB
+  422 and half a gigabyte of allocation; a recursive model nested 10,000 deep
+  cost a 300 MB report and gigabytes of allocation, and the pooled validator
+  kept the tree alive. See **Changed** for the limits.
+
+- **An event stream never writes into a response it has handed back.** A send
+  still encoding when the handler returned held the write lock; the stream
+  gave up after `WriteTimeout` and returned the response anyway, which crashed
+  the process or could write one client's event into the next request on the
+  connection.
+
+- **Static mounts no longer serve uploads as live pages.** An upload stored
+  without an extension was sniffed as `text/html`, and an `.svg` was served
+  inline, so client-written markup ran script on the API's origin.
+
+- **An error response can no longer be served as HTML or cached publicly.**
+  A handler that set `Content-Type: text/html` or a public `Cache-Control` and
+  then failed sent its JSON error, reflected input included, under those
+  headers.
+
+- **The documentation counts against the application rate limit.** Once the
+  docs ran the application's guards but not its rate limit, `/openapi.json`
+  could be used to guess the application's token without limit.
+
+- **A failing singleton no longer makes requests queue for it.** Each waiting
+  request retried in turn under a lock and ignored its own cancellation, so a
+  slow failure multiplied into queued latency and goroutines. One attempt is
+  in flight at a time, its waiters share its outcome and leave when their own
+  request ends, and only success is cached.
+
+- **Guarded responses are kept out of shared caches.** Guarded routes and file
+  mounts sent per-user JSON and files with no `Cache-Control`, so a CDN could
+  hand one user's response to another.
+
+- **A multipart form's temporary files are removed at the end of every
+  request, whoever parsed it.** A guard or handler reading the form through
+  `ctx.Request()` parsed it on a copy of the request that net/http's cleanup
+  never saw, and every such upload stayed on disk.
+
+- **A malformed form body is no longer written to the error log.** Its parse
+  error, which quoted the bad part header whole, was logged at ERROR, so a
+  1 MiB request wrote a 5 MB log line.
+
+- **`Timezone()` no longer grows a cache from client input**, and an unknown
+  name no longer costs a read of the zone database each time.
+
+- **A path is quoted at most 1 KiB long.** The 404 and 405 messages and the
+  access, error and panic logs cut a longer path or method, so a request of
+  invalid bytes can no longer write several times its size to the client and
+  the log store.
+
+- **`SSEDial` no longer sends credentials to a redirect's target.** It sent
+  custom headers such as `X-Api-Key` to another host, and `Authorization`
+  over an https-to-http downgrade.
+
+- **One IPv6 allocation can no longer take every WebSocket or SSE slot.** With
+  the caps at /64, a home /56 held 256 separate allowances.
+
+- **Log redaction covers groups.** A redacted key whose value was a group,
+  through `slog.Group`, a `LogValuer` or `WithGroup`, was logged in full.
+
+- **`secret:"true"` on an embedded config struct hides every field inside
+  it.** It was ignored, so a malformed value appeared in the startup error.
+
+- **A shutdown requested while the server is starting is honoured.** It
+  returned nil and the server came up anyway.
+
+- **A WebSocket handler's context ends with its connection.** A hijacked
+  connection's context was cancelled only when the handler returned, so a
+  handler waiting on it outlived its peer and the server's close at shutdown.
+
+- **Responses that depend on a request header say so in `Vary`.** Header and
+  media-type versioning now name the header (or `Accept`), and a frontend with
+  an SPA fallback sends `Vary: Accept`, so a cache cannot serve one variant in
+  place of another.
+
+- **On Windows, a mount refuses a path segment shaped like an 8.3 short name**
+  such as `/ENV~1`, which reached dotfiles and nested mounts by another name.
+
+- **SSE keepalives and WebSocket pong checks use the monotonic clock**, so a
+  wall-clock step cannot starve keepalives or close healthy connections.
+
+- **A 103 Early Hints no longer swallows the response after it.**
 
 ## [0.2.7] - 2026-09-03
 

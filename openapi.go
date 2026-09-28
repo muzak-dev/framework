@@ -300,6 +300,15 @@ func (d *Document) Marshal() ([]byte, error) {
 // Because it builds the application, call it only once every route, guard
 // and middleware is in place: configuring the application afterwards panics,
 // as it does after [App.Build].
+//
+// The document describes what the binder and the validation rules enforce, and
+// does not describe authentication. A guard is a function that Muzak can run
+// but not read, so it cannot say whether it wants a bearer token, an API key
+// or a session cookie, and no security scheme or security requirement is
+// emitted. Every member of a JSON body that is not a pointer and carries no
+// omitempty or omitzero is listed as required, which is a statement about the
+// shape of the Go type: the decoder itself accepts a body that leaves it out,
+// and only a Required rule turns its absence into a failure.
 func (a *App) Document() (*Document, error) {
 	if err := a.Build(); err != nil {
 		return nil, err

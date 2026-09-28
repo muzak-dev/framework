@@ -1,8 +1,11 @@
 package i18n
 
 import (
+	"fmt"
 	"sort"
 	"strings"
+
+	"muzak.dev/framework/internal/yaml"
 )
 
 // Backend supplies translations for a locale.
@@ -136,18 +139,37 @@ func (b *Simple) lookupEntry(locale, key string) (*entry, bool) {
 // The merge is by key rather than by file: a locale written across several
 // files, or an application's own translations laid over the framework's, add up
 // rather than replace one another. Only a leaf already present is overwritten.
+//
+// A tree that cannot be stored as one is refused, and the locale is left as it
+// was: see [flatten] for what that covers.
 func (b *Simple) Store(locale string, tree map[string]any) error {
-	existing, known := b.trees[locale]
-	if !known {
-		existing = map[string]any{}
-		b.trees[locale] = existing
+	merged := map[string]any{}
+	if existing, known := b.trees[locale]; known {
+		merged = cloneTree(existing)
 	}
-	mergeTree(existing, tree)
+	mergeTree(merged, tree)
 
 	flat := map[string]*entry{}
-	flatten("", existing, flat)
+	if err := flatten(locale, "", merged, flat, 0); err != nil {
+		return err
+	}
+	b.trees[locale] = merged
 	b.flat[locale] = flat
 	return nil
+}
+
+// cloneTree copies the namespaces of a tree, which is what a merge writes into.
+// Leaves and lists are shared, because nothing ever writes into one.
+func cloneTree(tree map[string]any) map[string]any {
+	out := make(map[string]any, len(tree))
+	for key, value := range tree {
+		if child, isMap := value.(map[string]any); isMap {
+			out[key] = cloneTree(child)
+			continue
+		}
+		out[key] = value
+	}
+	return out
 }
 
 // mergeTree folds one tree into another, joining namespaces rather than
@@ -168,35 +190,64 @@ func mergeTree(into, from map[string]any) {
 	}
 }
 
+// maxTreeDepth bounds how deeply a locale's translations may nest, which is the
+// bound the YAML reader already keeps to. A locale nests perhaps six levels.
+// JSON has no such bound of its own short of ten thousand, and every level
+// costs a dotted path holding every key above it, so a file of a few dozen
+// kilobytes that nests that deep is retained as many megabytes.
+const maxTreeDepth = yaml.MaxDepth
+
 // flatten records every node of a tree under its dotted path.
 //
 // Intermediate nodes are recorded as well as leaves, because a bulk lookup asks
 // for a namespace by name and a date format asks for a list of month names. The
 // cost is one map entry per node of a file that is read once.
-func flatten(prefix string, node map[string]any, into map[string]*entry) {
-	into[prefix] = &entry{value: node}
-	if forms, isPlural := pluralForms(node); isPlural {
-		into[prefix].plural = forms
+//
+// It refuses two trees, because neither has one meaning. One nests deeper than
+// [maxTreeDepth]. The other reaches a dotted path twice, as a key that itself
+// contains a dot ("a.b: one") next to a namespace that spells the same path
+// out (a: {b: two}): both are the key "a.b", a lookup can return only one, and
+// which one it was used to be decided by the order Go happened to range the map
+// in, so the same file answered differently after each restart.
+func flatten(locale, prefix string, node map[string]any, into map[string]*entry, depth int) error {
+	if depth > maxTreeDepth {
+		return fmt.Errorf("i18n: the translations of %q nest more than %d levels deep, at %q", locale, maxTreeDepth, prefix)
 	}
-	for key, value := range node {
+	if prefix != "" {
+		into[prefix] = &entry{value: node}
+		if forms, isPlural := pluralForms(node); isPlural {
+			into[prefix].plural = forms
+		}
+	}
+	// Sorted, so that when there is more than one collision the one reported
+	// is the same on every run.
+	keys := make([]string, 0, len(node))
+	for key := range node {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := node[key]
 		path := key
 		if prefix != "" {
 			path = prefix + "." + key
 		}
+		if _, taken := into[path]; taken {
+			return fmt.Errorf("i18n: the translations of %q reach the key %q twice, as a key that contains a dot and "+
+				"as nested keys; write it one way", locale, path)
+		}
 		switch child := value.(type) {
 		case map[string]any:
-			flatten(path, child, into)
+			if err := flatten(locale, path, child, into, depth+1); err != nil {
+				return err
+			}
 		case string:
 			into[path] = &entry{text: child, parts: compile(child), value: child}
 		default:
 			into[path] = &entry{value: value}
 		}
 	}
-	// The root is keyed by the empty string while it is being walked, which is
-	// not a key anything looks up.
-	if prefix == "" {
-		delete(into, "")
-	}
+	return nil
 }
 
 // pluralForms reports whether a namespace is a set of plural forms, and returns

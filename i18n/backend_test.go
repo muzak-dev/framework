@@ -2,6 +2,7 @@ package i18n
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -251,5 +252,106 @@ func TestBuiltinIsChainedByDefault(t *testing.T) {
 	}
 	if got := bare.T("en", "errors.messages.blank"); got != "translation missing: en.errors.messages.blank" {
 		t.Errorf("a store built without the built-in locale gave %q, want the marker", got)
+	}
+}
+
+// TestStoreRefusesAKeyReachedTwice is the regression test for a locale file
+// with a dotted key next to the namespace that spells the same path out. Both
+// are the key "a.b"; the one a lookup returned depended on the order Go ranged
+// the map in, so the same file answered differently after each restart, and
+// one translator's entry could silently shadow another's.
+func TestStoreRefusesAKeyReachedTwice(t *testing.T) {
+	t.Parallel()
+	for name, doc := range map[string]string{
+		"a dotted key and nested keys":  "en:\n  \"a.b\": flat\n  a:\n    b: nested\n",
+		"a dotted namespace and a leaf": "en:\n  \"a.b\":\n    c: flat\n  a:\n    b:\n      c: nested\n",
+		"a dotted key and a namespace":  "en:\n  \"a.b\": flat\n  a:\n    b:\n      c: nested\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// Enough repetitions that the old, order-dependent behaviour would
+			// have failed to fail by luck only once in 2^n.
+			for range 50 {
+				store, err := New(StoreOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = store.LoadFile("f.yml", []byte(doc))
+				if err == nil || !strings.Contains(err.Error(), `"a.b"`) {
+					t.Fatalf("LoadFile = %v, want an error naming the key a.b", err)
+				}
+			}
+		})
+	}
+}
+
+// A collision across two files is the same collision, and a refused file
+// leaves the locale as it was.
+func TestStoreRefusesACollisionAcrossFilesAndKeepsWhatWasLoaded(t *testing.T) {
+	t.Parallel()
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadFile("a.yml", []byte("en:\n  a:\n    b: nested\n  keep: kept\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadFile("b.yml", []byte("en:\n  \"a.b\": flat\n  other: x\n")); err == nil {
+		t.Fatal("LoadFile accepted a dotted key that collides with one loaded before")
+	}
+	if got := store.T("en", "a.b"); got != "nested" {
+		t.Errorf("a.b = %q after a refused file, want the translation already loaded", got)
+	}
+	if got := store.T("en", "keep"); got != "kept" {
+		t.Errorf("keep = %q, want kept", got)
+	}
+	// The locale is still writable: the refused file did not leave a half
+	// merged tree behind that fails every later load.
+	if err := store.LoadFile("c.yml", []byte("en:\n  extra: fine\n")); err != nil {
+		t.Errorf("LoadFile after a refused file = %v", err)
+	}
+	if got := store.T("en", "extra"); got != "fine" {
+		t.Errorf("extra = %q, want fine", got)
+	}
+}
+
+// Dotted keys that collide with nothing keep working, which is how flat files
+// exported by translation tools are written.
+func TestStoreKeepsDottedKeysThatDoNotCollide(t *testing.T) {
+	t.Parallel()
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadFile("f.yml", []byte("en:\n  \"a.b\": flat\n  \"a.c\": other\n  x:\n    y: nested\n")); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"a.b": "flat", "a.c": "other", "x.y": "nested"} {
+		if got := store.T("en", key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestStoreRefusesATreeThatNestsTooDeep is the regression test for JSON locale
+// files nesting to the decoder's own limit of ten thousand: every level kept a
+// dotted path holding all the levels above it, so a 54 KB file was retained as
+// 85 MB.
+func TestStoreRefusesATreeThatNestsTooDeep(t *testing.T) {
+	t.Parallel()
+	nest := func(depth int) string {
+		return `{"en":` + strings.Repeat(`{"a":`, depth) + `"x"` + strings.Repeat(`}`, depth) + `}`
+	}
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = store.LoadFile("deep.json", []byte(nest(9000)))
+	if err == nil || !strings.Contains(err.Error(), "nest") {
+		t.Fatalf("LoadFile = %v, want a refusal of a file nested 9000 levels", err)
+	}
+	// One inside the bound loads, and a locale nests nothing like it.
+	if err := store.LoadFile("ok.json", []byte(nest(maxTreeDepth-1))); err != nil {
+		t.Errorf("LoadFile of a file nested %d levels = %v, want it loaded", maxTreeDepth-1, err)
 	}
 }

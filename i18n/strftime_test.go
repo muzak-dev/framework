@@ -339,7 +339,7 @@ func TestStrftimeOutputIsCapped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	long := strings.Repeat("é", 500)
+	long := strings.Repeat("\u00e9", 500)
 	doc := "en:\n  date:\n    month_names: [~, " + long + ", " + long + ", " + long + ", " + long + "]\n"
 	if err := store.LoadFile("x.yml", []byte(doc)); err != nil {
 		t.Fatal(err)

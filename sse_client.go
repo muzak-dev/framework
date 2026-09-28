@@ -9,7 +9,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -299,7 +298,9 @@ func (r *SSEReader) LastEventID() string { return r.lastEventID }
 
 // Retry returns the reconnection delay the server asked for, or zero when it
 // asked for none. A reader does not reconnect on its own; this is the value to
-// wait before opening the stream again.
+// wait before opening the stream again. It is never negative and never more
+// than an hour, however much the server asked for, because the value is the
+// server's to choose and a client sleeps for it.
 func (r *SSEReader) Retry() time.Duration { return r.retry }
 
 // Close ends the stream and releases the connection. It is safe to call more
@@ -412,10 +413,44 @@ func (r *SSEReader) field(line []byte) {
 			r.lastEventID = value
 		}
 	case "retry":
-		if milliseconds, err := strconv.ParseInt(value, 10, 64); err == nil && milliseconds >= 0 {
-			r.retry = time.Duration(milliseconds) * time.Millisecond
+		if delay, ok := sseParseRetry(value); ok {
+			r.retry = delay
 		}
 	}
+}
+
+// sseMaxRetry is the longest reconnection delay a reader will report, however
+// much longer a server asks for. The delay is whatever the server chooses, and
+// a caller sleeps for what Retry returns, so an unbounded value is a server
+// deciding that a client never comes back, and one large enough to overflow a
+// duration would wrap to a negative sleep and a reconnection loop with no
+// pause at all.
+const sseMaxRetry = time.Hour
+
+// sseParseRetry reads a retry field's value, which the format defines as digits
+// and nothing else: a sign, a space or an exponent makes it not a delay, and the
+// field is ignored. A value past sseMaxRetry is reported as sseMaxRetry rather
+// than ignored, since a server that asked for a long wait is better obeyed as
+// far as is safe than taken to have asked for none.
+func sseParseRetry(value string) (time.Duration, bool) {
+	if value == "" {
+		return 0, false
+	}
+	const most = uint64(sseMaxRetry / time.Millisecond)
+	var milliseconds uint64
+	for i := range len(value) {
+		digit := value[i]
+		if digit < '0' || digit > '9' {
+			return 0, false
+		}
+		if milliseconds > most {
+			// Already past the cap, and every digit that follows only makes it
+			// larger, so there is no need to keep multiplying into an overflow.
+			continue
+		}
+		milliseconds = milliseconds*10 + uint64(digit-'0')
+	}
+	return time.Duration(min(milliseconds, most)) * time.Millisecond, true
 }
 
 // sseFieldValue removes the single optional space that follows a field's

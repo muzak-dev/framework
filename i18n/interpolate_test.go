@@ -199,3 +199,57 @@ func TestExceptionHandlers(t *testing.T) {
 		t.Error("StrictExceptionHandler swallowed a missing translation, want it reported")
 	}
 }
+
+// TestInterpolateBoundsTheWidthOfADirective is the regression test for a
+// "%<name>d" placeholder whose width was handed to fmt as written: a hundred
+// "%<n>1000000d", twelve hundred bytes of translation, rendered ninety-five
+// megabytes.
+func TestInterpolateBoundsTheWidthOfADirective(t *testing.T) {
+	t.Parallel()
+	huge := strings.Repeat("%<n>1000000d", 100)
+	out, err := Interpolate(huge, "n", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > len(huge) {
+		t.Errorf("a %d byte translation rendered %d bytes, want a directive with an unbounded width left as text", len(huge), len(out))
+	}
+	for _, text := range []string{"%<n>.1000000f", "%<n>99999999999999999999d", "%<n>1000000.1000000f", "%<n>*d", "%<n>[1]d"} {
+		out, err := Interpolate(text, "n", 7)
+		if err != nil || out != text {
+			t.Errorf("Interpolate(%q) = %q, %v; want the directive left as literal text", text, out, err)
+		}
+	}
+}
+
+// TestInterpolateKeepsOrdinaryDirectives pins the directives translations use,
+// including the widest one the bound allows.
+func TestInterpolateKeepsOrdinaryDirectives(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		text  string
+		value any
+		want  string
+	}{
+		{"%<n>d", 7, "7"},
+		{"%<n>03d", 7, "007"},
+		{"%<n>5d", 7, "    7"},
+		{"%<n>-5d|", 7, "7    |"},
+		{"%<n>+d", 7, "+7"},
+		{"%<n>x", 7, "7"},
+		{"%<n>v", 7, "7"},
+		{"%<n>#x", 7, "0x7"},
+		{"%<n>064d", 7, strings.Repeat("0", 63) + "7"},
+		{"%<n>.2f", 7.0, "7.00"},
+		{"%<n>8.3f", 7.0, "   7.000"},
+		{"%<n>.64f", 7.0, "7." + strings.Repeat("0", 64)},
+		{"%<n>65d", 7, "%<n>65d"},
+		{"%<n>.65f", 7.0, "%<n>.65f"},
+		{"%<n>10.65f", 7.0, "%<n>10.65f"},
+	} {
+		got, err := Interpolate(tc.text, "n", tc.value)
+		if err != nil || got != tc.want {
+			t.Errorf("Interpolate(%q) = %q, %v; want %q", tc.text, got, err, tc.want)
+		}
+	}
+}

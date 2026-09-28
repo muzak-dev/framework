@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -74,7 +75,7 @@ func compile(text string) []part {
 				continue
 			}
 			verbEnd := endOfVerb(text, end+1)
-			if verbEnd < 0 {
+			if verbEnd < 0 || !boundedVerb(text[end+1:verbEnd]) {
 				continue
 			}
 			flush(i)
@@ -121,6 +122,46 @@ func endOfVerb(s string, start int) int {
 		}
 	}
 	return -1
+}
+
+// maxVerbWidth is the widest field or precision a "%<name>d" directive may ask
+// for.
+//
+// The directive is handed to fmt as written, and fmt pads to whatever width it
+// is given: "%<n>1000000d" is twelve bytes and renders a megabyte, so a
+// translation of a hundred of them renders a hundred megabytes, and the pooled
+// buffer that built it then keeps that capacity. Nothing a message says needs
+// more than a column or two.
+const maxVerbWidth = 64
+
+// boundedVerb reports whether the directive between a placeholder's name and
+// its end is one that renders a bounded amount of text: flags, then a width,
+// then a precision, each within [maxVerbWidth], then the verb letter. A "*" is
+// not accepted where a width goes, because it takes its width from an argument
+// the placeholder does not supply. A directive that is not accepted leaves the
+// whole placeholder as literal text, the way an unterminated one is left.
+func boundedVerb(spec string) bool {
+	if spec == "" {
+		return false
+	}
+	// Whatever precedes the verb letter is flags, a width, and a precision.
+	width, precision, dotted := strings.Cut(strings.TrimLeft(spec[:len(spec)-1], "+-# 0"), ".")
+	return boundedNumber(width) && (!dotted || boundedNumber(precision))
+}
+
+// boundedNumber reports whether a width or precision is empty, or digits that
+// total no more than [maxVerbWidth].
+func boundedNumber(digits string) bool {
+	n := 0
+	for i := range len(digits) {
+		if digits[i] < '0' || digits[i] > '9' {
+			return false
+		}
+		if n = n*10 + int(digits[i]-'0'); n > maxVerbWidth {
+			return false
+		}
+	}
+	return true
 }
 
 // buffers recycles the byte slices a rendered translation is built in.

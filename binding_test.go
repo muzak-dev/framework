@@ -447,7 +447,10 @@ func TestContentTypeChecking(t *testing.T) {
 		{"json", "application/json", http.StatusOK},
 		{"json with charset", "application/json; charset=utf-8", http.StatusOK},
 		{"structured suffix", "application/vnd.api+json", http.StatusOK},
-		{"absent", "", http.StatusOK},
+		// A body with no Content-Type is what a cross-site fetch of a Blob
+		// sends without a preflight, so it is refused rather than guessed at.
+		{"absent", "", http.StatusUnsupportedMediaType},
+		{"text", "text/plain", http.StatusUnsupportedMediaType},
 		{"form", "application/x-www-form-urlencoded", http.StatusUnsupportedMediaType},
 		{"malformed", "application/json; charset=", http.StatusUnsupportedMediaType},
 	}

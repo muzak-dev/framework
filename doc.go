@@ -625,7 +625,8 @@
 // listener timeout is non-zero, request bodies are capped at one mebibyte and
 // uploads at 32, WebSocket messages at one mebibyte, unknown JSON members are
 // rejected, duplicate members and invalid UTF-8 are refused by
-// encoding/json/v2, CORS denies every cross-origin request until it is
+// encoding/json/v2, a JSON body without a JSON Content-Type is refused, CORS
+// denies every cross-origin request until it is
 // configured, a WebSocket handshake from another origin is refused until it is
 // allowed, the connections and the event streams one application holds are both
 // capped, a write to a client that stopped reading gives up, no forwarding

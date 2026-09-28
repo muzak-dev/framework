@@ -786,7 +786,8 @@ func (b *paramBinder) lookup(c *Context, query url.Values) ([]string, bool) {
 
 // bindBody reads, size-limits and decodes the JSON request body.
 func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *ValidationError) error {
-	if err := checkContentType(c.r); err != nil {
+	labelled, err := checkContentType(c.r)
+	if err != nil {
 		return err
 	}
 
@@ -815,6 +816,9 @@ func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *V
 		}
 		return nil
 	}
+	if !labelled {
+		return unlabelledBody()
+	}
 
 	target := dst
 	if !p.body.direct {
@@ -838,18 +842,44 @@ func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *V
 }
 
 // checkContentType rejects a body sent under a media type Muzak cannot
-// decode. A missing Content-Type is accepted, because many clients omit it and
-// the decoder will reject anything that is not JSON anyway.
-func checkContentType(r *http.Request) error {
+// decode, and reports whether the request declared a JSON one at all.
+//
+// A missing Content-Type is not refused here, only reported, because whether
+// it matters depends on whether a body follows: a bodiless call to a route
+// whose body is optional has nothing to label. [bindPlan.bindBody] refuses it
+// once it has read a non-empty body.
+func checkContentType(r *http.Request) (labelled bool, err error) {
 	mediaType, err := requestMediaType(r)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if mediaType == "" || mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
-		return nil
+	if mediaType == "" {
+		return false, nil
 	}
-	return NewHTTPErrorf(http.StatusUnsupportedMediaType,
+	if mediaType == "application/json" || strings.HasSuffix(mediaType, "+json") {
+		return true, nil
+	}
+	return false, NewHTTPErrorf(http.StatusUnsupportedMediaType,
 		"unsupported media type %q; this route accepts application/json", mediaType)
+}
+
+// unlabelledBody refuses a JSON route's body sent with no Content-Type.
+//
+// It used to be accepted on the grounds that the decoder rejects anything
+// that is not JSON anyway, and that is true and beside the point. A browser
+// sends a cross-site POST without asking first only when it looks like
+// something a form could have sent, and a fetch whose body is a Blob with no
+// type goes out with no Content-Type at all. Accepting it made every JSON
+// route reachable from any page a signed-in user visited, cookies attached,
+// without the CORS preflight that application/json triggers and the CORS
+// policy is there to answer. Requiring the label puts every such request
+// back behind that preflight.
+//
+// A fresh error is built each time rather than shared, because an error on its
+// way to the client is annotated as it goes.
+func unlabelledBody() error {
+	return NewHTTPError(http.StatusUnsupportedMediaType,
+		"the request carries a body but no Content-Type; this route accepts application/json")
 }
 
 // requestMediaType returns the media type of a request body, without its

@@ -133,12 +133,14 @@ const (
 // serverRunner owns the http.Server and the state needed to shut it down
 // exactly once, no matter which of the run methods started it.
 //
-// Every field is written once, before the runner is published through
-// App.server, and only read afterwards. The atomic store that publishes it
-// supplies the happens-before edge another goroutine needs to read them.
+// A runner is published through App.server as soon as a run method is
+// called, before the application is built, so that a Shutdown arriving while
+// the lifecycle components are still starting is recorded rather than lost.
+// The fields above mu are written before it is published and only read
+// afterwards; the atomic store supplies the happens-before edge another
+// goroutine needs to read them. Those below it are filled in once the socket
+// is open, and are read under mu.
 type serverRunner struct {
-	http     *http.Server
-	listener net.Listener
 	done     chan struct{}
 	stopOnce sync.Once
 	// stopped is closed once a shutdown has finished, lifecycle components
@@ -146,6 +148,29 @@ type serverRunner struct {
 	stopped chan struct{}
 	// handlers counts the requests being served, hijacked ones included.
 	handlers handlerTracker
+	// startCtx is what the lifecycle components are started with, and
+	// cancelStart is how a shutdown requested during start-up tells a
+	// component still dialling to give up.
+	startCtx    context.Context
+	cancelStart context.CancelFunc
+
+	mu sync.Mutex
+	// stopRequested records a Shutdown, including one that arrived before
+	// there was a server to shut down.
+	stopRequested bool
+	http          *http.Server
+	listener      net.Listener
+}
+
+// newServerRunner prepares the runner for one call of a run method.
+func newServerRunner(ctx context.Context) *serverRunner {
+	startCtx, cancel := context.WithCancel(ctx)
+	return &serverRunner{
+		done:        make(chan struct{}),
+		stopped:     make(chan struct{}),
+		startCtx:    startCtx,
+		cancelStart: cancel,
+	}
 }
 
 // handlerTracker counts the handlers a server is running, so that a shutdown
@@ -236,7 +261,9 @@ func (a *App) newServer() *http.Server {
 // when a certificate pair or a TLS configuration was supplied.
 //
 // Run returns nil after a graceful shutdown and an error if the listener could
-// not be opened or the application could not be built. Use [App.RunContext]
+// not be opened or the application could not be built. A shutdown requested
+// while Run is still starting, before the socket is open, is honoured too:
+// Run stops the components that started and returns nil without serving. Use [App.RunContext]
 // for a server that should stop when a context is cancelled, or
 // [App.RunSignals] for one that should stop on an interrupt.
 func (a *App) Run() error {
@@ -251,11 +278,14 @@ func (a *App) Run() error {
 // finish before closing the rest. A shutdown triggered this way returns nil, because
 // stopping on request is the expected outcome rather than a failure.
 func (a *App) RunContext(ctx context.Context) error {
-	listener, err := a.listen(ctx)
-	if err != nil {
+	runner := newServerRunner(ctx)
+	defer runner.cancelStart()
+	a.server.Store(runner)
+	listener, err := a.listen(ctx, runner)
+	if err != nil || listener == nil {
 		return err
 	}
-	return a.serve(ctx, listener)
+	return a.serve(ctx, runner, listener)
 }
 
 // RunSignals starts the server and blocks until it is interrupted.
@@ -273,34 +303,54 @@ func (a *App) RunSignals() error {
 // the listening socket, reporting the address actually bound. Binding before
 // serving is what makes ":0" usable in tests: the port is known as soon as
 // this returns.
-func (a *App) listen(ctx context.Context) (net.Listener, error) {
+//
+// It returns a nil listener and the error from stopping the components when
+// a shutdown was requested while it ran, since nothing is to be served.
+func (a *App) listen(ctx context.Context, runner *serverRunner) (net.Listener, error) {
 	if err := a.Build(); err != nil {
 		return nil, err
 	}
 	// Components come up before the socket opens, so the first request can
 	// never reach a handler whose database pool is still dialling.
-	if err := a.StartLifecycle(ctx); err != nil {
+	if err := a.StartLifecycle(runner.startCtx); err != nil {
+		if runner.stopWasRequested() {
+			// The failure is most likely the cancellation the shutdown
+			// caused, and the lifecycle manager has logged it either way.
+			return nil, nil
+		}
 		return nil, err
 	}
 	listener, err := net.Listen("tcp", a.opts.Addr)
 	if err != nil {
 		return nil, errors.Join(err, a.StopLifecycle(context.WithoutCancel(ctx)))
 	}
-	runner := &serverRunner{
-		http:     a.newServer(),
-		listener: listener,
-		done:     make(chan struct{}),
-		stopped:  make(chan struct{}),
+	server := a.newServer()
+	server.Handler = runner.handlers.track(server.Handler)
+
+	runner.mu.Lock()
+	if runner.stopRequested {
+		runner.mu.Unlock()
+		// A Shutdown arrived while the components were starting. It returned
+		// at once, as there was nothing to drain, and left the rest here:
+		// the socket is closed before a connection is accepted on it.
+		Scoped(a.logger, ScopeServer).Info("Shutdown was requested during start-up; not serving")
+		return nil, errors.Join(listener.Close(), a.StopLifecycle(context.WithoutCancel(ctx)))
 	}
-	runner.http.Handler = runner.handlers.track(runner.http.Handler)
-	a.server.Store(runner)
+	runner.http, runner.listener = server, listener
+	runner.mu.Unlock()
 	return listener, nil
+}
+
+// stopWasRequested reports whether Shutdown has been called on this runner.
+func (r *serverRunner) stopWasRequested() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopRequested
 }
 
 // serve runs the accept loop until the context is cancelled or the server
 // stops on its own.
-func (a *App) serve(ctx context.Context, listener net.Listener) error {
-	runner := a.server.Load()
+func (a *App) serve(ctx context.Context, runner *serverRunner, listener net.Listener) error {
 	scheme := "http"
 	if a.servesTLS() {
 		scheme = "https"
@@ -373,9 +423,22 @@ func (a *App) servesTLS() bool {
 // only the first call does the work. Calling it on a server that was never
 // started returns nil. A run method that was serving returns once the
 // shutdown has finished.
+//
+// Called while a run method is still starting, before its socket is open,
+// Shutdown records the request, cancels the context the lifecycle components
+// are being started with, and returns nil at once. The run method then stops
+// whatever did start and returns nil without serving a request.
 func (a *App) Shutdown(ctx context.Context) error {
 	runner := a.server.Load()
 	if runner == nil {
+		return nil
+	}
+	runner.mu.Lock()
+	runner.stopRequested = true
+	serving := runner.http != nil
+	runner.mu.Unlock()
+	if !serving {
+		runner.cancelStart()
 		return nil
 	}
 	var err error
@@ -494,7 +557,12 @@ func lifecycleStopContext(ctx context.Context) (context.Context, context.CancelF
 // empty string before the server has started.
 func (a *App) Addr() string {
 	runner := a.server.Load()
-	if runner == nil || runner.listener == nil {
+	if runner == nil {
+		return ""
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.listener == nil {
 		return ""
 	}
 	return runner.listener.Addr().String()

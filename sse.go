@@ -513,7 +513,9 @@ func (f sseFrame) appendFields(dst []byte) []byte {
 	}
 	if f.retry > 0 {
 		dst = append(dst, "retry: "...)
-		dst = strconv.AppendInt(dst, f.retry.Milliseconds(), 10)
+		// The field is whole milliseconds, and a positive delay shorter than
+		// one would truncate to 0, which tells a client to reconnect at once.
+		dst = strconv.AppendInt(dst, max(f.retry.Milliseconds(), 1), 10)
 		dst = append(dst, '\n')
 	}
 	return dst

@@ -226,6 +226,12 @@ type WSOptions struct {
 	// such as "https://app.example.com", in addition to the server's own
 	// origin, which is always allowed. The single entry "*" allows any origin.
 	//
+	// An origin is compared as a browser serializes it, a scheme and a host
+	// with nothing after it: a value carrying credentials, a path, a query or
+	// a fragment is not the server's own origin however its host reads, and a
+	// handshake with more than one Origin header is refused as malformed. An
+	// entry of this list is compared with the value exactly as it arrived.
+	//
 	// The check exists because a WebSocket handshake is not subject to the
 	// same-origin policy and is not preflighted: without it, any page on the
 	// internet could open an authenticated connection to this server from a
@@ -512,11 +518,31 @@ func wsOriginPolicy(opts WSOptions) func(*http.Request, string) bool {
 				return true
 			}
 		}
-		if parsed, err := url.Parse(origin); err == nil && strings.EqualFold(parsed.Host, r.Host) {
+		if host, ok := wsOriginHost(origin); ok && strings.EqualFold(host, r.Host) {
 			return true
 		}
 		return dynamic != nil && dynamic(r, origin)
 	}
+}
+
+// wsOriginHost returns the host of an origin, and reports whether the value is
+// an origin at all.
+//
+// An origin is what a browser serializes: a scheme, "://", and a host with an
+// optional port, and nothing after it. A lenient URL parse finds a host in
+// values that are not one, such as "http://attacker@host", "http://host/path"
+// and "//host", and no browser sends any of them. Reading a host out of them
+// would let a proxy or a client that is not a browser pass for the server's own
+// origin, so they have no host here and are left to the allow list and the
+// dynamic policy, which see the value exactly as it arrived.
+func wsOriginHost(origin string) (string, bool) {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" ||
+		parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || strings.Contains(origin, "#") {
+		return "", false
+	}
+	return parsed.Host, true
 }
 
 // acceptWebSocket checks the handshake and upgrades the connection, returning
@@ -656,6 +682,12 @@ func (cfg *wsConfig) checkHandshake(c *Context) (string, error) {
 func (cfg *wsConfig) checkOrigin(r *http.Request) error {
 	if cfg.opts.InsecureSkipOriginCheck {
 		return nil
+	}
+	if len(r.Header.Values("Origin")) > 1 {
+		// One handshake names one origin. Two answers to the same question
+		// invite this end and whatever is in front of it to read different
+		// ones, and a browser never sends two.
+		return NewHTTPError(http.StatusBadRequest, "the Origin header was sent more than once")
 	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {

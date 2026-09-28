@@ -237,6 +237,10 @@ type sseStream struct {
 
 	mu  sync.Mutex
 	err error
+	// writing records that a write has armed its deadline and has not yet
+	// finished, which is the only time a deadline is set on the response at
+	// all. See [sseStream.arm] and [sseStream.disarm].
+	writing bool
 	// finished records that the response has gone back to net/http, after
 	// which nothing here may touch it again: the connection may already be
 	// carrying somebody else's request.
@@ -576,12 +580,15 @@ func (s *sseStream) write(b []byte) error {
 	if err := s.rc.Flush(); err != nil {
 		return s.fail(endedBy("flushing an event failed", err))
 	}
+	s.disarm()
 	s.lastWrite.mark()
 	return nil
 }
 
 // arm is the last thing a write does before it touches the response: it
 // confirms that the stream is still live and gives the write its deadline.
+// [sseStream.disarm] is what takes the deadline away again when the write is
+// done.
 //
 // Both happen under the lock that [sseStream.interrupt] and
 // [sseStream.finish] take, which is what closes the gap between a writer
@@ -596,6 +603,7 @@ func (s *sseStream) arm() error {
 	if err := s.failureLocked(); err != nil {
 		return err
 	}
+	s.writing = true
 	if s.deadlines && s.writeTimeout > 0 {
 		// This is the bound that matters: without it, a client that opens a
 		// stream and never reads it holds a goroutine and a growing socket
@@ -603,6 +611,31 @@ func (s *sseStream) arm() error {
 		_ = s.rc.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 	}
 	return nil
+}
+
+// disarm is what a write does once its bytes are on the wire: it takes the
+// deadline off the response again.
+//
+// Leaving it there is not harmless. On HTTP/1 it is only a time that goes stale,
+// but on HTTP/2 a write deadline is a timer that resets the stream when it
+// fires, whether or not anything is being written, so an idle stream would be
+// reset one write timeout after its last event and a keepalive longer than that
+// could never arrive. The response bytes net/http writes to end a stream would
+// likewise meet a deadline that had long expired. A deadline is therefore a
+// bound on a write and nothing else, and exists only while one is in progress.
+//
+// It clears the deadline even for a stream that has ended in the meantime.
+// Nothing can start another write, [sseStream.arm] sees to that, and what is
+// left is the end of the response, which should not meet a deadline that was
+// moved into the past to stop a write that has since finished by itself.
+func (s *sseStream) disarm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writing = false
+	if s.finished || !s.deadlines {
+		return
+	}
+	_ = s.rc.SetWriteDeadline(time.Time{})
 }
 
 // acquire takes the write semaphore, giving up if the stream ends while it
@@ -680,13 +713,17 @@ func (s *sseStream) shuttingDown() {
 // deadline into the past.
 //
 // It is what turns "eventually" into "now" for a stream being ended while a
-// client that has stopped reading holds a write open. It does nothing once the
-// response has gone back to net/http, because by then the deadline it would
-// move belongs to whatever request is using that connection next.
+// client that has stopped reading holds a write open. It does nothing when no
+// write is in progress, because a deadline in the past would then wait for the
+// next thing written to the response, and that is the end of it: a stream
+// that ends while idle would be cut off rather than finished. It does nothing
+// either once the response has gone back to net/http, because by then the
+// deadline it would move belongs to whatever request is using that connection
+// next.
 func (s *sseStream) interrupt() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.finished || !s.deadlines {
+	if s.finished || !s.deadlines || !s.writing {
 		return
 	}
 	_ = s.rc.SetWriteDeadline(time.Now())

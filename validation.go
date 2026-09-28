@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +84,9 @@ type Validation struct {
 	depth     int
 	path      string
 	pathKnown bool
+	// lastElement is the position of the element of a collection a model
+	// nested in this one was last found at, where the next search begins.
+	lastElement int
 
 	// run is the report every Validation of one request writes into, the
 	// model's own and each nested one's alike, so that one ceiling covers
@@ -129,6 +133,7 @@ func (v *Validation) reset() {
 	v.parent = nil
 	v.depth = 0
 	v.path, v.pathKnown = "", false
+	v.lastElement = 0
 	for _, rules := range v.freeStrings[:v.usedStrings] {
 		rules.Reset()
 	}
@@ -411,6 +416,21 @@ func (c *Condition) RejectKey(target any, key string, args ...any) *Condition {
 // nil pointer is skipped, so an optional nested model needs no guard of its
 // own.
 //
+// A collection of models is validated by nesting each element, by its address
+// in the collection:
+//
+//	for i := range in.Items {
+//		v.Nested(&in.Items[i])
+//	}
+//
+// A failure on the third item's Name is then reported as "items[2].name", and
+// the same holds for a collection of pointers, nested as v.Nested(in.Items[i]).
+// The address has to be the element's own. Ranging over the values, as in
+// `for _, item := range in.Items { v.Nested(&item) }`, validates a copy, whose
+// transforms never reach the collection and whose position cannot be traced,
+// so its failures are reported without it. The collection has to be a field of
+// the model calling Nested, as any nested model does.
+//
 // The nested model is validated there and then, transforms included, rather
 // than after the outer model's Validate returns: that is what lets a report
 // that has reached [MaxValidationDetails] stop nesting, so a model nested once
@@ -483,7 +503,9 @@ func (v *Validation) prefix() string {
 // does not: its address is wherever it was allocated, which says nothing about
 // the field pointing at it. For that case the parent's pointer fields are
 // compared against the address, which is a short scan over a handful of fields
-// and only happens when the direct lookup fails.
+// and only happens when the direct lookup fails. A model held in an element of
+// one of the parent's collections is found last, and named with its position,
+// as "items[2]".
 func (v *Validation) nameOfNested(pointer reflect.Value) string {
 	if origin, found := v.originOf(pointer.Interface()); found {
 		return origin.name
@@ -501,7 +523,44 @@ func (v *Validation) nameOfNested(pointer reflect.Value) string {
 			return origin.name
 		}
 	}
+	for _, list := range v.plan.lists {
+		if i, found := v.elementIndex(v.value.FieldByIndex(list.index), pointer); found {
+			return v.plan.fields[list.offset].name + "[" + strconv.Itoa(i) + "]"
+		}
+	}
 	return ""
+}
+
+// elementIndex reports which element of a collection a nested model is.
+//
+// An element held by value is found by arithmetic on its address, since the
+// elements sit side by side. One held behind a pointer has to be searched for.
+// The search starts after the element found last, because a model nested once
+// per element is nested in order, and the name is only worked out for a model
+// that failed, of which a report holds at most [MaxValidationDetails]; so a
+// long collection is searched from the start at most that many times, and in
+// the usual order hardly at all.
+func (v *Validation) elementIndex(list, pointer reflect.Value) (int, bool) {
+	n := list.Len()
+	address := pointer.Pointer()
+	switch list.Type().Elem() {
+	case pointer.Type().Elem():
+		size := pointer.Type().Elem().Size()
+		first := list.Pointer()
+		if n == 0 || address < first || address >= first+uintptr(n)*size || (address-first)%size != 0 {
+			return 0, false
+		}
+		return int((address - first) / size), true
+	case pointer.Type():
+		for step := range n {
+			i := (v.lastElement + 1 + step) % n
+			if list.Index(i).Pointer() == address {
+				v.lastElement = i
+				return i, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // details evaluates the outermost model's own rules, after everything nested in
@@ -632,13 +691,24 @@ type fieldOrigin struct {
 // the type.
 type validationPlan struct {
 	fields map[uintptr]fieldOrigin
+	// lists are the collections a model nested per element can be held in,
+	// which is how its failures are given the element's position.
+	lists []listField
+}
+
+// listField is a collection field whose elements are models or pointers to
+// them: where it sits, so its elements can be found, and the offset its name
+// is recorded under.
+type listField struct {
+	index  []int
+	offset uintptr
 }
 
 // newValidationPlan records where every field of an input type came from,
 // starting from the JSON names and then correcting the ones the binder read
 // from somewhere other than the body.
 func newValidationPlan(t reflect.Type, plan *bindPlan) *validationPlan {
-	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}}
+	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}, lists: collectLists(t, nil, 0, nil)}
 	collectOrigins(t, 0, vp.fields)
 	for _, binders := range [][]paramBinder{plan.params, plan.form} {
 		for i := range binders {
@@ -666,7 +736,7 @@ func planForType(t reflect.Type) *validationPlan {
 	if cached, found := nestedPlans.Load(t); found {
 		return cached.(*validationPlan)
 	}
-	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}}
+	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}, lists: collectLists(t, nil, 0, nil)}
 	collectOrigins(t, 0, vp.fields)
 	actual, _ := nestedPlans.LoadOrStore(t, vp)
 	return actual.(*validationPlan)
@@ -696,6 +766,37 @@ func collectOrigins(t reflect.Type, base uintptr, into map[uintptr]fieldOrigin) 
 			collectOrigins(field.Type, offset, into)
 		}
 	}
+}
+
+// collectLists finds the collections of structs, or of pointers to them, that
+// collectOrigins names, walking embedded structs the way it does.
+func collectLists(t reflect.Type, index []int, base uintptr, into []listField) []listField {
+	if t.Kind() != reflect.Struct {
+		return into
+	}
+	for i := range t.NumField() {
+		field := t.Field(i)
+		if !usableField(field) {
+			continue
+		}
+		path := append(slices.Clip(index), i)
+		if field.Anonymous && field.Type.Kind() == reflect.Struct {
+			into = collectLists(field.Type, path, base+field.Offset, into)
+			continue
+		}
+		name, _, _ := strings.Cut(field.Tag.Get(tagJSON), ",")
+		if field.Type.Kind() != reflect.Slice || name == "-" {
+			continue
+		}
+		elem := field.Type.Elem()
+		if elem.Kind() == reflect.Pointer {
+			elem = elem.Elem()
+		}
+		if elem.Kind() == reflect.Struct && elem.Size() > 0 {
+			into = append(into, listField{index: path, offset: base + field.Offset})
+		}
+	}
+	return into
 }
 
 // offsetOf resolves a field index path to a byte offset within the struct.

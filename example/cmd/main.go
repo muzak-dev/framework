@@ -18,8 +18,9 @@
 //
 //	go run ./cmd
 //
-// Every route sits below the application-wide guard, so a working request
-// carries a token:
+// Every route and file sits below the token guard, so a working request
+// carries a token (the documentation itself is open, so it can be read without
+// one):
 //
 //	curl 'http://localhost:8080/users/me?token=jessica'
 package main
@@ -76,10 +77,9 @@ func main() {
 		// and it then carries none of the translation machinery at all.
 		I18n: core.LocaleOptions(),
 	},
-		muzak.WithDependencies(core.GetQueryToken),
-		// The application-wide budget, counted before the guard above runs so
-		// that a request the guard rejects still costs the client something.
-		// Routers narrow it below where they have a reason to.
+		// The application-wide budget, counted before any guard runs so that a
+		// request a guard rejects still costs the client something. Routers
+		// narrow it below where they have a reason to.
 		muzak.WithRateLimit(core.RateLimitPolicy()),
 		muzak.WithSingleton(settings),
 		muzak.WithSingleton(models),
@@ -93,13 +93,20 @@ func main() {
 	app.Use(core.ProcessTime())
 	app.Use(muzak.Compress(muzak.CompressionOptions{}))
 
-	app.Include(routers.Users())
-	app.Include(routers.Items())
-	app.Include(routers.Meta())
-	app.Include(routers.Uploads())
-	app.Include(routers.Auth())
-	app.Include(routers.Feed())
-	app.Include(routers.Chat())
+	// The token guard is applied where each router is included rather than on
+	// muzak.New. A guard given to New covers the documentation and its
+	// OpenAPI document too, and the dashboard's own requests carry no token,
+	// so the docs would answer 400 to everyone. Declared here it covers every
+	// route and file below and leaves /docs readable.
+	guarded := muzak.WithDependencies(core.GetQueryToken)
+
+	app.Include(routers.Users(), guarded)
+	app.Include(routers.Items(), guarded)
+	app.Include(routers.Meta(), guarded)
+	app.Include(routers.Uploads(), guarded)
+	app.Include(routers.Auth(), guarded)
+	app.Include(routers.Feed(), guarded)
+	app.Include(routers.Chat(), guarded)
 
 	// The admin router is written without a prefix or a guard. Both are applied
 	// here, which is what keeps that router reusable and puts the security
@@ -107,6 +114,7 @@ func main() {
 	app.Include(routers.Admin(),
 		muzak.WithPrefix("/admin"),
 		muzak.WithTags("admin"),
+		guarded,
 		muzak.WithDependencies(core.GetTokenHeader(settings)),
 		muzak.WithResponseDoc(http.StatusTeapot, "I'm a teapot"),
 	)
@@ -114,12 +122,14 @@ func main() {
 	// Assets that belong to no particular route. A static mount serves what it
 	// finds and nothing else, so a miss here stays a miss rather than being
 	// answered with the application document by the frontend below.
-	app.Static("/static", muzak.StaticOptions{Dir: "static"})
+	files := muzak.NewRouter()
+	files.Static("/static", muzak.StaticOptions{Dir: "static"})
 
 	// The built frontend is served last: every route above is matched first,
 	// so mounting at the root cannot shadow the API. The directory here is
 	// what a frontend build tool would have written.
-	app.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
+	files.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
+	app.Include(files, guarded)
 
 	if err := app.RunSignals(); err != nil {
 		log.Fatal(err)

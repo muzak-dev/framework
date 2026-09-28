@@ -14,7 +14,7 @@ type CurrentUser struct {
 	Username string
 }
 
-// GetQueryToken is a guard dependency applied to the whole application.
+// GetQueryToken is a guard dependency applied where every router is included.
 //
 // It rejects any request that does not carry a token query parameter, standing
 // in for whatever real check a service would perform. A guard produces no

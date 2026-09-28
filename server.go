@@ -261,7 +261,8 @@ func (a *App) newServer() *http.Server {
 // when a certificate pair or a TLS configuration was supplied.
 //
 // Run returns nil after a graceful shutdown and an error if the listener could
-// not be opened or the application could not be built. A shutdown requested
+// not be opened, the application could not be built, or serving failed, in
+// which last case the lifecycle components are stopped first. A shutdown requested
 // while Run is still starting, before the socket is open, is honoured too:
 // Run stops the components that started and returns nil without serving. Use [App.RunContext]
 // for a server that should stop when a context is cancelled, or
@@ -381,8 +382,17 @@ func (a *App) serve(ctx context.Context, runner *serverRunner, listener net.List
 			// still draining and stopping components. Returning now would let
 			// a main function exit underneath it.
 			<-runner.stopped
+			return nil
 		}
-		return err
+		// The server failed on its own, a certificate that would not load or
+		// an accept that cannot be retried, while the components that came up
+		// before the socket opened are still running. They are stopped the
+		// same way a requested shutdown stops them, so that a program which
+		// survives Run's error does not leave a database pool or a consumer
+		// behind. ServeTLS returns before it tracks the listener when the
+		// certificate is bad, so nothing else would close it.
+		_ = listener.Close()
+		return errors.Join(err, a.Shutdown(context.Background()))
 	case <-ctx.Done():
 		if err := a.Shutdown(context.Background()); err != nil {
 			return err

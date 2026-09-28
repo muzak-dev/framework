@@ -131,10 +131,10 @@ func TestIPv6FloodCannotResetAnotherQuota(t *testing.T) {
 	}
 }
 
-// TestWebSocketPerClientCapCountsAnIPv6ClientByItsSlash64 is the regression
+// TestWebSocketPerClientCapCountsAnIPv6ClientByItsPrefix is the regression
 // test for a per-client connection cap keyed on the exact address, which let
 // one /64 hold any number of connections by using a new address for each.
-func TestWebSocketPerClientCapCountsAnIPv6ClientByItsSlash64(t *testing.T) {
+func TestWebSocketPerClientCapCountsAnIPv6ClientByItsPrefix(t *testing.T) {
 	t.Parallel()
 	opts := quietOptions()
 	opts.ClientIP = ClientIPOptions{TrustedProxies: []string{"127.0.0.1/32"}}
@@ -163,8 +163,11 @@ func TestWebSocketPerClientCapCountsAnIPv6ClientByItsSlash64(t *testing.T) {
 	if accepted != 2 {
 		t.Errorf("%d connections accepted from one /64 with MaxConnectionsPerIP=2, want 2", accepted)
 	}
-	if _, resp := dialRaw(t, server.URL, "/ws", "X-Forwarded-For", "2001:db8:1:2::1"); resp.StatusCode != http.StatusSwitchingProtocols {
-		t.Errorf("a neighbouring /64 got %d, want an allowance of its own", resp.StatusCode)
+	if _, resp := dialRaw(t, server.URL, "/ws", "X-Forwarded-For", "2001:db8:1:2::1"); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("a neighbouring /64 in the same /56 got %d, want it counted as the same client", resp.StatusCode)
+	}
+	if _, resp := dialRaw(t, server.URL, "/ws", "X-Forwarded-For", "2001:db8:1:100::1"); resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Errorf("a neighbouring /56 got %d, want an allowance of its own", resp.StatusCode)
 	}
 }
 
@@ -178,8 +181,8 @@ func TestPerClientKeyWithoutAnAddress(t *testing.T) {
 		t.Error("perClientKey accepted a request with no address")
 	}
 	ctx.r.RemoteAddr = "[2001:db8::7]:1"
-	if key, err := perClientKey(ctx, 1); err != nil || key != "2001:db8::/64" {
-		t.Errorf("perClientKey = %q, %v; want the /64", key, err)
+	if key, err := perClientKey(ctx, 1); err != nil || key != "2001:db8::/56" {
+		t.Errorf("perClientKey = %q, %v; want the /56", key, err)
 	}
 	if key, err := perClientKey(ctx, 0); err != nil || key != "" {
 		t.Errorf("perClientKey with no limit = %q, %v; want no key at all", key, err)

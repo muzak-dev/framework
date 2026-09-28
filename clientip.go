@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net"
@@ -22,6 +23,29 @@ const DefaultForwardedHeader = "X-Forwarded-For"
 // bound, a request carrying ten thousand addresses would have all ten thousand
 // of them parsed on the way to deciding who sent it.
 const maxForwardedHops = 64
+
+// Defaults for how widely the per-client connection caps,
+// [WSOptions.MaxConnectionsPerIP] and [SSEOptions.MaxStreamsPerIP], group
+// addresses into one client. See [ClientIPOptions.ConnectionIPv6Prefix] and
+// [ClientIPOptions.ConnectionIPv4Prefix].
+const (
+	// DefaultConnectionIPv6Prefix counts an IPv6 client by its /56. A /56 is
+	// what most providers delegate to one home or small site, and what
+	// RFC 6177 recommends they do, so a single subscriber holds 256 /64s and
+	// counting any narrower would give each of them an allowance of its own.
+	DefaultConnectionIPv6Prefix = 56
+	// DefaultConnectionIPv4Prefix counts an IPv4 client by its exact
+	// address, since one is neither cheap nor plentiful.
+	DefaultConnectionIPv4Prefix = 32
+)
+
+// The narrowest bounds a connection prefix may be widened to. Anything wider
+// is an allocation to a provider rather than to a subscriber, so one busy
+// client would lock out every unrelated customer who shares it.
+const (
+	minConnectionIPv6Prefix = 32
+	minConnectionIPv4Prefix = 16
+)
 
 // ClientIPOptions decides how Muzak works out which address a request came
 // from.
@@ -55,6 +79,30 @@ type ClientIPOptions struct {
 	// X-Forwarded-For. It is consulted only for a request whose peer is
 	// trusted.
 	Header string
+
+	// ConnectionIPv6Prefix is the length, in bits, of the IPv6 prefix that
+	// the per-client connection caps, [WSOptions.MaxConnectionsPerIP] and
+	// [SSEOptions.MaxStreamsPerIP], count as one client. It defaults to
+	// [DefaultConnectionIPv6Prefix], a /56.
+	//
+	// A client is handed a whole range of IPv6 addresses rather than one, and
+	// can open every connection from a different address in it, so counting
+	// addresses one by one would give each a fresh allowance. The prefix is
+	// the range treated as one client. Set 48 where providers delegate a /48
+	// to each site, or 64 where many unrelated users share one /56, such as
+	// a campus or a carrier that hands each device a single /64; any length
+	// from 32 to 128 is accepted, and a value outside that is reported when
+	// the application is built. It changes nothing but these two caps: the
+	// rate limiter's [IPTracker] keeps its own grouping, and
+	// [IPPrefixTracker] is how that one is changed.
+	ConnectionIPv6Prefix int
+
+	// ConnectionIPv4Prefix is the same for IPv4, defaulting to
+	// [DefaultConnectionIPv4Prefix], which counts each address on its own.
+	// Widen it only where one client is known to hold a whole block, and
+	// never past what that client holds, because every other address in the
+	// block then shares its allowance. Any length from 16 to 32 is accepted.
+	ConnectionIPv4Prefix int
 }
 
 // clientIPResolver answers "who sent this request" for one application, with
@@ -62,22 +110,45 @@ type ClientIPOptions struct {
 type clientIPResolver struct {
 	trusted []netip.Prefix
 	header  string
+
+	// connIPv4Bits and connIPv6Bits are the prefix lengths the per-client
+	// connection caps group an address by, already validated.
+	connIPv4Bits int
+	connIPv6Bits int
 }
 
 // defaultClientIPResolver trusts no proxy, which is what an application that
 // has not been built yet, or one that could not parse its policy, falls back
 // to.
-var defaultClientIPResolver = &clientIPResolver{header: DefaultForwardedHeader}
+var defaultClientIPResolver = &clientIPResolver{
+	header:       DefaultForwardedHeader,
+	connIPv4Bits: DefaultConnectionIPv4Prefix,
+	connIPv6Bits: DefaultConnectionIPv6Prefix,
+}
 
 // newClientIPResolver parses a policy, reporting every entry it could not
 // understand at once. A policy with any unreadable entry is not applied at
 // all, because a half-applied trust policy is one nobody can reason about.
 func newClientIPResolver(opts ClientIPOptions) (*clientIPResolver, error) {
-	resolver := &clientIPResolver{header: opts.Header}
+	resolver := &clientIPResolver{
+		header:       opts.Header,
+		connIPv4Bits: cmp.Or(opts.ConnectionIPv4Prefix, DefaultConnectionIPv4Prefix),
+		connIPv6Bits: cmp.Or(opts.ConnectionIPv6Prefix, DefaultConnectionIPv6Prefix),
+	}
 	if resolver.header == "" {
 		resolver.header = DefaultForwardedHeader
 	}
 	var errs []error
+	if resolver.connIPv6Bits < minConnectionIPv6Prefix || resolver.connIPv6Bits > 128 {
+		errs = append(errs, fmt.Errorf("muzak: ClientIP.ConnectionIPv6Prefix is %d, but it must be between %d and 128; "+
+			"a wider prefix is a provider's allocation rather than one client's, so leave it at zero for the /%d default or choose a length in range",
+			opts.ConnectionIPv6Prefix, minConnectionIPv6Prefix, DefaultConnectionIPv6Prefix))
+	}
+	if resolver.connIPv4Bits < minConnectionIPv4Prefix || resolver.connIPv4Bits > 32 {
+		errs = append(errs, fmt.Errorf("muzak: ClientIP.ConnectionIPv4Prefix is %d, but it must be between %d and 32; "+
+			"a wider prefix groups unrelated networks into one client, so leave it at zero to count each address or choose a length in range",
+			opts.ConnectionIPv4Prefix, minConnectionIPv4Prefix))
+	}
 	for _, entry := range opts.TrustedProxies {
 		prefix, err := parseTrustedProxy(entry)
 		if err != nil {
@@ -238,17 +309,39 @@ func (c *Context) ClientIP() string {
 // The zero Addr, whose IsValid reports false, means the connection has no
 // address that can be parsed.
 func (c *Context) ClientAddr() netip.Addr {
-	resolver := defaultClientIPResolver
-	if c.app != nil && c.app.clientIP != nil {
-		resolver = c.app.clientIP
-	}
-	return resolver.resolve(c.r)
+	return c.clientIPResolver().resolve(c.r)
 }
 
-// clientIPv6PrefixBits is the length of the IPv6 prefix Muzak counts as one
-// client wherever it bounds what a single client may do: the default rate
-// limit tracker, [IPTracker], and the per-client connection caps,
-// [WSOptions.MaxConnectionsPerIP] and [SSEOptions.MaxStreamsPerIP].
+// clientIPResolver returns the application's resolver, or the default one for
+// a context that has no application, as some tests build.
+func (c *Context) clientIPResolver() *clientIPResolver {
+	if c.app != nil && c.app.clientIP != nil {
+		return c.app.clientIP
+	}
+	return defaultClientIPResolver
+}
+
+// connectionKey renders the key the per-client connection caps count a valid
+// address under: the address itself when the configured prefix covers all of
+// it, and the prefix otherwise, such as "2001:db8:0:ab00::/56".
+func (r *clientIPResolver) connectionKey(addr netip.Addr) string {
+	bits := r.connIPv4Bits
+	if addr.Is6() {
+		bits = r.connIPv6Bits
+	}
+	if bits >= addr.BitLen() {
+		return addr.String()
+	}
+	// The length was validated for its family when the resolver was built,
+	// so the only error Prefix can report cannot happen here.
+	prefix, _ := addr.Prefix(bits)
+	return prefix.String()
+}
+
+// clientIPv6PrefixBits is the length of the IPv6 prefix the default rate
+// limit tracker, [IPTracker], counts as one client. The per-client connection
+// caps group more widely by default and can be configured; see
+// [ClientIPOptions.ConnectionIPv6Prefix].
 //
 // A /64 is the block size an IPv6 network is built from and the smallest most
 // providers hand to a subscriber, so a client holding one can present a new

@@ -209,17 +209,21 @@ var errConnectionLimitNoAddress = errors.New("muzak: a per-client connection lim
 // an application that never configures a per-client limit resolves no
 // address and pays nothing for a dimension it does not use.
 //
-// A client is its IPv4 address, or its IPv6 /64, the same identity the default
-// rate limit tracker counts; see clientIPv6PrefixBits. Keying on the exact
-// IPv6 address would let a client holding a /64 open a fresh allowance of
-// connections from every address in it, which is to say without limit.
+// A client is the prefix [ClientIPOptions.ConnectionIPv6Prefix] and
+// [ClientIPOptions.ConnectionIPv4Prefix] choose, by default an IPv6 /56 and an
+// exact IPv4 address. Keying on the exact IPv6 address would let a client
+// holding a range open a fresh allowance of connections from every address
+// in it, which is to say without limit, and keying on the /64 the rate
+// limiter uses would still let one home's /56 hold 256 allowances, enough to
+// take every slot of the process-wide cap.
 func perClientKey(c *Context, limit int) (string, error) {
 	if limit <= 0 {
 		return "", nil
 	}
-	addr := c.ClientAddr()
+	resolver := c.clientIPResolver()
+	addr := resolver.resolve(c.r)
 	if !addr.IsValid() {
 		return "", errConnectionLimitNoAddress
 	}
-	return clientIdentity(addr), nil
+	return resolver.connectionKey(addr), nil
 }

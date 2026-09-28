@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"math"
 	"net/http"
 	"reflect"
 	"slices"
@@ -447,6 +448,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		// leave the constraints on a throwaway for a mixed input, whose body is
 		// described inline rather than by reference.
 		body := builder.bodySchema(rt.plan)
+		builder.applyBodyDefaults(body, rt.plan.body.defaults)
 		builder.applyBodyConstraints(body, constraints, elements, true)
 		op.RequestBody = &RequestBody{
 			Required: rt.plan.body.required,
@@ -533,6 +535,63 @@ func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements
 			applyConstraints(property.Items, c)
 		}
 	}
+}
+
+// applyBodyDefaults writes the defaults of a request body's members onto the
+// schema it was described with, as the values the binder gives a member the
+// client leaves out.
+//
+// The property is copied first. A property of a struct type is a reference
+// shared by every member of that type, and the default belongs to this member
+// alone.
+func (b *schemaBuilder) applyBodyDefaults(body *Schema, defaults []bodyDefault) {
+	schema := b.resolve(body)
+	if schema == nil || schema.Properties == nil {
+		return
+	}
+	for _, d := range defaults {
+		property, described := schema.Properties[d.name]
+		if !described {
+			continue
+		}
+		annotated := *property
+		annotated.Default = typedDefault(d.typ, d.raw)
+		schema.Properties[d.name] = &annotated
+	}
+}
+
+// typedDefault returns a default as the JSON type its schema describes, so an
+// integer member shows 10 rather than "10". A type whose schema is a string
+// keeps the text, and so does a default that does not parse, which is the
+// parameter's own error to report.
+func typedDefault(t reflect.Type, raw string) any {
+	if t == durationType || isTextCoded(t) {
+		return raw
+	}
+	switch t.Kind() {
+	case reflect.Pointer:
+		return typedDefault(t.Elem(), raw)
+	case reflect.Slice:
+		// The binder reads a default as the one value the list is given.
+		return []any{typedDefault(t.Elem(), raw)}
+	case reflect.Bool:
+		if v, err := strconv.ParseBool(raw); err == nil {
+			return v
+		}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if v, err := strconv.ParseInt(raw, 10, t.Bits()); err == nil {
+			return v
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if v, err := strconv.ParseUint(raw, 10, t.Bits()); err == nil {
+			return v
+		}
+	case reflect.Float32, reflect.Float64:
+		if v, err := strconv.ParseFloat(raw, t.Bits()); err == nil && !math.IsNaN(v) && !math.IsInf(v, 0) {
+			return v
+		}
+	}
+	return raw
 }
 
 // resolve follows a reference back to the schema it names, so that constraints
@@ -636,7 +695,7 @@ func newSchemaBuilder() *schemaBuilder {
 func (b *schemaBuilder) parameterFor(p *paramBinder) Parameter {
 	schema := b.inline(p.typ)
 	if p.hasDef {
-		schema.Default = p.defValue
+		schema.Default = typedDefault(p.typ, p.defValue)
 	}
 	return Parameter{
 		Name:        p.name,
@@ -698,7 +757,7 @@ func (b *schemaBuilder) multipartSchema(plan *bindPlan) *Schema {
 		property := b.inline(p.typ)
 		property.Description = p.doc
 		if p.hasDef {
-			property.Default = p.defValue
+			property.Default = typedDefault(p.typ, p.defValue)
 		}
 		schema.Properties[p.name] = property
 		if p.required {
@@ -894,19 +953,21 @@ func (b *schemaBuilder) describeField(field reflect.StructField) *Schema {
 		schema = nullable(schema)
 	}
 	doc := field.Tag.Get(tagDoc)
-	def, hasDef := field.Tag.Lookup(tagDefault)
-	if doc == "" && !hasDef {
+	if doc == "" {
 		return schema
 	}
+	// A default is not written here. The tag is honoured for the members of a
+	// request body, at its top level, and describing the type says nothing
+	// about which of those a request is: the same struct may be a response, or
+	// sit inside a collection, where nothing fills the default in. It is
+	// written by [schemaBuilder.applyBodyDefaults] instead.
+	//
 	// The schema may be a shared *Schema or a reference into components, so
 	// annotations go on a copy rather than mutating what other fields point
 	// at. JSON Schema 2020-12, which OpenAPI 3.1 uses, allows a $ref to carry
 	// sibling keywords, so a copied reference keeps its description.
 	annotated := *schema
 	annotated.Description = doc
-	if hasDef {
-		annotated.Default = def
-	}
 	return &annotated
 }
 

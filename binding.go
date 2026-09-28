@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,6 +119,20 @@ type bodyPlan struct {
 	fields [][]int
 	// required is true when a request must carry a body.
 	required bool
+	// defaults are the members of the body a `default` tag fills in when the
+	// client leaves them out.
+	defaults []bodyDefault
+}
+
+// bodyDefault is a member of the JSON body that has a default.
+type bodyDefault struct {
+	// index locates the field in the input, name is what the body calls it,
+	// and raw is the tag's text, which set writes into the field.
+	index []int
+	name  string
+	typ   reflect.Type
+	raw   string
+	set   setter
 }
 
 // bindPlan is the precompiled recipe for turning a request into a value of the
@@ -210,7 +225,12 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 	}
 
 	if len(bodyFields) > 0 {
+		defaults, err := bodyDefaults(t, bodyFields)
+		if err != nil {
+			return nil, fmt.Errorf("muzak: %s %s: %w", method, path, err)
+		}
 		plan.body = &bodyPlan{
+			defaults: defaults,
 			// Decoding straight into the input value is only safe when the
 			// input has no located fields at all. Counting body fields against
 			// the field count is not enough: an embedded struct holding both a
@@ -222,6 +242,60 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 		}
 	}
 	return plan, nil
+}
+
+// bodyDefaults finds the members of the JSON body that carry a `default` tag.
+//
+// Only the top level of the body is searched, with the members an embedded
+// struct promotes to it. A default deeper than that would have to be written
+// into an object the client may not have sent, or into each element of a
+// collection, and the document says nothing about it either. A member whose
+// type cannot be written from text, a struct or a map, is left without one
+// rather than refused, since the tag used to be documentation and nothing
+// else; a default that does not parse as its own type is an error, because it
+// could never have been what the developer meant.
+func bodyDefaults(t reflect.Type, bodyFields [][]int) ([]bodyDefault, error) {
+	var out []bodyDefault
+	var walk func(t reflect.Type, prefix []int, fields [][]int) error
+	walk = func(t reflect.Type, prefix []int, fields [][]int) error {
+		for _, tail := range fields {
+			index := append(slices.Clone(prefix), tail...)
+			f := t.FieldByIndex(tail)
+			if f.Anonymous && f.Type.Kind() == reflect.Struct && f.Tag.Get(tagJSON) == "" {
+				var promoted [][]int
+				for i := range f.Type.NumField() {
+					if usableField(f.Type.Field(i)) {
+						promoted = append(promoted, []int{i})
+					}
+				}
+				if err := walk(f.Type, index, promoted); err != nil {
+					return err
+				}
+				continue
+			}
+			raw, has := f.Tag.Lookup(tagDefault)
+			if !has {
+				continue
+			}
+			name, _ := jsonFieldName(f)
+			if name == "" {
+				continue
+			}
+			set, err := setterFor(f.Type)
+			if err != nil {
+				continue
+			}
+			if err := set(reflect.New(f.Type).Elem(), []string{raw}); err != nil {
+				return fmt.Errorf("field %s declares the default %q, which is not a valid %s", f.Name, raw, f.Type)
+			}
+			out = append(out, bodyDefault{index: index, name: name, typ: f.Type, raw: raw, set: set})
+		}
+		return nil
+	}
+	if err := walk(t, nil, bodyFields); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // totalFields counts the exported fields of a struct, which tells newBindPlan
@@ -902,6 +976,14 @@ func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *V
 		// that is supposed to come from the path, a query parameter or a
 		// header.
 		target = reflect.New(p.typ).Elem()
+	}
+	// The decoder leaves a member the body does not mention as it found it,
+	// so a default written first is what a client that omits it gets, and one
+	// that sends it overrides. The defaults were checked when the route was
+	// registered, so there is no failure to report here.
+	for i := range p.body.defaults {
+		d := &p.body.defaults[i]
+		_ = d.set(fieldByIndex(target, d.index), []string{d.raw})
 	}
 	if err := json.Unmarshal(buf.Bytes(), target.Addr().Interface(), route.jsonReadOptions()); err != nil {
 		field, issue := decodeIssue(err)

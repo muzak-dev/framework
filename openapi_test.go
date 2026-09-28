@@ -84,8 +84,8 @@ func TestOpenAPIParameters(t *testing.T) {
 	if limit.Required {
 		t.Error("a parameter with a default is marked required")
 	}
-	if limit.Schema.Default != "20" {
-		t.Errorf("default = %v, want 20", limit.Schema.Default)
+	if limit.Schema.Default != int64(20) {
+		t.Errorf("default = %#v, want the integer 20", limit.Schema.Default)
 	}
 	if limit.Schema.Type != "integer" {
 		t.Errorf("type = %v, want integer", limit.Schema.Type)
@@ -251,7 +251,7 @@ func TestSchemaGeneration(t *testing.T) {
 		{"pointer", func(s *Schema) bool { return len(s.AnyOf) == 2 }, "a nullable reference"},
 		{"ptr_scalar", func(s *Schema) bool { types, ok := s.Type.([]string); return ok && len(types) == 2 }, "a nullable scalar"},
 		{"any", func(s *Schema) bool { return s.Type == nil }, "an unconstrained value"},
-		{"defaulted", func(s *Schema) bool { return s.Default == "x" }, "a default"},
+		{"defaulted", func(s *Schema) bool { return s.Default == nil }, "no default, which only a request body member has"},
 		{"Untagged", func(s *Schema) bool { return s.Type == "string" }, "the field name"},
 		{"func", func(s *Schema) bool { return s.Type == "object" }, "a map"},
 	}

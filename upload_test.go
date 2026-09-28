@@ -555,7 +555,7 @@ func TestUploadIsDocumentedAsAForm(t *testing.T) {
 	if avatar == nil || avatar.Type != "string" || avatar.Format != "binary" {
 		t.Errorf("avatar schema = %+v, want a binary string", avatar)
 	}
-	if rank := schema.Properties["rank"]; rank == nil || rank.Type != "integer" || rank.Default != "3" {
+	if rank := schema.Properties["rank"]; rank == nil || rank.Type != "integer" || rank.Default != int64(3) {
 		t.Errorf("rank schema = %+v, want an integer defaulting to 3", rank)
 	}
 	if got := fmt.Sprint(schema.Required); got != "[avatar note]" {

@@ -1022,24 +1022,46 @@ func TestSSESendAfterTheHandlerReturned(t *testing.T) {
 
 func TestSSEShrinksItsBuffersAfterALargeEvent(t *testing.T) {
 	t.Parallel()
-	measured := make(chan [2]int, 1)
+	measured := make(chan int, 1)
 	_, server := newSSETestApp(t, func(app *App) {
 		app.SSE("/stream", func(_ *Context, _ Empty, stream *SSEStream[itemOut]) error {
 			if err := stream.Send(itemOut{Name: strings.Repeat("x", maxSSEBuffer+1)}); err != nil {
 				return err
 			}
-			measured <- [2]int{cap(stream.core.buf), cap(stream.core.payload)}
+			measured <- cap(stream.core.buf)
 			return nil
 		})
 	})
 
 	reader := openStream(t, server.URL, "/stream")
 	nextEvent(t, reader)
-	sizes := <-measured
-	if sizes[0] > maxSSEBuffer || sizes[1] > maxSSEBuffer {
-		t.Errorf("the stream kept buffers of %d and %d bytes, want them released above %d",
-			sizes[0], sizes[1], maxSSEBuffer)
+	if size := <-measured; size > maxSSEBuffer {
+		t.Errorf("the stream kept a buffer of %d bytes, want it released above %d", size, maxSSEBuffer)
 	}
+}
+
+func TestSSEDoesNotPoolAnOversizedPayloadBuffer(t *testing.T) {
+	t.Parallel()
+	// The pool is shared by every stream, so the decision is tested apart
+	// from it: a buffer handed to the pool may be taken and written by a
+	// stream in another test at once, and must not be read afterwards.
+	oversized := make([]byte, 0, maxSSEBuffer+1)
+	if reusableSSEPayload(&oversized) {
+		t.Errorf("an oversized buffer was accepted for the pool")
+	}
+	if cap(oversized) != maxSSEBuffer+1 || len(oversized) != 0 {
+		t.Errorf("the oversized buffer was altered on its way to being dropped")
+	}
+	small := []byte("left over")
+	if !reusableSSEPayload(&small) {
+		t.Errorf("a small buffer was refused by the pool")
+	}
+	if len(small) != 0 {
+		t.Errorf("a pooled buffer kept %d bytes of the event before it", len(small))
+	}
+	// And the pool accepts what the decision allows, which is only safe to
+	// do with a buffer this test never touches again.
+	putSSEPayload(new([]byte))
 }
 
 func TestSSEUnserializableEventLeavesTheStreamUsable(t *testing.T) {
@@ -1201,30 +1223,34 @@ func TestSSEStreamGivesUpWaitingWhenItEnds(t *testing.T) {
 	stream.release()
 }
 
-func TestSSEStreamFinishReportsAWriteItCouldNotWaitOut(t *testing.T) {
+func TestSSEStreamFinishNeverHandsBackAResponseStillBeingWritten(t *testing.T) {
 	t.Parallel()
-	stream := newTestStream(t, SSEOptions{WriteTimeout: 20 * time.Millisecond})
+	// A write timeout far shorter than the hold below is what the previous
+	// engine gave up after, handing the response back while the writer still
+	// held it.
+	stream := newTestStream(t, SSEOptions{WriteTimeout: time.Millisecond})
 	if err := stream.acquire(); err != nil {
 		t.Fatalf("acquire() = %v", err)
 	}
-	// The semaphore is never given back, which is what a write stuck on a
-	// client that has stopped reading looks like from here.
-	if stream.finish() {
-		t.Error("finish() reported a response handed back while a write still held it")
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		stream.finish()
+	}()
+	select {
+	case <-finished:
+		t.Fatal("finish() returned while a writer still held the response")
+	case <-time.After(50 * time.Millisecond):
+	}
+	stream.release()
+	select {
+	case <-finished:
+	case <-time.After(sseTestTimeout):
+		t.Fatal("finish() never returned once the writer let go")
 	}
 	// Once the response has gone back to net/http, nothing here may touch its
 	// deadlines again.
 	stream.interrupt()
-}
-
-func TestSSEFinalWaitAlwaysBoundsTheLastWrite(t *testing.T) {
-	t.Parallel()
-	if got := (&sseStream{}).finalWait(); got != DefaultSSEWriteTimeout {
-		t.Errorf("finalWait() = %v, want %v for a stream with no write timeout", got, DefaultSSEWriteTimeout)
-	}
-	if got := (&sseStream{writeTimeout: time.Second}).finalWait(); got != time.Second {
-		t.Errorf("finalWait() = %v, want the configured write timeout", got)
-	}
 }
 
 func TestSSEKeepAliveStopsWhenItCannotWrite(t *testing.T) {
@@ -1350,8 +1376,9 @@ func TestSSEFinishWaitsOutAWriteItInterrupted(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		stream.release()
 	}()
-	if !stream.finish() {
-		t.Error("finish() gave up on a write that finished within the timeout")
+	stream.finish()
+	if err := stream.failure(); !errors.Is(err, errSSEFinished) {
+		t.Errorf("failure() = %v after finish, want errSSEFinished", err)
 	}
 }
 

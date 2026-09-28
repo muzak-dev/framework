@@ -111,7 +111,9 @@ type SSEEvent[Out any] struct {
 //
 // Writes are serialized, so any number of goroutines may write to one stream
 // and each event goes out whole. A handler that fans out to several producers
-// needs no lock of its own.
+// needs no lock of its own. Each event is encoded before it joins the queue
+// for the wire, so a slow value on one goroutine does not hold up the events
+// of another.
 //
 // # Lifetime
 //
@@ -119,7 +121,8 @@ type SSEEvent[Out any] struct {
 // why nothing here takes a context: [SSEStream.Context] is the one context
 // that governs every send, and it is cancelled when the client disconnects or
 // the server begins shutting down. Neither the stream nor the [Context] may be
-// used after the handler returns.
+// used after the handler returns. A send a producer goroutine still has in
+// progress at that moment writes nothing and reports [ErrSSEStreamEnded].
 //
 // # Failure
 //
@@ -215,10 +218,11 @@ type sseStream struct {
 	// that waiting for it can be abandoned when the stream ends.
 	writeSem chan struct{}
 
-	// buf assembles the event being written and payload holds its encoded data
-	// field. Both are owned by whoever holds writeSem.
-	buf     []byte
-	payload []byte
+	// buf assembles the event being written, and is owned by whoever holds
+	// writeSem. The encoded data field is not kept here: it is produced before
+	// the semaphore is taken, into a buffer of the sender's own from
+	// ssePayloads, for the reason given on send.
+	buf []byte
 
 	// lastWrite records when something was last written, in Unix nanoseconds,
 	// so that a keepalive says nothing on a stream that is already busy.
@@ -358,8 +362,44 @@ type sseFrame struct {
 	hasText bool
 }
 
-// send encodes one event and writes it, taking the write semaphore first so
-// that concurrent writers cannot interleave two events.
+// ssePayloads holds the buffers an event's data field is encoded into. They
+// are pooled rather than kept per stream because encoding happens before the
+// write semaphore is taken, so several senders on one stream may each be
+// encoding at once and each needs a buffer of its own.
+var ssePayloads = sync.Pool{New: func() any { return new([]byte) }}
+
+// putSSEPayload returns an encoding buffer to the pool; see
+// [reusableSSEPayload].
+func putSSEPayload(payload *[]byte) {
+	if reusableSSEPayload(payload) {
+		ssePayloads.Put(payload)
+	}
+}
+
+// reusableSSEPayload empties an encoding buffer and reports whether it is fit
+// to pool: one that an unusually large event grew out of all proportion is
+// left for the collector rather than pinned for every event after it, and is
+// not touched.
+func reusableSSEPayload(payload *[]byte) bool {
+	if cap(*payload) > maxSSEBuffer {
+		return false
+	}
+	*payload = (*payload)[:0]
+	return true
+}
+
+// send encodes one event and writes it, taking the write semaphore so that
+// concurrent writers cannot interleave two events.
+//
+// The event is encoded before the semaphore is taken, and that order is what
+// keeps a late send out of a response that is no longer this stream's.
+// Encoding runs the caller's own code, a MarshalJSON method that may take as
+// long as it likes, and nothing can interrupt it the way a deadline interrupts
+// a write. A send that held the semaphore while it encoded would hold it for
+// as long as that took, and [sseStream.finish] would have to choose between
+// waiting on code it cannot stop and handing the response back while the send
+// could still reach it. Holding the semaphore only for the write itself, which
+// a deadline does bound, removes the choice.
 func (s *sseStream) send(frame sseFrame) error {
 	if err := frame.check(); err != nil {
 		// The event was never going to be valid. The stream is left alone,
@@ -367,23 +407,29 @@ func (s *sseStream) send(frame sseFrame) error {
 		// to fix rather than the stream's to die of.
 		return err
 	}
+	if err := s.failure(); err != nil {
+		// Nothing is encoded for a stream that has already ended.
+		return err
+	}
+
+	payload := ssePayloads.Get().(*[]byte)
+	defer putSSEPayload(payload)
+	if frame.hasData {
+		if err := json.MarshalWrite(sseAppender{buf: payload}, frame.data); err != nil {
+			return fmt.Errorf("muzak: encoding an event: %w", err)
+		}
+	} else if frame.hasText {
+		*payload = append(*payload, frame.text...)
+	}
+
 	if err := s.acquire(); err != nil {
 		return err
 	}
 	defer s.release()
 
-	s.payload = s.payload[:0]
-	if frame.hasData {
-		if err := json.MarshalWrite(sseAppender{buf: &s.payload}, frame.data); err != nil {
-			return fmt.Errorf("muzak: encoding an event: %w", err)
-		}
-	} else if frame.hasText {
-		s.payload = append(s.payload, frame.text...)
-	}
-
 	s.buf = frame.appendFields(s.buf[:0])
 	if frame.hasData || frame.hasText {
-		s.buf = appendSSELines(s.buf, "data: ", s.payload)
+		s.buf = appendSSELines(s.buf, "data: ", *payload)
 	}
 	// A blank line is what tells the client the event is complete. Every event
 	// is assembled in full before any of it is written, so a client never sees
@@ -516,18 +562,13 @@ func (s *sseStream) shrink() {
 	if cap(s.buf) > maxSSEBuffer {
 		s.buf = nil
 	}
-	if cap(s.payload) > maxSSEBuffer {
-		s.payload = nil
-	}
 }
 
-// write puts one assembled event on the wire under its own deadline.
+// write puts one assembled event on the wire under its own deadline. The
+// write semaphore must be held.
 func (s *sseStream) write(b []byte) error {
-	if s.deadlines && s.writeTimeout > 0 {
-		// This is the bound that matters: without it, a client that opens a
-		// stream and never reads it holds a goroutine and a growing socket
-		// buffer for as long as it cares to.
-		_ = s.rc.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+	if err := s.arm(); err != nil {
+		return err
 	}
 	if _, err := s.w.Write(b); err != nil {
 		return s.fail(endedBy("writing an event failed", err))
@@ -539,26 +580,49 @@ func (s *sseStream) write(b []byte) error {
 	return nil
 }
 
+// arm is the last thing a write does before it touches the response: it
+// confirms that the stream is still live and gives the write its deadline.
+//
+// Both happen under the lock that [sseStream.interrupt] and
+// [sseStream.finish] take, which is what closes the gap between a writer
+// taking the semaphore and reaching the response. A stream that ended in that
+// gap is seen here and the write never starts; one that ends after this has
+// the deadline set here moved into the past by the interrupt, so the write in
+// progress gives up rather than running on. Either way, by the time finish
+// holds the semaphore nothing can still be writing.
+func (s *sseStream) arm() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.failureLocked(); err != nil {
+		return err
+	}
+	if s.deadlines && s.writeTimeout > 0 {
+		// This is the bound that matters: without it, a client that opens a
+		// stream and never reads it holds a goroutine and a growing socket
+		// buffer for as long as it cares to.
+		_ = s.rc.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+	}
+	return nil
+}
+
 // acquire takes the write semaphore, giving up if the stream ends while it
 // waits.
+//
+// A stream that ended before the semaphore came free is not refused here but
+// by [sseStream.arm], under the lock that the end of a stream takes, because a
+// check made here could be overtaken before the write began.
 func (s *sseStream) acquire() error {
 	select {
 	case s.writeSem <- struct{}{}:
+		return nil
 	default:
-		select {
-		case s.writeSem <- struct{}{}:
-		case <-s.ctx.Done():
-			return s.failure()
-		}
 	}
-	// The stream may have ended before this call arrived, or while it waited
-	// for its turn. Either way the semaphore has to go back, or nothing could
-	// finish the stream afterwards.
-	if err := s.failure(); err != nil {
-		s.release()
-		return err
+	select {
+	case s.writeSem <- struct{}{}:
+		return nil
+	case <-s.ctx.Done():
+		return s.failure()
 	}
-	return nil
 }
 
 // release returns the write semaphore.
@@ -574,6 +638,11 @@ func (s *sseStream) release() { <-s.writeSem }
 func (s *sseStream) failure() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.failureLocked()
+}
+
+// failureLocked is failure with the lock already held.
+func (s *sseStream) failureLocked() error {
 	if s.err == nil && s.ctx.Err() != nil {
 		s.err = endedBy("the request ended", context.Cause(s.ctx))
 	}
@@ -623,64 +692,50 @@ func (s *sseStream) interrupt() {
 	_ = s.rc.SetWriteDeadline(time.Now())
 }
 
-// finish ends the stream once its handler has returned, and reports whether
-// the response could be handed back with nothing still writing into it.
+// finish ends the stream once its handler has returned, and returns only when
+// nothing can write into the response any more.
 //
 // Waiting for the write half is the whole point. A goroutine the handler left
 // behind mid-write would otherwise write into a response net/http has already
 // taken back, and on a keep-alive connection that means writing into somebody
-// else's request.
-func (s *sseStream) finish() bool {
-	handed := s.acquireFinal()
+// else's request, or into a writer net/http has already torn down, which
+// crashes the process.
+//
+// The wait has no bound of its own, because there is nothing safe to do at the
+// end of one: the response can only go back once the writer has let go of it.
+// It is bounded all the same. The ending is recorded first, so a sender that
+// has not yet reached the response never will; the one that has is holding a
+// write that the interrupt below cuts short; and encoding, the one part of a
+// send no deadline reaches, happens before the semaphore is taken and so is
+// never waited for. Only a response writer that carries no deadlines at all
+// can keep this waiting, and then for no longer than its own write takes.
+func (s *sseStream) finish() {
+	_ = s.record(errSSEFinished)
+	s.cancel()
+	s.acquireFinal()
 	s.mu.Lock()
-	if s.err == nil {
-		s.err = errSSEFinished
-	}
 	s.finished = true
 	s.mu.Unlock()
-	if handed {
-		s.release()
-	}
-	s.cancel()
+	s.release()
 	if s.unwatch != nil {
 		s.unwatch()
 	}
-	return handed
 }
 
-// acquireFinal takes the write semaphore for the last time, waiting no longer
-// than one write is allowed to take.
-func (s *sseStream) acquireFinal() bool {
+// acquireFinal takes the write semaphore for the last time.
+func (s *sseStream) acquireFinal() {
 	select {
 	case s.writeSem <- struct{}{}:
-		return true
+		return
 	default:
 	}
 	// Something is mid-write. Its deadline is brought forward so that it gives
 	// up now rather than carrying on into a response that is no longer its
-	// own.
+	// own. The interrupt is kept to this case because a deadline in the past
+	// would also fail the few bytes net/http writes to end the response, and
+	// a stream that ended with nothing in flight should end cleanly.
 	s.interrupt()
-	timer := time.NewTimer(s.finalWait())
-	defer timer.Stop()
-	select {
-	case s.writeSem <- struct{}{}:
-		return true
-	case <-timer.C:
-		// coverage: reaching this needs a write that outlives its own
-		// interrupted deadline, which a response writer that carries no
-		// deadlines is the only way to arrange; the wait is bounded so that a
-		// shutdown cannot be held up by one either way.
-		return false
-	}
-}
-
-// finalWait bounds that last wait. A stream whose write timeout was disabled
-// still needs one, because the alternative is a request that never ends.
-func (s *sseStream) finalWait() time.Duration {
-	if s.writeTimeout <= 0 {
-		return DefaultSSEWriteTimeout
-	}
-	return s.writeTimeout
+	s.writeSem <- struct{}{}
 }
 
 // keepalive writes a comment to a stream that has said nothing for a while,

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json/v2"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -528,6 +530,13 @@ func TestAppendMaybeQuoted(t *testing.T) {
 		{"has=equals", `"has=equals"`},
 		{"has\"quote", `"has\"quote"`},
 		{"has\nnewline", `"has\nnewline"`},
+		{"esc\x1b[2J", `"esc\x1b[2J"`},
+		{"del\x7f", `"del\x7f"`},
+		{"c1\u0085", `"c1\u0085"`},
+		{"ls\u2028", `"ls\u2028"`},
+		{"bidi\u202e", `"bidi\u202e"`},
+		{"bad\xff", `"bad\xff"`},
+		{"caf\u00e9", "caf\u00e9"},
 	}
 	for _, tc := range tests {
 		if got := string(appendMaybeQuoted(nil, tc.in)); got != tc.want {
@@ -576,5 +585,51 @@ func TestConsoleHandlerReleasesOversizedBuffers(t *testing.T) {
 	logger.Info("small")
 	if !strings.Contains(buf.String(), "small") {
 		t.Errorf("logging broke after an oversized record: %q", buf.String())
+	}
+}
+
+// TestConsoleEscapesControlCharacters is the regression test for a console
+// format that wrote the record message and attribute values as they were, so a
+// request path carrying %0a forged a log line of its own and one carrying ESC
+// drove the operator's terminal. Every record is now exactly one line with no
+// control byte in it, whatever the message, scope, key or value holds.
+func TestConsoleEscapesControlCharacters(t *testing.T) {
+	t.Parallel()
+	buf := &syncBuffer{}
+	off := false
+	opts := quietOptions()
+	opts.Logger = NewLogger(LoggerOptions{Format: LogFormatConsole, Output: buf, Color: &off})
+	app := New(opts)
+	app.Get("/x", okHandler)
+	mustBuild(t, app)
+
+	before := len(buf.String())
+	target := "/nope%0a12:00:00.000%20ERROR%20[Server]%20admin%20login%20OK%1b[2J%1b]0;pwned%07%c2%85%e2%80%a8"
+	rec := doRequest(t, app, httptest.NewRequest("GET", target, nil))
+	assertStatus(t, rec, http.StatusNotFound)
+
+	out := buf.String()[before:]
+	if n := strings.Count(out, "\n"); n != 1 {
+		t.Fatalf("one request wrote %d lines:\n%s", n, out)
+	}
+	if needsConsoleEscape(strings.TrimSuffix(out, "\n")) {
+		t.Fatalf("the access log line still holds a control sequence: %q", out)
+	}
+	for _, want := range []string{`/nope\n12:00:00.000 ERROR`, `\x1b[2J`, `\a`, `\u0085`, `\u2028`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("line %q does not carry the escape %s", out, want)
+		}
+	}
+
+	logger, lbuf := consoleLogger(t, nil)
+	logger.With(ScopeKey, "Sc\x1bope").WithGroup("g\n").Info("hi\xff", "k\ry", "v\u2029", "ok", "caf\u00e9")
+	got := lbuf.String()
+	if strings.Count(got, "\n") != 1 || needsConsoleEscape(strings.TrimSuffix(got, "\n")) {
+		t.Fatalf("scope, group, key or value escaped the line: %q", got)
+	}
+	for _, want := range []string{`[Sc\x1bope]`, `hi\xff`, `g\n.k\ry="v\u2029"`, "ok=caf\u00e9"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("line %q does not contain %s", got, want)
+		}
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ScopeKey is the attribute key that names the subsystem a log record came
@@ -281,6 +283,10 @@ const (
 // consoleHandler renders the aligned, human-readable format. It is the default
 // when logs are going to a terminal.
 //
+// Every record is exactly one line: the message, the scope, keys and values
+// are escaped so that nothing a client sent can end the line early or reach
+// the terminal as a control sequence; see [appendConsoleEscaped].
+//
 // Records are formatted into a pooled buffer and written with a single Write
 // call under a shared mutex, so lines from concurrent goroutines never
 // interleave. Attributes supplied through WithAttrs are formatted once, at the
@@ -391,7 +397,11 @@ func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
 	buf = h.appendLevel(buf, r.Level)
 	buf = append(buf, ' ')
 	buf = h.appendScope(buf)
-	buf = append(buf, r.Message...)
+	// The message is escaped rather than quoted, because quoting every
+	// message would put noise around the common case, and it has to be
+	// escaped at all because it is not always the application's own text:
+	// the access log's message carries the decoded request path.
+	buf = appendConsoleEscaped(buf, r.Message)
 
 	buf = append(buf, h.preAttrs...)
 	r.Attrs(func(a slog.Attr) bool {
@@ -465,7 +475,7 @@ func (h *consoleHandler) appendScope(buf []byte) []byte {
 		buf = append(buf, ansiBold...)
 	}
 	buf = append(buf, '[')
-	buf = append(buf, h.scope...)
+	buf = appendConsoleEscaped(buf, h.scope)
 	buf = append(buf, ']')
 	if h.color {
 		buf = append(buf, ansiReset...)
@@ -506,10 +516,10 @@ func (h *consoleHandler) appendAttr(buf []byte, a slog.Attr, groups []string) []
 		buf = append(buf, ansiDim...)
 	}
 	for _, g := range groups {
-		buf = append(buf, g...)
+		buf = appendConsoleEscaped(buf, g)
 		buf = append(buf, '.')
 	}
-	buf = append(buf, a.Key...)
+	buf = appendConsoleEscaped(buf, a.Key)
 	buf = append(buf, '=')
 	if h.color {
 		buf = append(buf, ansiReset...)
@@ -554,14 +564,85 @@ func (h *consoleHandler) maybeShorten(key, value string) string {
 
 // appendMaybeQuoted quotes a string only when it needs it, which keeps the
 // common case free of escape noise.
+//
+// A value needs quoting when it would make the key=value pair ambiguous, and
+// also when it holds anything [needsConsoleEscape] reports: attribute values
+// routinely carry what a client sent (a path, a header, a user agent), and
+// strconv's quoting escapes every non-printable rune, so a quoted value can
+// neither end the line early nor reach the terminal as a control sequence.
 func appendMaybeQuoted(buf []byte, s string) []byte {
 	if s == "" {
 		return append(buf, '"', '"')
 	}
-	if strings.ContainsAny(s, " \t\n\r\"=\\") {
+	if strings.ContainsAny(s, " \t\n\r\"=\\") || needsConsoleEscape(s) {
 		return strconv.AppendQuote(buf, s)
 	}
 	return append(buf, s...)
+}
+
+// unsafeInConsole reports whether a rune must not reach the console as itself.
+//
+// The console format promises one record per line, and anything reading it
+// (a person at a terminal, a pager, a line-oriented collector) trusts that
+// promise. A C0 or C1 control, DEL, or a Unicode line or paragraph separator
+// could end the line early and let a client forge a record of its own, and an
+// ESC opens a terminal escape sequence that can clear the screen, retitle the
+// window or hide what came before it. The bidirectional controls cannot break
+// a line, but they reorder how it is displayed, which is the same forgery by
+// other means.
+func unsafeInConsole(r rune) bool {
+	return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || unicode.Is(unicode.Bidi_Control, r)
+}
+
+// needsConsoleEscape reports whether s holds a rune [unsafeInConsole] rejects
+// or a byte that is not valid UTF-8, which a terminal may decode as a C1
+// control of its own. The ASCII loop is the fast path for the text almost
+// every record consists of.
+func needsConsoleEscape(s string) bool {
+	for i := 0; i < len(s); {
+		if c := s[i]; c < utf8.RuneSelf {
+			if c < ' ' || c == 0x7f {
+				return true
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || unsafeInConsole(r) {
+			return true
+		}
+		i += size
+	}
+	return false
+}
+
+// appendConsoleEscaped writes s with every rune [needsConsoleEscape] objects
+// to replaced by its Go escape (\n, \x1b, \u2028), and everything else as
+// it is.
+//
+// It escapes without quoting, for the parts of a line that are not
+// key=value pairs. A backslash is left alone, so a literal "\x1b" in the text
+// reads the same as an escaped ESC; that ambiguity costs nothing, because
+// neither form can do anything to the terminal or the line.
+func appendConsoleEscaped(buf []byte, s string) []byte {
+	if !needsConsoleEscape(s) {
+		return append(buf, s...)
+	}
+	const hex = "0123456789abcdef"
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			buf = append(buf, '\\', 'x', hex[s[i]>>4], hex[s[i]&0x0f])
+		case unsafeInConsole(r):
+			quoted := strconv.QuoteRuneToASCII(r)
+			buf = append(buf, quoted[1:len(quoted)-1]...)
+		default:
+			buf = append(buf, s[i:i+size]...)
+		}
+		i += size
+	}
+	return buf
 }
 
 // appendSource writes the call site when [LoggerOptions.AddSource] is set.

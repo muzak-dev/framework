@@ -309,9 +309,23 @@ func (a *App) RunContext(ctx context.Context) error {
 // It stops on SIGINT or SIGTERM, which is what a terminal, a container
 // runtime and an init system all send to ask a process to stop, and then shuts
 // down gracefully. It is the method a main function usually wants.
+//
+// Only the first signal is graceful. Once it has been received the handlers
+// are released, so a second SIGINT or SIGTERM while the server is still
+// draining takes the default action and ends the process, which is what an
+// operator pressing Ctrl-C twice expects.
 func (a *App) RunSignals() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// NotifyContext keeps swallowing signals until stop runs, which on its
+	// own would be when the drain has finished: a second interrupt during a
+	// drain that may last the whole ShutdownTimeout, or without limit when it
+	// is negative, would do nothing at all. stop also ends the goroutine, so
+	// a return before any signal leaves nothing behind.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	return a.RunContext(ctx)
 }
 

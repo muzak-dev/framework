@@ -122,6 +122,14 @@ type AppOptions struct {
 	// absolute URL, because only the page is rewritten.
 	//
 	// With no UI configured, DocsPath answers as any other unknown path does.
+	//
+	// The page, its assets and the OpenAPI document are answered ahead of
+	// routing, but not ahead of the application: the guards and providers
+	// given to [New] run first, and a refusal is rendered as it would be for
+	// a route. An application-wide token therefore covers the documentation
+	// too. To publish the documentation while the API stays private, declare
+	// the guard on an included router rather than on New, or set
+	// [AppOptions.DisableDocs].
 	DocsUI fs.FS
 
 	// DocsPath is where the documentation UI is served, defaulting to
@@ -147,6 +155,13 @@ type AppOptions struct {
 	// Neither path is registered and no document is generated, so
 	// [App.Document] returns nil and both paths answer as any other unknown
 	// path does.
+	//
+	// Documentation that is served runs the application-wide guards and
+	// providers given to [New] before anything is sent, so leaving this unset
+	// does not publish an API its own guards keep private; the document is
+	// then marked private to caches as well. Guards declared on an included
+	// router or a route do not apply to it, because the document describes
+	// every router at once.
 	DisableDocs bool
 
 	// DisableAccessLog stops the per-request access log from being installed.
@@ -294,6 +309,10 @@ type pathEntry struct {
 //		Version: "1.0.0",
 //		Addr:    ":8080",
 //	}, muzak.WithDependencies(GetQueryToken))
+//
+// The guards and providers declared here also run before the OpenAPI
+// document and the documentation UI are served, since those describe the
+// whole application; see [AppOptions.DisableDocs].
 //
 // New never fails. Problems with the routes, such as a duplicate path or an
 // unbindable input type, are reported by [App.Build] and by the methods that

@@ -16,9 +16,39 @@ import (
 	"time"
 )
 
-func TestOpenAPIEndpoint(t *testing.T) {
+// newPublicDocsApp is the specification's example application with its
+// application-wide guard declared on each router it protects instead, which
+// is how an application keeps its documentation public while its API stays
+// private: the guards given to New cover the documentation too. The routes,
+// and so the document, are the same.
+func newPublicDocsApp() *App {
+	app := New(quietOptions())
+	app.Include(newUsersRouter(), WithDependencies(intgQueryToken))
+	app.Include(newItemsRouter(), WithDependencies(intgQueryToken))
+	app.Include(newAdminRouter(),
+		WithPrefix("/admin"),
+		WithTags("admin"),
+		WithDependencies(intgQueryToken, intgTokenHeader),
+		WithResponseDoc(418, "I'm a teapot"),
+	)
+	return app
+}
+
+// TestSpecificationAppGuardsItsDocs pins what newPublicDocsApp works around:
+// with the token required application-wide, the documentation asks for it
+// too.
+func TestSpecificationAppGuardsItsDocs(t *testing.T) {
 	t.Parallel()
 	app := mustBuild(t, newIntegrationApp())
+	for _, target := range []string{"/openapi.json", "/docs"} {
+		assertStatus(t, do(t, app, "GET", target), http.StatusBadRequest)
+		assertStatus(t, do(t, app, "GET", target+"?token=abc"), http.StatusOK)
+	}
+}
+
+func TestOpenAPIEndpoint(t *testing.T) {
+	t.Parallel()
+	app := mustBuild(t, newPublicDocsApp())
 
 	rec := do(t, app, "GET", "/openapi.json")
 	assertStatus(t, rec, http.StatusOK)
@@ -40,7 +70,7 @@ func TestOpenAPIEndpoint(t *testing.T) {
 
 func TestOpenAPIEndpointConditionalRequests(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	first := do(t, app, "GET", "/openapi.json")
 	etag := first.Header().Get("ETag")
@@ -63,7 +93,7 @@ func TestOpenAPIEndpointConditionalRequests(t *testing.T) {
 
 func TestOpenAPIEndpointMethods(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	head := do(t, app, "HEAD", "/openapi.json")
 	assertStatus(t, head, http.StatusOK)
@@ -83,7 +113,7 @@ func TestOpenAPIEndpointMethods(t *testing.T) {
 
 func TestDocsPage(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	rec := do(t, app, "GET", "/docs")
 	assertStatus(t, rec, http.StatusOK)
@@ -114,7 +144,7 @@ func TestDocsPage(t *testing.T) {
 // browser run them rather than download them.
 func TestDocsAssetsAreServed(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	body := do(t, app, "GET", "/docs").Body.String()
 	for _, want := range []struct{ ext, mediaType string }{
@@ -165,7 +195,7 @@ func assetReferencedBy(t *testing.T, page, ext string) string {
 // requests the page makes are the ones its own script makes to this origin.
 func TestDocsPageIsSelfContained(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 	body := do(t, app, "GET", "/docs").Body.String()
 
 	for _, third := range []string{"//unpkg", "//cdn", "//fonts.", "http://", "https://"} {
@@ -192,7 +222,7 @@ func TestDocsPageIsSelfContained(t *testing.T) {
 
 func TestDocsPageContentSecurityPolicy(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	rec := do(t, app, "GET", "/docs")
 	policy := rec.Header().Get("Content-Security-Policy")
@@ -234,7 +264,7 @@ func TestDocsPageContentSecurityPolicy(t *testing.T) {
 // inert in a browser while every test that only reads headers still passed.
 func TestDocsPagePolicyCoversItsOwnScript(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	rec := do(t, app, "GET", "/docs")
 	policy := rec.Header().Get("Content-Security-Policy")
@@ -287,7 +317,7 @@ func inlineBlock(t *testing.T, page, element string) string {
 // client that asked for the other.
 func TestDocsAreServedCompressed(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	for _, path := range []string{"/docs", "/openapi.json"} {
 		plain := do(t, app, "GET", path)
@@ -331,7 +361,7 @@ func TestDocsAreServedCompressed(t *testing.T) {
 // representation it holds rather than the other one.
 func TestDocsCompressedRepresentationRevalidates(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	first := httptest.NewRequest("GET", "/docs", nil)
 	first.Header.Set("Accept-Encoding", "gzip")
@@ -354,7 +384,7 @@ func TestDocsCompressedRepresentationRevalidates(t *testing.T) {
 // reject it.
 func TestDocsRefuseGzipWhenTheClientDoes(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	req := httptest.NewRequest("GET", "/docs", nil)
 	req.Header.Set("Accept-Encoding", "gzip;q=0")
@@ -431,7 +461,7 @@ func TestAssetSkipsCompressionThatWouldNotHelp(t *testing.T) {
 
 func TestDocsPageMethods(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	head := do(t, app, "HEAD", "/docs")
 	assertStatus(t, head, http.StatusOK)

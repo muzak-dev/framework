@@ -573,6 +573,11 @@
 // security policy that hashes its own inline script and permits no network
 // access beyond this origin.
 //
+// The guards and providers given to [New] run before any of it is sent, and
+// a refusal is rendered as it would be for a route, so an application-wide
+// token covers the documentation as well as the API it describes. Declare the
+// guard on an included router instead to keep the documentation public.
+//
 // [AppOptions.DocsPath] and [AppOptions.OpenAPIPath] decide where the two are
 // served, and [AppOptions.DisableDocs] turns both off for a deployment that
 // must not describe itself. Where they ended up is reported as the socket

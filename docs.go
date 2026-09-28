@@ -234,6 +234,12 @@ func browsableURL(scheme, addr, path string) string {
 
 // withDocs intercepts the documentation paths and delegates everything else to
 // the application's routes.
+//
+// The documentation is answered here, ahead of routing, so it runs the
+// application's own guards and providers itself: those declared on [New],
+// which every route inherits. Serving it without them published the full
+// shape of an API, every internal path and header it reads included, to
+// clients the same application refused on every route.
 func (a *App) withDocs(next http.Handler) http.Handler {
 	assets := a.prepareDocs()
 	if assets == nil {
@@ -241,6 +247,16 @@ func (a *App) withDocs(next http.Handler) http.Handler {
 	}
 	specPath := a.opts.OpenAPIPath
 	docsPath := a.opts.DocsPath
+
+	serve := func(as *asset, w http.ResponseWriter, r *http.Request) { as.serve(w, r) }
+	if guards, providers := a.cfg.guards, a.cfg.providers; len(guards) > 0 || len(providers) > 0 {
+		// A document only some clients may read must not be kept by a cache
+		// shared between them.
+		assets.markPrivate()
+		serve = func(as *asset, w http.ResponseWriter, r *http.Request) {
+			a.serveGuardedAsset(as, w, r, guards, providers)
+		}
+	}
 
 	// The dashboard is one page at the documentation path, and its scripts,
 	// stylesheet and fonts sit beneath it. Serving them from the same subtree
@@ -251,17 +267,52 @@ func (a *App) withDocs(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == specPath:
-			assets.spec.serve(w, r)
+			serve(assets.spec, w, r)
 		case assets.page != nil && (r.URL.Path == docsPath || r.URL.Path == docsSlash):
-			assets.page.serve(w, r)
+			serve(assets.page, w, r)
 		default:
 			if static, found := assets.static[r.URL.Path]; found {
-				static.serve(w, r)
+				serve(static, w, r)
 				return
 			}
 			next.ServeHTTP(w, r)
 		}
 	})
+}
+
+// serveGuardedAsset runs the application's guards and then its providers, in
+// the order a route runs them, and serves the asset only if every one of them
+// let the request through. A refusal is rendered by the same error path a
+// route's is, so a client sees the same 401 from the documentation as from
+// the API it describes.
+func (a *App) serveGuardedAsset(as *asset, w http.ResponseWriter, r *http.Request, guards []Guard, providers []*provider) {
+	rw := asResponseWriter(w)
+	c := a.acquire(rw, r)
+	defer a.release(c)
+	for _, guard := range guards {
+		if err := guard(c); err != nil {
+			a.fail(c, err)
+			return
+		}
+	}
+	if err := resolveInheritedProviders(c, providers); err != nil {
+		a.fail(c, err)
+		return
+	}
+	as.serve(rw, r)
+}
+
+// markPrivate marks every documentation asset as one a shared cache must not
+// store, for an application whose documentation is served only to some
+// clients.
+func (d *docsAssets) markPrivate() {
+	d.spec.private = true
+	if d.page != nil {
+		d.page.private = true
+	}
+	for _, static := range d.static {
+		static.private = true
+	}
 }
 
 // asset is one document the documentation routes serve. Everything a response
@@ -274,7 +325,11 @@ type asset struct {
 	contentType string
 	// policy is the Content-Security-Policy the asset is served under, and is
 	// empty for one that needs none.
-	policy   string
+	policy string
+	// private reports that the asset is served only to clients the
+	// application's guards admit, so no cache shared between clients may keep
+	// it.
+	private  bool
 	body     []byte
 	etag     string
 	gzip     []byte
@@ -318,7 +373,11 @@ func (as *asset) serve(w http.ResponseWriter, r *http.Request) {
 	header.Set("ETag", etag)
 	// The documents change whenever the application does, so a client may hold
 	// them but has to ask; the entity tag then makes that question cheap.
-	header.Set("Cache-Control", "no-cache")
+	if as.private {
+		header.Set("Cache-Control", "private, no-cache")
+	} else {
+		header.Set("Cache-Control", "no-cache")
+	}
 	if as.policy != "" {
 		header.Set("Content-Security-Policy", as.policy)
 	}

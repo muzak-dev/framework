@@ -308,7 +308,7 @@ func TestRunSignalsStopsOnSIGTERM(t *testing.T) {
 // routes do not depend on content negotiation.
 func TestDocsRoutesIgnoreAcceptHeaders(t *testing.T) {
 	t.Parallel()
-	app := mustBuild(t, newIntegrationApp())
+	app := mustBuild(t, newPublicDocsApp())
 
 	req := httptest.NewRequest("GET", "/docs", nil)
 	req.Header.Set("Accept", "text/plain")

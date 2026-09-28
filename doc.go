@@ -365,10 +365,10 @@
 // usual JSON error and never becomes a connection at all, which is what makes
 // a rejection something a client can read rather than a socket that closes a
 // moment after it opened. What can be judged without running any of that comes
-// first: a request that is not a valid handshake, one from an origin that may
-// not connect, and one arriving when the application already holds as many
-// connections as it may are answered before the guards and dependencies run,
-// so a refused handshake never costs a session lookup or its side effects.
+// first: a handshake from an origin that may not connect, and one arriving when
+// the application already holds as many connections as it may, are answered
+// before the guards and dependencies run, so a refused handshake never costs a
+// session lookup or its side effects.
 //
 // Reading and writing are message oriented: a message split across frames is
 // delivered once and whole, a ping is answered without the handler knowing,

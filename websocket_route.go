@@ -386,9 +386,9 @@ type wsConfig struct {
 // applies here: middleware runs, guards run, dependencies resolve, and the
 // input struct is bound and validated before a single byte is upgraded. A
 // request that fails any of that is answered with the usual JSON error and
-// never becomes a connection at all. The handshake itself, its origin and the
-// connection limits are checked first, before the guards and dependencies, so
-// that a handshake bound to be refused runs none of them.
+// never becomes a connection at all. A handshake's origin and the connection
+// limits are checked first, before the guards and dependencies, so that a
+// handshake bound to be refused for either runs none of them.
 //
 //	type WSItemIn struct {
 //		ItemID string `path:"item_id"`
@@ -632,9 +632,9 @@ func (a *App) admitWebSocket(c *Context) (string, error) {
 	return connKey, nil
 }
 
-// refuseWebSocket answers a handshake that is going to be refused for what it
-// is or for who sent it, which is everything that can be known without running
-// the route's guards and dependencies.
+// refuseWebSocket answers a handshake that is going to be refused for who sent
+// it or because the application is full, which is everything that can be known
+// about it without running the route's guards and dependencies.
 //
 // They run after it, not before, because they are where a session is looked
 // up, an expiry slid or a one-shot token consumed, and a cross-site page can
@@ -643,8 +643,15 @@ func (a *App) admitWebSocket(c *Context) (string, error) {
 // full server should not spend a store round trip on every handshake it turns
 // away. The checks are repeated when the connection is accepted, which is
 // cheap and is what keeps the answer right if the register filled in between.
+//
+// A request that does not ask to upgrade is left to the guards and to the
+// handshake check that follows them, so that a client without credentials is
+// told to authenticate rather than told what kind of route this is.
 func (a *App) refuseWebSocket(c *Context, cfg *wsConfig) error {
-	if _, err := cfg.checkHandshake(c); err != nil {
+	if !headerHasToken(c.r.Header, "Connection", "upgrade") || !headerHasToken(c.r.Header, "Upgrade", "websocket") {
+		return nil
+	}
+	if err := cfg.checkOrigin(c.r); err != nil {
 		return err
 	}
 	_, err := a.admitWebSocket(c)

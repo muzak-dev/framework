@@ -78,3 +78,21 @@ func TestWebSocketConnectionCapIsCheckedBeforeDependencies(t *testing.T) {
 		t.Errorf("the refused handshake resolved a dependency: %d calls in all, want 1", deps.Load())
 	}
 }
+
+func TestWebSocketRequestThatDoesNotUpgradeReachesTheGuardsFirst(t *testing.T) {
+	t.Parallel()
+	// A client with no credentials is told to authenticate rather than what
+	// kind of route this is, so only a request that asks for a handshake is
+	// judged ahead of the guards.
+	_, server := newWSTestApp(t, func(app *App) {
+		app.WS("/ws", wsEcho, WithDependencies(RequireBearerToken("s3cret")))
+	})
+	response, err := http.Get(server.URL + "/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", response.StatusCode, http.StatusUnauthorized)
+	}
+}

@@ -3,9 +3,11 @@ package validate
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SliceRules collects the checks applied to a slice field.
@@ -231,14 +233,16 @@ func (r *SliceRules[E]) MaxItems(n int) *SliceRules[E] {
 // Unique requires every element to differ from every other.
 //
 // Elements are compared the way reflect.DeepEqual compares them, so a slice of
-// structs is deduplicated by content rather than by identity. The failure names
-// the earliest element that appears again later.
+// structs is deduplicated by content rather than by identity. The exception is
+// time.Time, whose elements are the same when they are the same instant, as
+// time.Time.Equal has it, in whatever zone they were written. The failure
+// names the earliest element that appears again later.
 //
-// The cost depends on the element type. Strings, numbers, booleans, and arrays
-// and structs built only from those are hashed, so a collection of any length
-// is checked in linear time. Anything else, a struct holding a pointer, a
-// slice, a map or an interface, cannot be hashed the way DeepEqual compares
-// it and is compared pair by pair, which is quadratic: a few hundred kilobytes
+// The cost depends on the element type. Strings, numbers, booleans, arrays
+// and structs built only from those, times and netip addresses are hashed, so
+// a collection of any length is checked in linear time. Anything else, a
+// struct holding a pointer, a slice, a map or an interface, cannot be hashed
+// the way DeepEqual compares it and is compared pair by pair, which is quadratic: a few hundred kilobytes
 // of JSON is enough elements to cost seconds. Declare [SliceRules.MaxItems]
 // alongside Unique for such a collection. Unique defers to MaxItems and
 // [SliceRules.Items] in either order of declaration: a collection over the
@@ -408,7 +412,8 @@ func firstRepeat[E any](list []E) (int, bool) {
 	if len(list) < 2 {
 		return 0, false
 	}
-	if !hashable(reflect.TypeFor[E]()) {
+	key := keyFor[E]()
+	if key == nil {
 		for i := range list {
 			for j := i + 1; j < len(list); j++ {
 				if reflect.DeepEqual(list[i], list[j]) {
@@ -421,16 +426,57 @@ func firstRepeat[E any](list []E) (int, bool) {
 	seen := make(map[any]int, len(list))
 	first := -1
 	for j := range list {
-		key := any(list[j])
-		if i, found := seen[key]; found {
+		k := key(list[j])
+		if i, found := seen[k]; found {
 			if first < 0 || i < first {
 				first = i
 			}
 			continue
 		}
-		seen[key] = j
+		seen[k] = j
 	}
 	return first, first >= 0
+}
+
+// instant identifies a point in time and nothing else about a time.Time.
+type instant struct {
+	sec  int64
+	nsec int
+}
+
+// keyFor returns a function that maps an element to a map key which is equal
+// for two elements exactly when [SliceRules.Unique] counts them as the same,
+// or nil when the type has no such key and elements have to be compared pair
+// by pair.
+//
+// Two element types are common enough, and slow enough under the pairwise
+// search, to be given a key of their own. A time.Time holds a *Location, so
+// it is not [hashable], yet it is what a list of timestamps is made of, and
+// the pairwise search cost a quarter of a megabyte of JSON twelve seconds of
+// CPU. Two times are one element when they are the same instant, the way
+// time.Time.Equal compares them: the zone a client wrote the timestamp in and
+// a reading of the monotonic clock are not part of what it says, and
+// 12:00Z and 13:00+01:00 are a repeat, where DeepEqual, comparing the zone
+// pointers, once called them distinct. The key is the seconds and nanoseconds
+// since the epoch rather than UnixNano, which cannot represent a year past
+// 2262. A netip.Addr, or an address with a port or a prefix, is comparable
+// and made only of values the standard library interns, so == on it and
+// DeepEqual on it are the same function and it is used as its own key.
+func keyFor[E any]() func(E) any {
+	t := reflect.TypeFor[E]()
+	switch t {
+	case reflect.TypeFor[time.Time]():
+		return func(e E) any {
+			at := any(e).(time.Time)
+			return instant{at.Unix(), at.Nanosecond()}
+		}
+	case reflect.TypeFor[netip.Addr](), reflect.TypeFor[netip.AddrPort](), reflect.TypeFor[netip.Prefix]():
+		return func(e E) any { return any(e) }
+	}
+	if hashable(t) {
+		return func(e E) any { return any(e) }
+	}
+	return nil
 }
 
 // hashable reports whether values of a type can be told apart with a map

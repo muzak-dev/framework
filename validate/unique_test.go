@@ -2,6 +2,7 @@ package validate
 
 import (
 	"math"
+	"net/netip"
 	"reflect"
 	"strconv"
 	"testing"
@@ -69,6 +70,77 @@ func TestFirstRepeatAgreesWithDeepEqual(t *testing.T) {
 	agreesWithPairwise(t, "nested slices", [][]string{{"a"}, {"b"}})
 	agreesWithPairwise(t, "blank fields", []blankPoint{{X: 1}, {X: 1}})
 	agreesWithPairwise(t, "times", []time.Time{time.Unix(1, 0).UTC(), time.Unix(1, 0).UTC()})
+}
+
+// instants builds n distinct timestamps, all in one zone, the way a client
+// sends them.
+func instants(n int, loc *time.Location) []time.Time {
+	out := make([]time.Time, n)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, loc)
+	for i := range out {
+		out[i] = base.Add(time.Duration(i) * time.Second)
+	}
+	return out
+}
+
+func TestUniqueIsLinearForTimesAndAddresses(t *testing.T) {
+	t.Parallel()
+	times := instants(200_000, time.UTC)
+	addrs := make([]netip.Addr, 200_000)
+	for i := range addrs {
+		addrs[i] = netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+	}
+
+	start := time.Now()
+	if err := Slice[time.Time]().Unique().Check(times); err != nil {
+		t.Errorf("distinct times gave %v", err)
+	}
+	times[len(times)-1] = times[3]
+	if err := Slice[time.Time]().Unique().Check(times); err == nil {
+		t.Error("a late repeated time was accepted")
+	}
+	if err := Slice[netip.Addr]().Unique().Check(addrs); err != nil {
+		t.Errorf("distinct addresses gave %v", err)
+	}
+	addrs[len(addrs)-1] = addrs[7]
+	if err := Slice[netip.Addr]().Unique().Check(addrs); err == nil {
+		t.Error("a late repeated address was accepted")
+	}
+	if elapsed := time.Since(start); elapsed > uniqueDeadline {
+		t.Errorf("Unique over 200000 times and addresses took %v", elapsed)
+	}
+}
+
+// Two times are the same element when they are the same instant, whatever
+// zone they are written in, which is what time.Time.Equal says and what a
+// client that sends 12:00Z and 13:00+01:00 means by repeating itself.
+func TestUniqueComparesTimesByInstant(t *testing.T) {
+	t.Parallel()
+	zone := time.FixedZone("", 3600)
+	noon := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	if index, found := firstRepeat([]time.Time{noon, noon.Add(time.Hour), noon.In(zone)}); !found || index != 0 {
+		t.Errorf("the same instant in another zone: firstRepeat = (%d, %v), want (0, true)", index, found)
+	}
+	if _, found := firstRepeat([]time.Time{noon, noon.Add(time.Nanosecond)}); found {
+		t.Error("instants a nanosecond apart were reported as one")
+	}
+	if _, found := firstRepeat([]time.Time{{}, {}}); !found {
+		t.Error("two zero times were not reported as a repeat")
+	}
+	// A reading of the monotonic clock is not part of the instant.
+	now := time.Now()
+	if _, found := firstRepeat([]time.Time{now, now.Round(0)}); !found {
+		t.Error("a time and its wall-clock reading were reported as distinct")
+	}
+	// Far outside the range UnixNano can represent.
+	far := time.Date(9999, 12, 31, 0, 0, 0, 1, time.UTC)
+	if _, found := firstRepeat([]time.Time{far, far.Add(time.Nanosecond), far}); !found {
+		t.Error("a repeated time beyond the year 2262 was missed")
+	}
+	if _, found := firstRepeat([]time.Time{far, far.Add(time.Nanosecond)}); found {
+		t.Error("distinct times beyond the year 2262 were reported as one")
+	}
 }
 
 func TestHashable(t *testing.T) {

@@ -2,8 +2,8 @@ package muzak
 
 import (
 	"bytes"
-	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -134,7 +134,14 @@ func TestCompressDeflateDecodes(t *testing.T) {
 		rec := ask(t, app, "/prose", "deflate")
 		assertStatus(t, rec, http.StatusOK)
 
-		decoded, err := io.ReadAll(flate.NewReader(bytes.NewReader(rec.Body.Bytes())))
+		// RFC 9110 defines the deflate content coding as the zlib format
+		// wrapped around DEFLATE, so a client decoding it strictly, as Java
+		// and many proxies do, must be able to read this.
+		zr, err := zlib.NewReader(bytes.NewReader(rec.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("the deflated body is not in the zlib format: %v", err)
+		}
+		decoded, err := io.ReadAll(zr)
 		if err != nil {
 			t.Fatalf("reading the deflated body: %v", err)
 		}

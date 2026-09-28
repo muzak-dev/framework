@@ -1,8 +1,8 @@
 package muzak
 
 import (
-	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"io"
 	"mime"
 	"net/http"
@@ -31,7 +31,7 @@ const (
 	CompressionBest
 )
 
-// gzipLevel maps a level onto what compress/gzip and compress/flate accept.
+// gzipLevel maps a level onto what compress/gzip and compress/zlib accept.
 func (l CompressionLevel) gzipLevel() int {
 	switch l {
 	case CompressionFastest:
@@ -199,7 +199,9 @@ func Compress(opts CompressionOptions) Middleware {
 //
 // gzip is preferred over deflate because every client that accepts deflate
 // accepts gzip, while the reverse is not true and deflate has a history of
-// being sent in two incompatible framings.
+// being sent in two incompatible framings. The one sent here is the one RFC
+// 9110 names, the zlib format around DEFLATE, and not the bare DEFLATE stream
+// that some old servers sent and a lenient client had to guess at.
 func negotiateEncoding(header string) string {
 	if header == "" {
 		return ""
@@ -244,7 +246,7 @@ func refused(parameters string) bool {
 type compressorPool struct {
 	level int
 	gzip  sync.Pool
-	flate sync.Pool
+	zlib  sync.Pool
 }
 
 // compressWriter compresses what a handler writes, deciding whether to do so
@@ -418,7 +420,7 @@ func (w *compressWriter) Flush() {
 	if flusher, ok := w.compressor.(*gzip.Writer); ok {
 		_ = flusher.Flush()
 	}
-	if flusher, ok := w.compressor.(*flate.Writer); ok {
+	if flusher, ok := w.compressor.(*zlib.Writer); ok {
 		_ = flusher.Flush()
 	}
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
@@ -480,11 +482,13 @@ func (p *compressorPool) get(encoding string, w io.Writer) io.WriteCloser {
 		writer, _ := gzip.NewWriterLevel(w, p.level)
 		return writer
 	}
-	if pooled, ok := p.flate.Get().(*flate.Writer); ok {
+	if pooled, ok := p.zlib.Get().(*zlib.Writer); ok {
 		pooled.Reset(w)
 		return pooled
 	}
-	writer, _ := flate.NewWriter(w, p.level)
+	// coverage: NewWriterLevel only rejects a level outside the accepted
+	// range, and CompressionLevel cannot express one.
+	writer, _ := zlib.NewWriterLevel(w, p.level)
 	return writer
 }
 
@@ -494,7 +498,7 @@ func (p *compressorPool) put(encoding string, compressor io.WriteCloser) {
 		p.gzip.Put(compressor)
 		return
 	}
-	p.flate.Put(compressor)
+	p.zlib.Put(compressor)
 }
 
 // addVaryAcceptEncoding records that the response depends on Accept-Encoding,

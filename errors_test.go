@@ -216,7 +216,8 @@ func TestDefaultErrorRenderer(t *testing.T) {
 		{
 			name:   "custom status coder out of range",
 			err:    &customStatusError{status: 7, text: "nonsense"},
-			status: 500, code: CodeInternalError, message: "nonsense",
+			status: 500, code: CodeInternalError, message: internalMessage,
+			notInMsg: "nonsense",
 		},
 		{
 			name:   "plain error is opaque",
@@ -435,5 +436,83 @@ func TestUnserializableResponseBecomesAnOpaque500(t *testing.T) {
 	assertStatus(t, rec, http.StatusInternalServerError)
 	if code := decodeError(t, rec).Error.Code; code != CodeInternalError {
 		t.Errorf("code = %q, want %q", code, CodeInternalError)
+	}
+}
+
+// leakyNotFound is a 4xx StatusCoder whose own text is safe, standing in for
+// the error type a repository layer returns before its callers wrap it.
+type leakyNotFound struct{ what string }
+
+func (e leakyNotFound) Error() string   { return e.what + " not found" }
+func (e leakyNotFound) HTTPStatus() int { return http.StatusNotFound }
+
+// leakyUpstream is a 5xx StatusCoder that folds its cause into its own text,
+// which is the shape an upstream client error usually takes.
+type leakyUpstream struct{ cause error }
+
+func (e *leakyUpstream) Error() string   { return "upstream failed: " + e.cause.Error() }
+func (e *leakyUpstream) HTTPStatus() int { return http.StatusBadGateway }
+func (e *leakyUpstream) Unwrap() error   { return e.cause }
+
+// TestStatusCoderWrappedCauseStaysOutOfTheResponse is the regression test for
+// a renderer that sent the outermost err.Error() whenever a StatusCoder was
+// anywhere in the chain, so the context an application wrapped around it on
+// the way up (a query, a DSN, a bearer token) reached the client verbatim. A
+// 4xx now renders only the StatusCoder's own text, a 5xx renders the opaque
+// sentence and is logged in full, and the *HTTPError path is unchanged.
+func TestStatusCoderWrappedCauseStaysOutOfTheResponse(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger(t)
+	opts := quietOptions()
+	opts.Logger = logger
+	app := New(opts)
+	app.Get("/users/{id}", func(ctx *Context, _ Empty) (rtOut, error) {
+		return rtOut{}, fmt.Errorf("repo.GetUser: SELECT * FROM users WHERE id=$1 on postgres://svc:S3cr3tPW@10.0.3.7:5432/prod: %w",
+			leakyNotFound{what: "user"})
+	})
+	app.Get("/pay", func(ctx *Context, _ Empty) (rtOut, error) {
+		return rtOut{}, fmt.Errorf("charging: %w", &leakyUpstream{
+			cause: errors.New("POST https://api.stripe.internal/v1/charges: Authorization: Bearer sk_live_ABC123: i/o timeout"),
+		})
+	})
+	app.Get("/safe", func(ctx *Context, _ Empty) (rtOut, error) {
+		return rtOut{}, fmt.Errorf("postgres://svc:S3cr3tPW@db: %w", NotFound("user not found"))
+	})
+	app.Get("/deliberate", func(ctx *Context, _ Empty) (rtOut, error) {
+		return rtOut{}, BadGateway("the payment provider is unavailable")
+	})
+	mustBuild(t, app)
+
+	rec := do(t, app, "GET", "/users/1")
+	assertStatus(t, rec, http.StatusNotFound)
+	if msg := decodeError(t, rec).Error.Message; msg != "user not found" {
+		t.Errorf("4xx message = %q, want the StatusCoder's own text only", msg)
+	}
+
+	rec = do(t, app, "GET", "/pay")
+	assertStatus(t, rec, http.StatusBadGateway)
+	body := decodeError(t, rec).Error
+	if body.Message != internalMessage || body.Code != CodeBadGateway {
+		t.Errorf("5xx body = %+v, want the opaque message under the status's own code", body)
+	}
+	if strings.Contains(rec.Body.String(), "sk_live") {
+		t.Errorf("5xx response leaked its cause: %s", rec.Body.String())
+	}
+	if !strings.Contains(logs.String(), "sk_live_ABC123") {
+		t.Errorf("the 5xx cause was not logged:\n%s", logs.String())
+	}
+
+	rec = do(t, app, "GET", "/safe")
+	assertStatus(t, rec, http.StatusNotFound)
+	if strings.Contains(rec.Body.String(), "S3cr3tPW") {
+		t.Errorf("the *HTTPError path leaked its wrapping: %s", rec.Body.String())
+	}
+
+	// A deliberate *HTTPError keeps its own message at any status, because it
+	// is a field written for the client rather than a cause.
+	rec = do(t, app, "GET", "/deliberate")
+	assertStatus(t, rec, http.StatusBadGateway)
+	if msg := decodeError(t, rec).Error.Message; msg != "the payment provider is unavailable" {
+		t.Errorf("deliberate 5xx message = %q", msg)
 	}
 }

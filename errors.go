@@ -197,11 +197,23 @@ func CodeForStatus(status int) string {
 //
 // Muzak consults it when turning a handler or dependency error into a
 // response: an error that implements StatusCoder is considered deliberate and
-// its message is sent to the client, while any other error is treated as an
-// unexpected fault and reported as a bare 500 with the real cause logged but
-// never transmitted. Implement it on your own error types to make them
-// first-class citizens of the error pipeline without depending on
-// [*HTTPError].
+// keeps its status, while any other error is treated as an unexpected fault and
+// reported as a bare 500 with the real cause logged but never transmitted.
+// Implement it on your own error types to make them first-class citizens of
+// the error pipeline without depending on [*HTTPError].
+//
+// What reaches the client depends on the status. Below 500, the client reads
+// the Error() text of the StatusCoder itself, the value [errors.As] finds in
+// the chain, and never the text of anything wrapping it: Go idiom is to add
+// context with fmt.Errorf("...: %w", err) on the way up, and that context is
+// exactly where a query, a connection string or a token ends up, so the outer
+// layers are treated as internal. Keep the StatusCoder's own Error() free of
+// internal detail, and do not fold a wrapped cause into it. For a 5xx the
+// message is replaced with the same opaque sentence a plain error produces and
+// the whole error is logged instead, because a server-side failure is exactly
+// the error whose text is most likely to describe internals. An [*HTTPError]
+// is the exception to both rules: its Message is a field written for the
+// client, so it is sent as given at any status.
 type StatusCoder interface {
 	// HTTPStatus returns the status code that should be written for this
 	// error. Values outside the 100 to 599 range are clamped to 500.
@@ -398,12 +410,15 @@ type ErrorRenderer func(ctx *Context, err error) (status int, body any)
 // DefaultErrorRenderer produces Muzak's standard [ErrorResponse] envelope.
 //
 // A [*ValidationError] becomes a 422 classified "validation_error" carrying
-// one detail per field. An error implementing [StatusCoder], including
-// [*HTTPError], keeps its status, code, message and details. Everything else
-// becomes a 500 whose message and code are fixed constants, so that an
-// unexpected fault (a nil dereference, a database driver error, a wrapped file
-// path) cannot leak internal state through the response. The request
-// identifier is copied from the context in every case.
+// one detail per field. An [*HTTPError] keeps its status, code, message and
+// details. Any other error implementing [StatusCoder] keeps its status and
+// the code for that status; below 500 its message is the Error() text of the
+// StatusCoder value found in the chain, never that of an error wrapping it,
+// and from 500 up its message is the same fixed sentence as for a plain error.
+// Everything else becomes a 500 whose message and code are fixed constants, so
+// that an unexpected fault (a nil dereference, a database driver error, a
+// wrapped file path) cannot leak internal state through the response. The
+// request identifier is copied from the context in every case.
 func DefaultErrorRenderer(ctx *Context, err error) (int, any) {
 	body := ErrorResponse{RequestID: ctx.RequestID()}
 
@@ -430,12 +445,22 @@ func DefaultErrorRenderer(ctx *Context, err error) (int, any) {
 		return status, body
 	}
 
-	var sc StatusCoder
+	var sc statusCoderError
 	if errors.As(err, &sc) {
 		status := clampStatus(sc.HTTPStatus())
+		// The message is the matched error's own text rather than err.Error(),
+		// because err is the outermost layer of the chain and every layer the
+		// application wrapped around the StatusCoder on its way up is internal
+		// context. A server-side status gets no text of its own at all: the
+		// error is logged through logCause, and the client reads the same
+		// sentence as for any other fault.
+		message := sc.Error()
+		if status >= http.StatusInternalServerError {
+			message = ctx.message("muzak.validation.internal", internalMessage)
+		}
 		body.Error = ErrorBody{
 			Code:    CodeForStatus(status),
-			Message: err.Error(),
+			Message: message,
 			Status:  status,
 		}
 		return status, body
@@ -447,6 +472,18 @@ func DefaultErrorRenderer(ctx *Context, err error) (int, any) {
 		Status:  http.StatusInternalServerError,
 	}
 	return http.StatusInternalServerError, body
+}
+
+// statusCoderError is the target DefaultErrorRenderer hands to [errors.As].
+//
+// Asking for a [StatusCoder] alone would find the right value but return it as
+// something with no Error method, and the renderer needs that value's own text
+// rather than the text of the chain around it. Every value errors.As can match
+// is an error already, so the combined interface matches exactly what a
+// StatusCoder target would.
+type statusCoderError interface {
+	error
+	StatusCoder
 }
 
 // logCause returns the part of an error worth recording server-side but not

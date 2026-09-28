@@ -299,9 +299,11 @@ func contextWithLocale(ctx context.Context, locale string) context.Context {
 // before it, because middleware further out holds the request as it arrived.
 func Locale(opts I18nOptions) Middleware {
 	opts = opts.withDefaults()
-	// The available locales and what the response varies on are settled once,
-	// when the chain is built, rather than per request.
+	// The available locales, how Accept-Language is compared with them, and
+	// what the response varies on are settled once, when the chain is built,
+	// rather than per request.
 	available := opts.AvailableLocales
+	index := indexLocales(available)
 	var vary []localeVary
 	if !opts.DisableVary {
 		vary = localeVaryPrefixes(opts)
@@ -309,7 +311,7 @@ func Locale(opts I18nOptions) Middleware {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			locale, consulted := resolveLocale(r, opts, available)
+			locale, consulted := resolveLocale(r, opts, available, index)
 			if consulted > 0 && len(vary) > 0 {
 				// Declared to the writer instead of added to the header, so
 				// that it composes with the Vary the compression middleware
@@ -339,7 +341,7 @@ func Locale(opts I18nOptions) Middleware {
 // It also returns how many sources it read, counting the one that decided,
 // because that is exactly the set of request inputs the answer depends on and
 // so the set a shared cache has to key on.
-func resolveLocale(r *http.Request, opts I18nOptions, available []string) (string, int) {
+func resolveLocale(r *http.Request, opts I18nOptions, available []string, index []localeEntry) (string, int) {
 	for i, source := range opts.Sources {
 		var candidates []string
 		switch source {
@@ -354,7 +356,7 @@ func resolveLocale(r *http.Request, opts I18nOptions, available []string) (strin
 				candidates = presentValue(cookie.Value)
 			}
 		case LocaleFromAcceptLanguage:
-			if matched := negotiateLanguage(r.Header.Get("Accept-Language"), available); matched != "" {
+			if matched := negotiateIndexed(r.Header.Get("Accept-Language"), index); matched != "" {
 				return matched, i + 1
 			}
 		case LocaleFromCustom:
@@ -476,6 +478,40 @@ const (
 type languageRange struct {
 	tag     string
 	quality float64
+	// language is the part of tag before its region, and regional reports
+	// whether there was a region to cut off.
+	language string
+	regional bool
+}
+
+// localeEntry is an available locale with the two forms of it that matching
+// against an Accept-Language header compares, worked out once.
+//
+// A header names up to [maxAcceptLanguageRanges] ranges and each is compared
+// with every available locale, so lower-casing and splitting a locale for each
+// comparison put a request's cost at ranges times locales times a few
+// allocations, ahead of routing and of the rate limit: with three hundred
+// locales, a hostile header made a request seventy times dearer than an
+// ordinary one.
+type localeEntry struct {
+	name string
+	// lower is the name in lower case, which is how tags are compared.
+	lower string
+	// language is the part of lower before its region, and regional reports
+	// whether there was a region to cut off.
+	language string
+	regional bool
+}
+
+// indexLocales prepares available locales for [negotiateIndexed].
+func indexLocales(available []string) []localeEntry {
+	out := make([]localeEntry, len(available))
+	for i, name := range available {
+		lower := strings.ToLower(name)
+		language, _, regional := strings.Cut(lower, "-")
+		out[i] = localeEntry{name: name, lower: lower, language: language, regional: regional}
+	}
+	return out
 }
 
 // negotiateLanguage picks the best locale for an Accept-Language header among
@@ -487,7 +523,17 @@ type languageRange struct {
 // served "pt" when that is what the application has. A range with a quality of
 // zero refuses that language outright, so "en;q=0" is not answered in English
 // even when English is all there is.
+//
+// It prepares the locales on every call, which is right for a caller that
+// negotiates once; the middleware prepares them once and uses
+// [negotiateIndexed].
 func negotiateLanguage(header string, available []string) string {
+	return negotiateIndexed(header, indexLocales(available))
+}
+
+// negotiateIndexed is [negotiateLanguage] over locales already prepared by
+// [indexLocales].
+func negotiateIndexed(header string, available []localeEntry) string {
 	if header == "" || len(available) == 0 {
 		return ""
 	}
@@ -496,7 +542,8 @@ func negotiateLanguage(header string, available []string) string {
 	}
 
 	var ranges []languageRange
-	refused := map[string]bool{}
+	// Made only when the client refuses something, which almost none does.
+	var refused map[string]bool
 	for entry := range strings.SplitSeq(header, ",") {
 		if len(ranges) >= maxAcceptLanguageRanges {
 			break
@@ -508,9 +555,13 @@ func negotiateLanguage(header string, available []string) string {
 		}
 		q := quality(parameters)
 		if q <= 0 {
+			if refused == nil {
+				refused = map[string]bool{}
+			}
 			refused[tag] = true
 		}
-		ranges = append(ranges, languageRange{tag: tag, quality: q})
+		language, _, regional := strings.Cut(tag, "-")
+		ranges = append(ranges, languageRange{tag: tag, quality: q, language: language, regional: regional})
 	}
 
 	// Stable, so that two languages the client wants equally are tried in the
@@ -523,8 +574,8 @@ func negotiateLanguage(header string, available []string) string {
 			break
 		}
 		for _, locale := range available {
-			if languageMatches(want.tag, locale) && !languageRefused(locale, refused) {
-				return locale
+			if languageMatches(want, locale) && !languageRefused(locale, refused) {
+				return locale.name
 			}
 		}
 	}
@@ -532,32 +583,26 @@ func negotiateLanguage(header string, available []string) string {
 }
 
 // languageMatches reports whether a range from the header names a locale.
-func languageMatches(tag, locale string) bool {
-	if tag == "*" {
+func languageMatches(want languageRange, locale localeEntry) bool {
+	if want.tag == "*" {
 		return true
 	}
-	lower := strings.ToLower(locale)
-	if tag == lower {
+	if want.tag == locale.lower {
 		return true
 	}
-	if language, _, regional := strings.Cut(lower, "-"); regional && tag == language {
+	if locale.regional && want.tag == locale.language {
 		return true
 	}
-	if language, _, regional := strings.Cut(tag, "-"); regional && language == lower {
-		return true
-	}
-	return false
+	return want.regional && want.language == locale.lower
 }
 
 // languageRefused reports whether the client explicitly rejected a locale, by
 // name or by its language.
-func languageRefused(locale string, refused map[string]bool) bool {
-	lower := strings.ToLower(locale)
-	if refused[lower] {
-		return true
+func languageRefused(locale localeEntry, refused map[string]bool) bool {
+	if len(refused) == 0 {
+		return false
 	}
-	language, _, regional := strings.Cut(lower, "-")
-	return regional && refused[language]
+	return refused[locale.lower] || (locale.regional && refused[locale.language])
 }
 
 // quality returns the q-value of an Accept header parameter list, defaulting to

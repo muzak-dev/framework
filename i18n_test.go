@@ -663,3 +663,28 @@ func TestBindingKey(t *testing.T) {
 		t.Errorf("bindingKey of a wrapped failure = %q, want it seen through", got)
 	}
 }
+
+// TestNegotiateLanguageCostDoesNotGrowWithLocales is the regression test for
+// negotiation lower-casing and splitting every available locale for every
+// range of the header: sixty-four ranges against three hundred locales took
+// nineteen thousand allocations, on every request, ahead of routing and the
+// rate limit. Only the header itself is prepared per request now.
+func TestNegotiateLanguageCostDoesNotGrowWithLocales(t *testing.T) {
+	var available []string
+	for i := range 300 {
+		available = append(available, fmt.Sprintf("Ab-%02dX", i))
+	}
+	var ranges []string
+	for i := range 64 {
+		ranges = append(ranges, fmt.Sprintf("zz-%d;q=0.%d", i, 9-i%9))
+	}
+	header := strings.Join(ranges, ",")
+	index := indexLocales(available)
+	if got := negotiateIndexed(header, index); got != "" {
+		t.Fatalf("negotiateIndexed = %q, want no match", got)
+	}
+	allocs := testing.AllocsPerRun(20, func() { negotiateIndexed(header, index) })
+	if allocs > 20 {
+		t.Errorf("negotiation of 64 ranges against 300 locales made %.0f allocations, want it independent of the locale count", allocs)
+	}
+}

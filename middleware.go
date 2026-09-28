@@ -211,7 +211,7 @@ func Recovery(logger *slog.Logger) Middleware {
 				logger.ErrorContext(r.Context(), "muzak: recovered from a panic",
 					slog.Any("panic", recovered),
 					slog.String("method", r.Method),
-					slog.String("path", r.URL.Path),
+					slog.String("path", truncateForMessage(r.URL.Path)),
 					slog.String(RequestIDKey, id),
 					slog.String("stack", string(debug.Stack())))
 				writeMinimalError(rw, id)
@@ -373,7 +373,10 @@ func logAccess(scoped *slog.Logger, base slog.Level, r *http.Request, rw *respon
 		level = slog.LevelError
 		attrs = append(attrs, slog.Bool("aborted", true))
 	}
-	scoped.LogAttrs(r.Context(), level, r.Method+" "+r.URL.Path, attrs...)
+	// Both are cut to a bounded length, because a client chooses them and
+	// net/http admits either up to the size of the request line; see
+	// truncateForMessage.
+	scoped.LogAttrs(r.Context(), level, truncateForMessage(r.Method)+" "+truncateForMessage(r.URL.Path), attrs...)
 }
 
 // CORSOptions configures [CORS]. The zero value denies every cross-origin

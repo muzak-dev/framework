@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"muzak.dev/framework/internal/radix"
 )
@@ -898,7 +899,7 @@ func (a *App) fail(c *Context, err error) {
 		}
 		a.logger.ErrorContext(c.Context(), "muzak: request failed after its response had started, so the connection was aborted",
 			slog.String("method", c.r.Method),
-			slog.String("path", c.r.URL.Path),
+			slog.String("path", truncateForMessage(c.r.URL.Path)),
 			slog.String(RequestIDKey, c.RequestID()),
 			slog.String("error", cause.Error()))
 		abortStartedResponse(c.w)
@@ -906,7 +907,7 @@ func (a *App) fail(c *Context, err error) {
 	if cause := logCause(err); cause != nil {
 		a.logger.ErrorContext(c.Context(), "muzak: request failed",
 			slog.String("method", c.r.Method),
-			slog.String("path", c.r.URL.Path),
+			slog.String("path", truncateForMessage(c.r.URL.Path)),
 			slog.String(RequestIDKey, c.RequestID()),
 			slog.String("error", cause.Error()))
 	}
@@ -1043,21 +1044,61 @@ func noRouteError(r *http.Request) error {
 // fallback logged the path. A path of printable ASCII, which is nearly every
 // path, is quoted as it is; anything else is quoted in its escaped form, which
 // is ASCII by construction and is what the client put on the wire.
+//
+// Either form is cut to [maxQuotedLength]; see [truncateForMessage].
 func quotablePath(r *http.Request) string {
 	if isPrintableASCII(r.URL.Path) {
-		return r.URL.Path
+		return truncateForMessage(r.URL.Path)
 	}
-	return r.URL.EscapedPath()
+	return truncateForMessage(r.URL.EscapedPath())
 }
 
 // quotableMethod returns a request method as a message may quote it. net/http
 // only admits a token, so this matters solely for a request built by hand and
-// passed to ServeHTTP, which is still not allowed to turn a 404 into a 500.
+// passed to ServeHTTP, which is still not allowed to turn a 404 into a 500. A
+// token can still be as long as the request line, so it is cut the same way a
+// path is.
 func quotableMethod(method string) string {
 	if isPrintableASCII(method) {
-		return method
+		return truncateForMessage(method)
 	}
-	return strconv.QuoteToASCII(method)
+	return truncateForMessage(strconv.QuoteToASCII(method))
+}
+
+// maxQuotedLength bounds how much of a client-chosen path or method a message
+// or a log line quotes. It is far longer than any path an application routes,
+// so a real one is never cut.
+const maxQuotedLength = 1024
+
+// truncatedMarker ends a value [truncateForMessage] cut, so that a reader can
+// tell it from a path that really ended there.
+const truncatedMarker = "...(truncated)"
+
+// truncateForMessage returns s as it is when it is at most [maxQuotedLength]
+// bytes long, and otherwise its first [maxQuotedLength] bytes followed by
+// [truncatedMarker].
+//
+// net/http admits a request line of about a mebibyte, and every byte of it the
+// client chose to be a path was quoted in full: into the 404 message, three
+// bytes for each one that needed escaping, and into the access log line,
+// where each invalid byte becomes a six-byte JSON escape. A single request
+// could make the server write several times what it sent, to the client and
+// to the log store. Nothing an application routes comes near the bound, so a
+// real path reads exactly as before.
+//
+// The cut is moved back to the start of a UTF-8 sequence, at most three bytes,
+// so a well-formed path is not left ending in half a character; the bound on
+// the walk keeps a run of bytes that are not UTF-8 at all from moving it
+// further.
+func truncateForMessage(s string) string {
+	if len(s) <= maxQuotedLength {
+		return s
+	}
+	cut := maxQuotedLength
+	for i := 0; i < utf8.UTFMax-1 && !utf8.RuneStart(s[cut]); i++ {
+		cut--
+	}
+	return s[:cut] + truncatedMarker
 }
 
 // isPrintableASCII reports whether s holds only printable ASCII, the text a
@@ -1139,7 +1180,7 @@ func (c *Context) writeResponse(v any) error {
 // request path for failures that happen before a route is matched.
 func (rt *Route) pathOrRequest(r *http.Request) string {
 	if rt == nil {
-		return r.URL.Path
+		return truncateForMessage(r.URL.Path)
 	}
 	return rt.Path
 }

@@ -82,9 +82,16 @@ func isHostLabel(label string) bool {
 }
 
 // isIP reports whether a value is an IP address of either family.
+//
+// An IPv6 zone is refused. netip accepts one, and accepts anything at all as
+// its text, so "fe80::1%" followed by a carriage return, a line feed and a
+// Set-Cookie header parsed as an address and went wherever a validated address
+// goes: a log line, a header, a page. A zone names an interface on the host
+// that wrote it and means nothing anywhere else, so a value crossing an API has
+// no use for one.
 func isIP(value string) bool {
-	_, err := netip.ParseAddr(value)
-	return err == nil
+	addr, err := netip.ParseAddr(value)
+	return err == nil && addr.Zone() == ""
 }
 
 // isIPv4 reports whether a value is an IPv4 address.
@@ -97,10 +104,11 @@ func isIPv4(value string) bool {
 //
 // An IPv4 address written in the mapped form is an IPv4 address wearing a
 // costume, so it is not accepted here: a field asking for IPv6 wants an address
-// an IPv6-only network can route.
+// an IPv6-only network can route. A zone is refused for the reason [isIP]
+// gives.
 func isIPv6(value string) bool {
 	addr, err := netip.ParseAddr(value)
-	return err == nil && addr.Is6() && !addr.Is4In6()
+	return err == nil && addr.Is6() && !addr.Is4In6() && addr.Zone() == ""
 }
 
 // isCIDR reports whether a value is a network written in CIDR notation.

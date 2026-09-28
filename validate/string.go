@@ -298,6 +298,13 @@ func (r *StringRules) Host() *StringRules {
 }
 
 // IP requires an IP address of either family.
+//
+// An IPv6 address with a zone, such as "fe80::1%eth0", is refused. The zone is
+// free text to the parser, so accepting it let a value carrying a line break or
+// markup through as a valid address, and it names an interface on the machine
+// that wrote it, which is meaningless to the one reading it. A field that does
+// need a link-local zone should take a string and check it with a rule of its
+// own.
 func (r *StringRules) IP() *StringRules {
 	return r.add(step[string]{kind: kindIP})
 }
@@ -311,7 +318,8 @@ func (r *StringRules) IPv4() *StringRules {
 //
 // An IPv4 address written in the mapped form is refused. It is an IPv4 address
 // wearing a costume, and a field asking for IPv6 wants one an IPv6-only network
-// can route.
+// can route. So is an address with a zone, for the reasons [StringRules.IP]
+// gives.
 func (r *StringRules) IPv6() *StringRules {
 	return r.add(step[string]{kind: kindIPv6})
 }

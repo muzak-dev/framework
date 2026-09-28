@@ -68,9 +68,14 @@ func repeat(s string, n int) string {
 func TestNetworkFormats(t *testing.T) {
 	t.Parallel()
 
+	// A zone is free text to the parser, which is how a header injection or
+	// markup used to pass as an address.
+	zoned := []string{"fe80::1%eth0", "fe80::1%\r\nSet-Cookie: pwn=1", "::1%<script>alert(1)</script>",
+		"fe80::1%../../etc/passwd", "fe80::1%25"}
+
 	accepts(t, "isIP", isIP,
 		[]string{"127.0.0.1", "::1", "2001:db8::1", "0.0.0.0"},
-		[]string{"", "999.1.1.1", "127.0.0.1/8", "localhost", "::gg"})
+		append([]string{"", "999.1.1.1", "127.0.0.1/8", "localhost", "::gg"}, zoned...))
 
 	accepts(t, "isIPv4", isIPv4,
 		[]string{"127.0.0.1", "0.0.0.0", "255.255.255.255"},
@@ -80,11 +85,11 @@ func TestNetworkFormats(t *testing.T) {
 	// something an IPv6-only network can route.
 	accepts(t, "isIPv6", isIPv6,
 		[]string{"::1", "2001:db8::1", "fe80::1"},
-		[]string{"", "127.0.0.1", "::ffff:127.0.0.1", "not an address"})
+		append([]string{"", "127.0.0.1", "::ffff:127.0.0.1", "not an address"}, zoned...))
 
 	accepts(t, "isCIDR", isCIDR,
 		[]string{"10.0.0.0/8", "192.168.1.0/24", "2001:db8::/32", "::/0"},
-		[]string{"", "10.0.0.0", "10.0.0.0/33", "10.0.0.0/-1", "/8"})
+		[]string{"", "10.0.0.0", "10.0.0.0/33", "10.0.0.0/-1", "/8", "fe80::%eth0/64"})
 
 	accepts(t, "isMAC", isMAC,
 		[]string{"00:1b:63:84:45:e6", "00-1B-63-84-45-E6", "0123.4567.89ab"},
@@ -361,4 +366,25 @@ func isUpperASCII(value string) bool {
 		}
 	}
 	return true
+}
+
+// TestIPRulesRefuseAZone is the review's proof of concept through the public
+// rules rather than the predicates: every one of these passed IP and IPv6.
+func TestIPRulesRefuseAZone(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"fe80::1%\r\nSet-Cookie: pwn=1",
+		"::1%<script>alert(1)</script>",
+		"fe80::1%../../etc/passwd",
+	} {
+		if err := String().IP().Check(value); err == nil || err.Error() != "must be a valid IP address" {
+			t.Errorf("IP().Check(%q) = %v, want it refused", value, err)
+		}
+		if err := String().IPv6().Check(value); err == nil {
+			t.Errorf("IPv6().Check(%q) accepted it", value)
+		}
+	}
+	if err := String().IPv6().Check("fe80::1"); err != nil {
+		t.Errorf("IPv6().Check(fe80::1) = %v, want a link-local address without a zone accepted", err)
+	}
 }

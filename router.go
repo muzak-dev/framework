@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Handler is the shape every Muzak route handler takes.
@@ -75,6 +77,8 @@ type responseDoc struct {
 type routerConfig struct {
 	prefix             string
 	tags               []string
+	category           string
+	categorySet        bool
 	guards             []Guard
 	providers          []*provider
 	responses          []responseDoc
@@ -99,11 +103,15 @@ type routerConfig struct {
 // routeConfig accumulates the settings declared on a single route.
 type routeConfig struct {
 	tags               []string
+	category           string
+	categorySet        bool
 	guards             []Guard
 	providers          []*provider
 	responses          []responseDoc
 	status             int
 	summary            string
+	title              string
+	titleSet           bool
 	description        string
 	operationID        string
 	maxBodySize        int64
@@ -252,6 +260,55 @@ func Status(code int) RouteOption {
 // it in the generated documentation.
 func Summary(summary string) RouteOption {
 	return routeOptionFunc(func(c *routeConfig) { c.summary = summary })
+}
+
+// Title gives the operation a short human name, such as "Fetch User Profile",
+// which a documentation tool shows in its navigation in place of the endpoint's
+// path. It is a label for the sidebar and nothing else: the one-line
+// [Summary] and the long [Description] still say what the operation does, the
+// path is still what a client requests, and a route with no title is listed by
+// its path as before.
+//
+// The title is written into the OpenAPI document as the operation's "x-title"
+// extension. It is checked when the application is built: after surrounding
+// whitespace is trimmed it must not be empty, must be valid UTF-8 of at most
+// 120 characters, and must hold no control character, line break or
+// bidirectional control, since the name is displayed as a single line. Titles
+// are not required to be unique.
+func Title(title string) RouteOption {
+	return routeOptionFunc(func(c *routeConfig) { c.title, c.titleSet = title, true })
+}
+
+// WithCategory files a router, or a single route, under a category: the one
+// heading a documentation tool lists it beneath in its navigation, such as
+// "Billing". With a hundred routers the list of tags is too long to read, and a
+// category is the coarser grouping laid over it.
+//
+//	billing := muzak.NewRouter(muzak.WithCategory("Billing"))
+//	billing.Get("/invoices", listInvoices, muzak.Title("List Invoices"))
+//	billing.Get("/invoices/export", export, muzak.WithCategory("Reports"))
+//
+// A category is not a tag, and the two do not interact: tags keep grouping
+// operations exactly as [WithTags] describes, and an operation may carry both.
+// Unlike tags, which add up, a category is a single value. Every route beneath
+// a router inherits its category, several routers may share one, and a router
+// included into another, or a route itself, replaces the category it would
+// have inherited. A route no category reaches has none, and is listed as it
+// always was.
+//
+// The category is written into the OpenAPI document as the operation's
+// "x-category" extension, and nothing else in the document mentions it: there
+// is no list of categories, so the order a documentation tool shows them in is
+// the order they are first met among the operations, which is the order the
+// routes were registered. It is checked when the application is built: after
+// surrounding whitespace is trimmed it must not be empty, must be valid UTF-8
+// of at most 64 characters, and must hold no control character, line break or
+// bidirectional control. Two spellings that differ in case are two categories.
+func WithCategory(name string) SharedOption {
+	return sharedOption{
+		route:  func(c *routeConfig) { c.category, c.categorySet = name, true },
+		router: func(c *routerConfig) { c.category, c.categorySet = name, true },
+	}
 }
 
 // Description sets the long-form description of the operation. The generated
@@ -414,6 +471,13 @@ type Route struct {
 	Path string
 	// Summary is the one-line description shown in the documentation.
 	Summary string
+	// Title is the human name the documentation lists the operation by, as
+	// set with [Title]. It is empty when none was set.
+	Title string
+	// Category is the heading the documentation lists the operation under,
+	// resolved from [WithCategory] on the route and the routers above it. It
+	// is empty when none applies.
+	Category string
 	// Description is the long-form description shown in the documentation.
 	Description string
 	// OperationID uniquely identifies the operation in the OpenAPI document.
@@ -721,6 +785,7 @@ func register[In, Out any](r *Router, method, path string, h Handler[In, Out], o
 type inherited struct {
 	prefix                string
 	tags                  []string
+	category              string
 	guards                []Guard
 	providers             []*provider
 	responses             []responseDoc
@@ -750,6 +815,7 @@ func (in inherited) merge(cfg routerConfig) inherited {
 	out := inherited{
 		prefix:                in.prefix + cfg.prefix,
 		tags:                  concat(in.tags, cfg.tags),
+		category:              in.category,
 		guards:                concat(in.guards, cfg.guards),
 		providers:             concat(in.providers, cfg.providers),
 		responses:             concat(in.responses, cfg.responses),
@@ -774,6 +840,9 @@ func (in inherited) merge(cfg routerConfig) inherited {
 	}
 	if cfg.securitySet {
 		out.security, out.securitySet = cfg.security, true
+	}
+	if cfg.categorySet {
+		out.category = strings.TrimSpace(cfg.category)
 	}
 	if cfg.maxBodySize > 0 {
 		out.maxBodySize = cfg.maxBodySize
@@ -831,6 +900,11 @@ func (r *Router) finalize(in inherited, emit func(*Route) error, state *buildSta
 	state.lifecycles = append(state.lifecycles, r.cfg.lifecycles...)
 
 	cur := in.merge(r.cfg)
+	if r.cfg.categorySet {
+		if err := checkLabel("WithCategory", r.cfg.category, maxCategoryLen); err != nil {
+			state.errs = append(state.errs, fmt.Errorf("muzak: %s: %w", describeRouter(cur.prefix, r), err))
+		}
+	}
 	if err := validatePrefix(cur.prefix); err != nil {
 		state.errs = append(state.errs, err)
 		return
@@ -854,7 +928,13 @@ func (r *Router) finalize(in inherited, emit func(*Route) error, state *buildSta
 	}
 	for _, inc := range r.includes {
 		state.lifecycles = append(state.lifecycles, inc.cfg.lifecycles...)
-		inc.child.finalize(cur.merge(inc.cfg), emit, state)
+		merged := cur.merge(inc.cfg)
+		if inc.cfg.categorySet {
+			if err := checkLabel("WithCategory", inc.cfg.category, maxCategoryLen); err != nil {
+				state.errs = append(state.errs, fmt.Errorf("muzak: %s: %w", describeRouter(merged.prefix, inc.child), err))
+			}
+		}
+		inc.child.finalize(merged, emit, state)
 	}
 }
 
@@ -869,6 +949,19 @@ func (rt *Route) resolve(in inherited) error {
 	rt.responses = concat(in.responses, cfg.responses)
 	rt.Summary = cfg.summary
 	rt.Description = cfg.description
+	rt.Category = in.category
+	if cfg.categorySet {
+		rt.Category = strings.TrimSpace(cfg.category)
+		if err := checkLabel("WithCategory", cfg.category, maxCategoryLen); err != nil {
+			return fmt.Errorf("muzak: %s %s: %w", rt.Method, rt.Path, err)
+		}
+	}
+	if cfg.titleSet {
+		rt.Title = strings.TrimSpace(cfg.title)
+		if err := checkLabel("Title", cfg.title, maxTitleLen); err != nil {
+			return fmt.Errorf("muzak: %s %s: %w", rt.Method, rt.Path, err)
+		}
+	}
 	rt.Deprecated = in.deprecated || cfg.deprecated
 	rt.Hidden = in.hidden || cfg.hidden
 	rt.security, rt.securitySet = in.security, in.securitySet
@@ -969,6 +1062,57 @@ func (rt *Route) resolve(in inherited) error {
 // neither is offered.
 func (rt *Route) answersHead() bool {
 	return rt.websocket == nil && rt.sse == nil
+}
+
+// The longest a category and a title may be, in characters. A category is a
+// heading in a navigation tree and a title a label in it, so a value past these
+// is a sentence that was meant for [Summary] or [Description], and would only
+// wrap or be cut off wherever it is shown.
+const (
+	maxCategoryLen = 64
+	maxTitleLen    = 120
+)
+
+// checkLabel reports why a category or a title is not one a documentation tool
+// can list, naming the option it was given to. The value is judged as it was
+// written: whitespace at either end is trimmed before use, but a line break
+// there is still a mistake worth reporting rather than absorbing.
+//
+// A label is a single line of text that is displayed as itself. A control
+// character or line break would split it or, in a terminal or a log, forge a
+// line, and a bidirectional control reorders what is drawn around it, so none
+// is accepted.
+func checkLabel(option, value string, limit int) error {
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%s was given a value that is not valid UTF-8", option)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || unicode.Is(unicode.Bidi_Control, r) {
+			return fmt.Errorf("%s was given %q, which holds a control character or line break (U+%04X); a label is a single line of text",
+				option, value, r)
+		}
+	}
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("%s was given a name that is empty once whitespace is trimmed; give it a name or leave the option out", option)
+	}
+	if n := utf8.RuneCountInString(trimmed); n > limit {
+		return fmt.Errorf("%s was given a value of %d characters, over the limit of %d", option, n, limit)
+	}
+	return nil
+}
+
+// describeRouter names a router in an error, given the prefix it resolves
+// under. A router has no name of its own, so it is identified by where it is
+// mounted, or by its first route when it is mounted at the root.
+func describeRouter(prefix string, r *Router) string {
+	switch {
+	case prefix != "":
+		return fmt.Sprintf("the router mounted at %q", prefix)
+	case len(r.routes) > 0:
+		return fmt.Sprintf("the router holding %s %s", r.routes[0].Method, r.routes[0].rawPath)
+	}
+	return "a router with no prefix and no routes"
 }
 
 // validatePrefix rejects a prefix that would produce a malformed path.

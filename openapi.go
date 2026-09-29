@@ -206,6 +206,14 @@ type Operation struct {
 	// with [WithSecurity]. It is absent for a route that declared nothing, and
 	// an empty list, which is emitted, says the route needs no credentials.
 	Security []SecurityRequirement `json:"security,omitzero"`
+	// Category is the heading a documentation tool lists the operation under,
+	// as set with [WithCategory]. It is written as the "x-category" vendor
+	// extension, and only when the operation has one. A category is not a tag.
+	Category string `json:"x-category,omitzero"`
+	// Title is the human name a documentation tool lists the operation by in
+	// place of its path, as set with [Title]. It is written as the "x-title"
+	// vendor extension, and only when the operation has one.
+	Title string `json:"x-title,omitzero"`
 }
 
 // Parameter describes one path, query, header or cookie parameter.
@@ -473,6 +481,8 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		OperationID: rt.OperationID,
 		Deprecated:  rt.Deprecated,
 		Security:    rt.securityForDocs(),
+		Category:    rt.Category,
+		Title:       rt.Title,
 		Responses:   make(map[string]*Response, 2+len(rt.responses)),
 	}
 

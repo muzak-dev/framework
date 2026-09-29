@@ -327,7 +327,10 @@ func TestSSEDialLeavesTheCallersClientAlone(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), sseTestTimeout)
 	defer cancel()
-	reader, _, err := SSEDial(ctx, server.URL, SSEDialOptions{HTTPClient: caller})
+	// The handshake has its own bound, which by default is the client's
+	// timeout. Left at that, a slow scheduler could fail the dial in 50
+	// milliseconds, and the test is about the stream outliving the timeout.
+	reader, _, err := SSEDial(ctx, server.URL, SSEDialOptions{HTTPClient: caller, HandshakeTimeout: sseTestTimeout})
 	if err != nil {
 		t.Fatalf("SSEDial = %v", err)
 	}

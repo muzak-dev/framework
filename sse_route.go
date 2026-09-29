@@ -372,6 +372,12 @@ func (rt *Route) resolveSSE(in inherited) error {
 		return fmt.Errorf("muzak: SSE %s %s: MaxStreamsPerIP may only be set on the application, because the streams it bounds belong to the process rather than to one route", rt.Method, rt.Path)
 	}
 	rt.sse.opts = opts.withDefaults()
+	// A stream is refused when the server is draining and when it is full, so a
+	// client generated from the document is told to expect it.
+	rt.documentRefusals(responseDoc{
+		code:        http.StatusServiceUnavailable,
+		description: "The server is shutting down or is serving as many event streams as it allows, overall or for this client. The Retry-After header says when to try again.",
+	})
 	return nil
 }
 

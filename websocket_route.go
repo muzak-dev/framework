@@ -532,11 +532,31 @@ func (rt *Route) resolveWebSocket(in inherited) error {
 		rt.websocket.messages = messages
 	}
 	rt.websocket.allowOrigin = wsOriginPolicy(rt.websocket.opts)
-	rt.responses = append(rt.responses, responseDoc{
-		code:        http.StatusUpgradeRequired,
-		description: "The request is not a WebSocket handshake.",
-	})
+	// What a handshake can be refused with, so that a client generated from the
+	// document expects it. A code the route declared for itself keeps its own
+	// wording.
+	rt.documentRefusals(
+		responseDoc{code: http.StatusBadRequest, description: "The handshake is malformed: the key, the version, an Origin header sent twice, or a body."},
+		responseDoc{code: http.StatusUpgradeRequired, description: "The request is not a WebSocket handshake."},
+		responseDoc{code: http.StatusServiceUnavailable, description: "The server is shutting down or is holding as many connections as it allows, overall or for this client. The Retry-After header says when to try again."},
+	)
+	if !rt.websocket.opts.InsecureSkipOriginCheck {
+		rt.documentRefusals(responseDoc{code: http.StatusForbidden, description: "The Origin of the handshake may not open a connection here."})
+	}
 	return nil
+}
+
+// documentRefusals adds the responses a route answers on its own account to
+// its document, leaving alone any status the route declared for itself: a
+// description written for a route is more specific than one written for every
+// route of its kind.
+func (rt *Route) documentRefusals(docs ...responseDoc) {
+	for _, doc := range docs {
+		declared := slices.ContainsFunc(rt.responses, func(d responseDoc) bool { return d.code == doc.code })
+		if !declared {
+			rt.responses = append(rt.responses, doc)
+		}
+	}
 }
 
 // wsOriginPolicy builds the function that decides which browser origins may

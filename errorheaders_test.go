@@ -183,3 +183,71 @@ func TestRecoveryErrorDropsSuccessEntityHeaders(t *testing.T) {
 		t.Errorf("Vary = %q, want it kept", got)
 	}
 }
+
+// An integrity or range header describes the body a handler meant to send.
+// Left on the error envelope, a Content-Digest is a checksum of bytes that
+// never went out and Accept-Ranges invites a Range request the envelope cannot
+// honour, so they go with the other entity headers. A Location says where a
+// created or moved resource is, which no failure response can say.
+func TestErrorResponseDropsDigestRangeAndLocationHeaders(t *testing.T) {
+	t.Parallel()
+	dropped := map[string]string{
+		"Content-Digest":   "sha-256=:AAAA:",
+		"Repr-Digest":      "sha-256=:AAAA:",
+		"Digest":           "SHA-256=AAAA",
+		"Content-MD5":      "AAAA",
+		"Accept-Ranges":    "bytes",
+		"Trailer":          "Expires",
+		"Content-Location": "/items/42",
+		"Location":         "/items/42",
+	}
+	app := New(quietOptions())
+	app.Get("/x", func(ctx *Context, _ Empty) (Empty, error) {
+		for name, value := range dropped {
+			ctx.SetHeader(name, value)
+		}
+		ctx.SetHeader("X-Trace", "kept")
+		return Empty{}, NotFound("")
+	})
+	app.Get("/panic", func(ctx *Context, _ Empty) (Empty, error) {
+		ctx.SetHeader("Location", "/items/42")
+		ctx.SetHeader("Content-Digest", "sha-256=:AAAA:")
+		panic("boom")
+	})
+	mustBuild(t, app)
+
+	for _, path := range []string{"/x", "/panic"} {
+		rec := do(t, app, http.MethodGet, path)
+		for name := range dropped {
+			if got := rec.Header().Get(name); got != "" {
+				t.Errorf("%s: %s = %q survived onto the error response", path, name, got)
+			}
+		}
+	}
+	if got := do(t, app, http.MethodGet, "/x").Header().Get("X-Trace"); got != "kept" {
+		t.Errorf("X-Trace = %q, want it kept", got)
+	}
+}
+
+// redirectError is a deliberate 3xx an application may return, which is the
+// one failure response a Location belongs on.
+type redirectError struct{}
+
+func (redirectError) Error() string   { return "moved" }
+func (redirectError) HTTPStatus() int { return http.StatusFound }
+
+func TestErrorResponseKeepsLocationOnARedirectStatus(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/old", func(ctx *Context, _ Empty) (Empty, error) {
+		ctx.SetHeader("Location", "/new")
+		return Empty{}, redirectError{}
+	})
+	mustBuild(t, app)
+
+	rec := do(t, app, http.MethodGet, "/old")
+	assertStatus(t, rec, http.StatusFound)
+	if got := rec.Header().Get("Location"); got != "/new" {
+		t.Errorf("Location = %q, want /new kept on a 3xx", got)
+	}
+}

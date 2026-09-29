@@ -973,7 +973,12 @@ func (a *App) fail(c *Context, err error) {
 			slog.String(RequestIDKey, c.RequestID()),
 			slog.String("error", cause.Error()))
 	}
+	var location []string
 	if !c.w.written {
+		// A Location belongs to a redirect, which an application's own error
+		// can be, so it is set aside and put back below if that is what the
+		// renderer answers with. Every other status has no use for one.
+		location = c.w.Header().Values("Location")
 		// Before the renderer runs rather than after, so a renderer that sets
 		// a header of its own, a problem+json Content-Type say, keeps it.
 		resetForError(c.w.Header(), c.locale)
@@ -983,6 +988,9 @@ func (a *App) fail(c *Context, err error) {
 		// Only a hijacked connection or a streaming route reaches this, and
 		// either one has already ended its response in its own way.
 		return
+	}
+	if status >= 300 && status < 400 && len(location) > 0 && c.w.Header().Get("Location") == "" {
+		c.w.Header()["Location"] = location
 	}
 	if body == nil {
 		c.w.WriteHeader(status)
@@ -1011,6 +1019,20 @@ var successEntityHeaders = [...]string{
 	"Last-Modified",
 	"Cache-Control",
 	"Expires",
+	// Integrity, range and framing declarations about a body that was never
+	// sent: a checksum of other bytes, an invitation to a Range request the
+	// envelope cannot serve, a trailer that will not arrive.
+	"Content-Digest",
+	"Repr-Digest",
+	"Digest",
+	"Content-MD5",
+	"Accept-Ranges",
+	"Trailer",
+	// Where the entity the handler meant to send lives. A Location names the
+	// resource a success created or moved, and is kept only for the one
+	// status it belongs to; see [App.fail].
+	"Content-Location",
+	"Location",
 }
 
 // resetForError clears what a handler declared about the success response it
@@ -1023,7 +1045,7 @@ var successEntityHeaders = [...]string{
 // could keep for a day under the success response's Cache-Control, or an ETag
 // and Last-Modified that let a later conditional request revalidate the error
 // as though it were the resource. The rule is that a header describing the
-// body or its caching goes, and every other header stays: Vary (the error
+// body, its integrity, its ranges or its caching goes, and every other header stays: Vary (the error
 // depends on the same inputs the success would have), the security headers,
 // Retry-After, Allow, a WWW-Authenticate a guard set to name its scheme,
 // Set-Cookie, the request identifier and anything else middleware or the

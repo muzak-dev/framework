@@ -661,8 +661,10 @@ documentation, and it is listed as such.
 | F29 | Low | `SSEReader.Retry()` overflowed, `SSEDial` had no handshake bound, a sub-millisecond `Retry` was written as 0, and the compression wrapper hid a failed flush | Client side, SSE | Fixed |
 | F30 | Low | JSON logs passed C1, DEL and bidi controls raw, a panic value was logged unbounded, and default redaction missed common secret keys | Yes | Fixed |
 | F31 | Low | `Static` and `Frontend` do not stop a symlink escaping through `os.DirFS`; OPTIONS and 405 skip a route's guards and disclose which paths and methods exist | `os.DirFS`; yes | Documented |
+| F32 | Medium | A guarded nested mount was served, unguarded, through the parent mount under a spelling the filesystem folds to the same directory (ligatures, sharp s, NFD names on APFS), skipping its guard, providers, rate limit, `Cache-Control: private` and sandbox CSP; the third review's case check (S22) used simple case folding only | macOS and Windows | Fixed (by file identity) |
+| F33 | Low | A body that declared a length over the route limit was read up to the limit before the 413, and `Expect: 100-continue` was answered with a 100 first | Yes | Fixed |
 
-Two of these are behaviour changes worth knowing about. F1 makes IPv6 counters
+Two of these are behaviour changes worth knowing about. F32 also makes a directory with a mount of its own answer 404 through any outer mount under any name. F1 makes IPv6 counters
 in shared storage reset once, because the key changed. F20 and F23 make
 validation stricter: a nil pointer fails `Required()`, and a UUID must be in
 its canonical form. Each is listed under **Changed** in the changelog with its

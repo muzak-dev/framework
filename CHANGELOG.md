@@ -413,6 +413,19 @@ regression test. Several fixes tighten a default; each one is listed under
   width or precision above 64, or a `*` width, is left as literal text rather
   than rendered. Migration: none for a real pattern or message.
 
+- **A directory that has a mount of its own is reachable only through that
+  mount, under any name.** When a mount's directory lies inside another
+  mount's, a request that reaches it through the outer mount is answered 404,
+  not only when the path differs in case but whenever a directory on the way
+  is the inner mount's directory: a symbolic link inside the outer directory
+  that leads to it, or a mount whose path differs from its directory's name
+  (a guarded mount at `/x` over `site/staff`, beside a public mount at `/`
+  over `site`, no longer serves the same files at `/staff/...`). The fallback
+  page is not offered in its place. A request the inner mount already answers
+  is unaffected, and so is every mount with no mount beneath it. Migration:
+  none for a layout where the inner mount is mounted at its own directory
+  name; to publish the same files at two paths, mount them at both.
+
 ### Security
 
 - **A WebSocket message can no longer slip past the read limit.** The limit
@@ -842,6 +855,34 @@ regression test. Several fixes tighten a default; each one is listed under
   field is whole milliseconds and the duration was truncated, so a positive
   delay under a millisecond told a client to reconnect at once.
 
+- **A guarded mount was served, unguarded, through a folded spelling of its
+  name.** The router refused a request that fell under a more specific mount
+  once simple case was ignored (`/ADMIN`), but a filesystem that folds more
+  than that, such as APFS, opened the same directory through a ligature (U+FB05 for the "st" of `/staff`), a sharp s (`/a` U+00DF
+  `ets` for `/assets`), a combining accent (`/cafe` U+0301 for `/caf` U+00E9),
+  decomposed Hangul, or `/STRASSE` for a mount at `/stra` U+00DF `e`. The outer mount served the files with
+  none of the inner mount's guards, providers, rate limit,
+  `Cache-Control: private` or, for a directory of uploads, the sandbox
+  `Content-Security-Policy`, so uploaded HTML ran as the application. The
+  outer mount now compares each directory a path passes through with the
+  directory of every mount beneath it, by file identity, so the answer is
+  exact on every platform and for every folding rule and no table is copied.
+  Hard links and bind mounts are covered because only the directory's
+  identity matters. Where both directories are given as `Dir` the relationship
+  is worked out when the application is built; a mount served from an
+  `os.DirFS` is compared against every mount beneath it, since its path cannot
+  be read back, and one served from an `embed.FS` has no second name to defend
+  against. A test that needs a folding volume checks for one at run time and
+  skips on a case-sensitive one, and a model of such a filesystem runs the
+  same logic everywhere.
+
+- **A body that declares a length over the route's limit is refused before it is
+  read.** A request that sent `Expect: 100-continue` with a `Content-Length`
+  far over the limit was told to go ahead by the first read, and the 413 came
+  only after the body had been read up to the limit. It is now refused from
+  the declared length, for JSON, urlencoded and multipart bodies. A body that
+  declares no length is still bounded as it is read.
+
 ### Documentation
 
 - **The symbolic-link guarantee holds for `Dir` and for the `FS` of an
@@ -865,6 +906,13 @@ regression test. Several fixes tighten a default; each one is listed under
   the keepalive bounds silence, and a client that keeps reading holds its
   stream and its slot until the handler returns. `SSEStream` now says so, and
   how a handler sets a ceiling of its own.
+
+- A symbolic link or hard link inside a served directory is followed and served
+  by the mount that owns the directory; only a link that leaves the directory is
+  refused. A deployment step that links files into a served directory (`cp -l`,
+  `rsync -H`, a build cache) therefore publishes them under the new name,
+  dotfiles included, unless the link leads into the directory of a mount
+  beneath.
 
 ### Known limits
 

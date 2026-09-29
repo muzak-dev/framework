@@ -564,6 +564,7 @@ func (a *App) build() {
 	slices.SortStableFunc(a.frontends, func(x, y *frontend) int {
 		return len(y.path) - len(x.path)
 	})
+	a.linkNestedMounts()
 
 	// Built with the other checks, not while the handler is assembled, so a
 	// policy that cannot be served is reported with them: after that point the

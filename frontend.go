@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 )
@@ -139,7 +141,25 @@ type frontend struct {
 	// unless told otherwise, because its directory may hold files a client
 	// wrote; a frontend's documents are the application itself.
 	sandbox bool
+
+	// nested lists the mounts beneath this one, by path, whose directory may
+	// lie inside this one's own. Only what one of them is called on disk can
+	// reach it through this mount, so this is the whole of what
+	// [frontend.reachesNested] has to compare against, and a mount with none
+	// asks its filesystem nothing extra. It is fixed when the application is
+	// built.
+	nested []*frontend
+
+	// root is the identity of this mount's own directory, kept for the mounts
+	// above it to compare with. It is read at build and, for a directory that
+	// was not there yet, again by the request that needs it.
+	root atomic.Pointer[rootIdentity]
 }
+
+// rootIdentity is what is known of a mount's own directory. A nil info means
+// the filesystem behind it cannot say whether two names are one directory,
+// which an [embed.FS] cannot and has no need to.
+type rootIdentity struct{ info fs.FileInfo }
 
 // Frontend serves a built frontend at path.
 //
@@ -173,12 +193,31 @@ type frontend struct {
 //	ui.Frontend("/", muzak.FrontendOptions{Dir: "dist"})
 //	app.Include(ui, muzak.WithPrefix("/app"))
 //
-// When mounts nest, the most specific one answers, and a request that would
-// fall under a more specific mount if case were ignored answers 404 rather
+// When mounts nest, the most specific one answers, and a request that reaches
+// the directory of a more specific mount some other way answers 404 rather
 // than being served by a less specific one. With another mount at the root
-// beside the one above, /APP/x is refused rather than handed to the root: on
-// a case-insensitive filesystem the outer mount could otherwise open the
-// inner mount's files without the inner mount's guards.
+// over a directory that holds the one above, /APP/x is refused rather than
+// handed to the root: on a case-insensitive filesystem the outer mount could
+// otherwise open the inner mount's files without the inner mount's guards.
+//
+// That holds for any name the filesystem gives the inner mount's directory,
+// not only the ones a program could guess. A path that differs from the mount
+// path only in case is refused by comparing names. Whatever else the volume
+// treats as the same name, such as a ligature or a sharp s spelled out in full,
+// or a letter with its accent composed or not, is refused by asking the
+// filesystem: before the outer mount serves a path, each directory the path
+// passes through is compared with the inner mount's own directory, which is
+// exact on every platform and for every folding rule. This needs both
+// directories to be on disk, as [FrontendOptions.Dir] and the FS of an
+// [os.Root] are; a directory served from an [embed.FS] has no other name to
+// reach it by, and nothing is compared. A mount served from [os.DirFS] is
+// compared against every mount beneath it, because the directory behind it
+// cannot be read back.
+//
+// A symbolic link inside a served directory is followed, and the mount that
+// owns the directory serves what it points to, so only a link that leaves the
+// directory is refused, as is one that leads into the directory of a mount
+// beneath.
 //
 // A path naming a file or directory that begins with a dot, such as /.env or
 // /.git/config, answers 404 and is not given the fallback, since a build
@@ -338,6 +377,14 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 			slog.String(RequestIDKey, c.RequestID()),
 			slog.String("error", err.Error()))
 		a.fail(c, errFrontendUnavailable)
+		return
+	}
+
+	if f.reachesNested(files, relative) {
+		// A name for the directory of a mount that has guards and headers of
+		// its own, which this one would otherwise serve without them, and with
+		// the fallback in place of a refusal.
+		a.fail(c, frontendNotFound(c.r))
 		return
 	}
 
@@ -694,6 +741,16 @@ func isActiveContent(contentType string) bool {
 // answered by a less specific one: it answers 404. Routing it to the specific
 // mount instead would guess at what the filesystem does; refusing it holds on
 // every platform.
+//
+// That is a comparison of names, and the names a filesystem treats as one go
+// well past case: APFS also folds a ligature or a sharp s into the letters it
+// stands for and reads a precomposed letter and its decomposed spelling as one,
+// so a request for the ligature U+FB05 followed by "aff", or for "cafe" and a
+// combining acute accent, opens the directory of a mount at /staff or at
+// /caf followed by the precomposed e-acute. Copying those rules would never be finished, and they
+// differ between volumes. What is checked for the rest is not a name at all:
+// see [frontend.reachesNested], which asks the filesystem whether a directory
+// on the way is the one a more specific mount serves.
 func (a *App) frontendFor(requestPath string) (*frontend, string, bool) {
 	// Mounts are ordered longest first, so the first one the path falls under
 	// loosely is the most specific such mount.
@@ -748,6 +805,197 @@ func equalFoldRune(a, b rune) bool {
 		}
 	}
 	return false
+}
+
+// backslashSeparates reports whether the filesystems of this platform read a
+// backslash in a name as a separator, as Windows does.
+const backslashSeparates = runtime.GOOS == "windows"
+
+// identified is a file description that can say whether another describes the
+// same file, which is what [os.SameFile] does for a description from the
+// operating system. A filesystem with names of its own to give a directory can
+// implement it in the same way; [sameDirectory] uses it before anything else.
+type identified interface {
+	sameFile(other fs.FileInfo) bool
+}
+
+// sameDirectory reports whether two descriptions are one and the same
+// directory, whatever names were used to reach them. It is false for a
+// description from a filesystem that has no such notion, and for one that
+// cannot be compared, such as those an [embed.FS] gives.
+func sameDirectory(a, b fs.FileInfo) bool {
+	if a, ok := a.(identified); ok {
+		return a.sameFile(b)
+	}
+	return os.SameFile(a, b)
+}
+
+// reachesNested reports whether a path relative to this mount goes through the
+// directory of a mount beneath it, by whatever name.
+//
+// A request for a directory that a more specific mount serves has to be
+// answered by that mount, because the guards, providers, rate limit, cache
+// directive and sandbox policy are the mount's own. Which mount answers is
+// decided from the request path, before any file is opened, and a path that
+// names the directory some other way, one the volume treats as the same name or
+// a link to it, is decided in favour of the mount above and would serve the
+// files under none of those. The names that can happen are not knowable
+// without the filesystem's own rules, so rather than compare names this
+// compares directories: each one the path passes through is described, through
+// the filesystem this mount serves from, and compared with the directory of
+// each mount beneath. That is exact on every platform, for every folding and
+// normalisation rule, and it needs no table.
+//
+// Nothing is asked when no mount lies beneath this one, and nothing when the
+// path is the mount's own root. A request a mount beneath answers never gets
+// here, so its byte-exact spelling costs nothing.
+func (f *frontend) reachesNested(files fs.FS, relative string) bool {
+	if len(f.nested) == 0 {
+		return false
+	}
+	relative = strings.TrimSuffix(relative, "/")
+	if relative == "" || !fs.ValidPath(relative) {
+		return false
+	}
+	// A directory that is not there yet cannot be reached by any name.
+	known := false
+	for _, inner := range f.nested {
+		if inner.rootInfo() != nil {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return false
+	}
+	for end := 0; end <= len(relative); end++ {
+		if end < len(relative) && relative[end] != '/' && (!backslashSeparates || relative[end] != '\\') {
+			continue
+		}
+		if end == 0 {
+			continue
+		}
+		info, err := fs.Stat(files, relative[:end])
+		if err != nil || !info.IsDir() {
+			// Nothing deeper can be there.
+			return false
+		}
+		for _, inner := range f.nested {
+			if root := inner.rootInfo(); root != nil && sameDirectory(root, info) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// rootInfo describes this mount's own directory, or returns nil when it cannot
+// be told from another name for itself: the directory is not there yet, in
+// which case the next request asks again, or its filesystem has no identity to
+// compare.
+func (f *frontend) rootInfo() fs.FileInfo {
+	if known := f.root.Load(); known != nil {
+		return known.info
+	}
+	info, err := f.statRoot()
+	if err != nil {
+		return nil
+	}
+	if !sameDirectory(info, info) {
+		info = nil
+	}
+	f.root.Store(&rootIdentity{info})
+	return info
+}
+
+// statRoot describes the directory the options name, without opening the mount
+// or holding anything open, so that asking early changes nothing about when a
+// missing directory is reported.
+func (f *frontend) statRoot() (fs.FileInfo, error) {
+	if f.opts.FS == nil {
+		return os.Stat(f.opts.Dir) //nolint:gosec // the operator's own directory, never a request's
+	}
+	files := f.opts.FS
+	if f.opts.Dir != "" {
+		var err error
+		if files, err = fs.Sub(files, f.opts.Dir); err != nil {
+			return nil, err
+		}
+	}
+	return fs.Stat(files, ".")
+}
+
+// linkNestedMounts records, for each mount, which mounts beneath it may be
+// reached through it. It runs once the mounts are all known.
+//
+// A mount is beneath another when its path is, and it can be reached through
+// it only when its directory lies within the other's, which is worked out from
+// the directories the options name. Where either is not a path on disk the
+// answer is not known, and the mount counts, since what that costs is a
+// comparison and what the alternative costs is a guarded directory.
+func (a *App) linkNestedMounts() {
+	for _, outer := range a.frontends {
+		for _, inner := range a.frontends {
+			if inner == outer || len(inner.path) <= len(outer.path) {
+				continue
+			}
+			if _, beneath := outer.matches(inner.path); !beneath || !inner.mayLieWithin(outer) {
+				continue
+			}
+			outer.nested = append(outer.nested, inner)
+			// Read now where it can be, so that the first request is not the
+			// one that pays for it.
+			inner.rootInfo()
+		}
+	}
+}
+
+// mayLieWithin reports whether this mount's directory may be inside the
+// directory of another. It is false only when both are on disk and the first
+// is not below the second.
+//
+// The question is answered by identity rather than by comparing the two paths
+// as text, because a volume that ignores case or normalisation, or a link
+// through which one of them was named, makes the same directory spell two ways.
+// The directory is resolved through its links first, then each directory above
+// it is compared with the other mount's.
+func (f *frontend) mayLieWithin(outer *frontend) bool {
+	if f.opts.FS != nil || outer.opts.FS != nil {
+		return true
+	}
+	within, err := os.Stat(outer.opts.Dir)
+	if err != nil {
+		return true
+	}
+	dir, err := filepath.Abs(f.opts.Dir)
+	if err == nil {
+		dir, err = filepath.EvalSymlinks(dir)
+	}
+	if err != nil {
+		return true
+	}
+	own, err := os.Stat(dir)
+	if err != nil {
+		return true
+	}
+	if os.SameFile(own, within) {
+		// A directory is not inside itself, whatever it is called.
+		return false
+	}
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		info, err := os.Stat(parent)
+		if err != nil {
+			return true
+		}
+		if os.SameFile(info, within) {
+			return true
+		}
+		dir = parent
+	}
 }
 
 // allowedOnFiles is the Allow header of a path served from a filesystem, which
@@ -829,7 +1077,13 @@ type StaticOptions struct {
 // so, a symbolic link cannot lead out of the directory named by
 // [StaticOptions.Dir] (or served from an [os.Root]; [os.DirFS] follows links),
 // and a method other than GET or HEAD on a file that exists is answered 405
-// rather than served.
+// rather than served. A link that stays inside the directory is followed and
+// its target served by the mount that owns the directory, so a deployment step
+// that links or hard-links files into it publishes them under the new name,
+// dotfiles included.
+//
+// A mount whose directory lies inside another mount's is only reached through
+// its own path; see [Router.Frontend] for what that refuses.
 //
 // On both kinds of mount a file's type comes from its extension and never from
 // its content, so a file with no extension is application/octet-stream. One

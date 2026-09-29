@@ -561,7 +561,21 @@
 // 404 because it would open a long name no check has seen, a method other
 // than GET or HEAD on a file is refused with 405 rather than served, and a
 // directory that does not exist is reported when the application is built
-// rather than on the first request.
+// rather than on the first request. A link that stays inside the directory is
+// followed and served by the mount that owns the directory; only one that
+// leaves it is refused.
+//
+// Mounts may nest, and the most specific one answers. When one mount's
+// directory lies inside another's, as a guarded /admin does inside a public
+// mount at the root, the directory is reachable only through the mount that
+// serves it: a path that differs from the mount's only in case answers 404,
+// and so does one that reaches the directory under any other name the
+// filesystem accepts (a ligature or a sharp s written in full, a letter
+// composed or decomposed, a link inside the outer directory), because each
+// directory a request passes through is compared with the inner mount's own by
+// identity rather than by name. That comparison needs both directories on disk,
+// from [FrontendOptions.Dir] or an [os.Root]; a directory served from an
+// [embed.FS] has no other name.
 //
 // [Router.Static] mounts a directory of files on the same machinery, without
 // the part that makes a frontend work:

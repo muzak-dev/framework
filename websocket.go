@@ -1129,7 +1129,7 @@ func (c *WSConn) armRead(ctx context.Context) func() bool {
 	if c.arranged(ctx) {
 		return wsNothingToStop
 	}
-	return context.AfterFunc(ctx, func() { _ = c.nc.SetReadDeadline(time.Now()) })
+	return wsAfterFunc(ctx, func() { _ = c.nc.SetReadDeadline(time.Now()) })
 }
 
 // armWrite is the writing counterpart of armRead.
@@ -1150,7 +1150,7 @@ func (c *WSConn) armWrite(ctx context.Context, deadline time.Time) func() bool {
 	if c.arranged(ctx) {
 		return wsNothingToStop
 	}
-	return context.AfterFunc(ctx, func() { _ = c.nc.SetWriteDeadline(time.Now()) })
+	return wsAfterFunc(ctx, func() { _ = c.nc.SetWriteDeadline(time.Now()) })
 }
 
 // interruptible arranges for a transport with no deadlines to be interrupted
@@ -1164,10 +1164,42 @@ func (c *WSConn) interruptible(ctx context.Context, expiry *wsExpiry) func() boo
 	if c.arranged(ctx) {
 		return expiry.disarm
 	}
-	stop := context.AfterFunc(ctx, func() { _ = c.rwc.Close() })
+	stop := wsAfterFunc(ctx, func() { _ = c.rwc.Close() })
 	return func() bool {
 		expiry.disarm()
 		return stop()
+	}
+}
+
+// wsAfterFunc is [context.AfterFunc] for an arrangement that acts on the
+// connection, with one difference: once the function it returns has returned,
+// f has finished and never runs again.
+//
+// The stop function of [context.AfterFunc] reports whether it prevented f from
+// running and does not wait for an f that has already started. A context
+// cancelled at the instant its read or write completes therefore leaves f
+// running, or about to run, on a goroutine of its own, and the next operation
+// may have cleared the deadline and begun waiting by the time it gets there.
+// Moving that operation's deadline into the past ends a healthy connection for
+// a cancellation that belonged to an operation already over. Here stopping
+// takes the lock f runs under, so it waits for an f in progress, and an f that
+// has not begun finds itself stopped when it does.
+func wsAfterFunc(ctx context.Context, f func()) (stop func() bool) {
+	var mu sync.Mutex
+	stopped := false
+	cancel := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !stopped {
+			f()
+		}
+	})
+	return func() bool {
+		prevented := cancel()
+		mu.Lock()
+		stopped = true
+		mu.Unlock()
+		return prevented
 	}
 }
 

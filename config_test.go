@@ -473,3 +473,53 @@ func TestFailingSourceLooksUpNothing(t *testing.T) {
 		t.Error("a failing source reported a value")
 	}
 }
+
+type unexportedInner struct {
+	Token string `env:"TOKEN" required:"true"`
+}
+
+type embedsUnexportedPointer struct {
+	*unexportedInner
+	Name string `env:"NAME" default:"x"`
+}
+
+type hasUnexportedTagged struct {
+	secret string `env:"SECRET" required:"true"`
+	Name   string `env:"NAME" default:"x"`
+}
+
+type hasUnexportedUntagged struct {
+	cache map[string]string
+	*unexportedNoConfig
+	Name string `env:"NAME" default:"x"`
+}
+
+type unexportedNoConfig struct{ n int }
+
+type hasUnexportedOptedOut struct {
+	secret string `env:"-"`
+	Name   string `env:"NAME" default:"x"`
+}
+
+// A setting declared where reflection cannot reach it used to load nothing
+// without a word, so a `required` one was never enforced. It is now an error
+// that names the field, and a field that declares nothing is left alone.
+func TestLoadConfigRefusesUnreachableSettings(t *testing.T) {
+	t.Parallel()
+	values := ConfigValues(map[string]string{"TOKEN": "t", "SECRET": "s"})
+
+	_, err := LoadConfig[embedsUnexportedPointer](WithoutEnvironment(), values)
+	if err == nil || !strings.Contains(err.Error(), "unexportedInner") {
+		t.Errorf("embedded unexported pointer: LoadConfig = %v, want an error naming the field", err)
+	}
+	_, err = LoadConfig[hasUnexportedTagged](WithoutEnvironment(), values)
+	if err == nil || !strings.Contains(err.Error(), "secret") {
+		t.Errorf("unexported tagged field: LoadConfig = %v, want an error naming the field", err)
+	}
+	if _, err = LoadConfig[hasUnexportedUntagged](WithoutEnvironment(), values); err != nil {
+		t.Errorf("unexported fields with no configuration: LoadConfig = %v, want none", err)
+	}
+	if _, err = LoadConfig[hasUnexportedOptedOut](WithoutEnvironment(), values); err != nil {
+		t.Errorf("env:\"-\": LoadConfig = %v, want none", err)
+	}
+}

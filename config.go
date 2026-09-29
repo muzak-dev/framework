@@ -223,6 +223,16 @@ func (l *configLoader) fill(t reflect.Type, value reflect.Value, prefix []int, s
 	for i := range t.NumField() {
 		field := t.Field(i)
 		if !usableField(field) {
+			if declaresConfig(field.Type, 0) || hasConfigTag(field) {
+				// Reflection cannot set an unexported field, or allocate an
+				// unexported embedded pointer, so whatever is declared on it
+				// would load nothing. A `required` setting that is quietly
+				// never enforced is worse than the error.
+				*problems = append(*problems, fmt.Errorf(
+					"muzak: field %s declares configuration but is unexported, so it cannot be loaded; "+
+						"export it (an embedded struct may be embedded by value instead of by pointer), or tag it env:\"-\"",
+					field.Name))
+			}
 			continue
 		}
 		index := append(append([]int(nil), prefix...), i)
@@ -240,6 +250,38 @@ func (l *configLoader) fill(t reflect.Type, value reflect.Value, prefix []int, s
 		}
 		l.assign(field, l.prefix+name, fieldByIndex(value, index), marked, problems)
 	}
+}
+
+// hasConfigTag reports whether a field declares where its value comes from,
+// how it defaults or that it is required.
+func hasConfigTag(field reflect.StructField) bool {
+	if field.Tag.Get(tagEnv) == "-" {
+		return false
+	}
+	for _, tag := range []string{tagEnv, tagDefault, tagRequired} {
+		if _, ok := field.Tag.Lookup(tag); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// declaresConfig reports whether an embedded pointer to a struct holds any
+// field that declares configuration, looking through further embedded ones.
+// Only the type an unexported embedded pointer names is inspected, because
+// nothing else about such a field can be loaded.
+func declaresConfig(t reflect.Type, depth int) bool {
+	if t.Kind() != reflect.Pointer || t.Elem().Kind() != reflect.Struct || depth > 8 {
+		return false
+	}
+	inner := t.Elem()
+	for i := range inner.NumField() {
+		field := inner.Field(i)
+		if hasConfigTag(field) || (field.Anonymous && declaresConfig(field.Type, depth+1)) {
+			return true
+		}
+	}
+	return false
 }
 
 // assign resolves one field's value and writes it, recording a problem instead

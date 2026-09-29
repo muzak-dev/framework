@@ -516,3 +516,25 @@ func TestStatusCoderWrappedCauseStaysOutOfTheResponse(t *testing.T) {
 		t.Errorf("deliberate 5xx message = %q", msg)
 	}
 }
+
+// A ValidationError an application built with no details still has a message,
+// rather than panicking on the first detail it does not have, which used to
+// happen inside the code that reports the error.
+func TestEmptyValidationErrorHasAMessageAndAResponse(t *testing.T) {
+	t.Parallel()
+	if got := (&ValidationError{}).Error(); got != "validation failed" {
+		t.Errorf("Error() = %q", got)
+	}
+	var nilErr *ValidationError
+	if got := nilErr.Error(); got != "validation failed" {
+		t.Errorf("nil Error() = %q", got)
+	}
+
+	app := New(quietOptions())
+	app.Get("/x", func(ctx *Context, _ Empty) (Empty, error) {
+		return Empty{}, &ValidationError{}
+	})
+	mustBuild(t, app)
+	rec := do(t, app, http.MethodGet, "/x")
+	assertStatus(t, rec, http.StatusUnprocessableEntity)
+}

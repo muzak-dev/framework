@@ -364,6 +364,12 @@ type ValidationError struct {
 // Error implements the error interface, summarizing how many fields failed and
 // naming the first of them.
 func (e *ValidationError) Error() string {
+	// The type is exported and Details is a plain field, so an application can
+	// build one with nothing in it, and asking it for a message must not be
+	// what takes the request down.
+	if e == nil || len(e.Details) == 0 {
+		return "validation failed"
+	}
 	first := e.Details[0]
 	if len(e.Details) == 1 {
 		return fmt.Sprintf("validation failed: %s %s %s", first.Location, describeField(first.Field), first.Issue)

@@ -426,6 +426,24 @@ regression test. Several fixes tighten a default; each one is listed under
   none for a layout where the inner mount is mounted at its own directory
   name; to publish the same files at two paths, mount them at both.
 
+- **WebSocket keepalive is on by default.** `WSOptions.PingInterval` defaults
+  to 30 seconds and `PongTimeout` to 10, so a peer that connects and goes
+  silent, or whose network dropped without a word, no longer holds a
+  connection slot for as long as it likes: only the per-IP and global caps
+  bounded it before. A connection is closed for an unanswered ping only when
+  its handler was reading during it, because a pong is consumed by a read like
+  any other frame; a handler that only writes, or one busy with a message, is
+  left alone, which also stops keepalive closing a healthy peer of a handler
+  that does not read. Migration: none is needed for a peer that answers pings,
+  as every browser does. A negative `PingInterval` turns keepalive off.
+
+- **The default `MaxHeaderBytes` is 64 KiB, not 1 MiB.** A client that never
+  finishes a header block holds all it has sent for as long as
+  `ReadHeaderTimeout` allows, and with no cap on connections as a whole a
+  megabyte each adds up. An ordinary request, with its cookies and a token,
+  needs a small fraction of the new limit. Migration: set
+  `ServerOptions.MaxHeaderBytes` for a deployment that sends larger headers.
+
 ### Security
 
 - **A WebSocket message can no longer slip past the read limit.** The limit
@@ -940,14 +958,9 @@ The latest review found these and left them, each with the reason.
   header block under the connection's own timeouts, so a client that never
   finishes one is held until `IdleTimeout` (2 minutes by default), not for 5
   seconds. `ServerOptions.WriteTimeout` says so.
-- A WebSocket peer that goes silent, or an event-stream client that never
-  reads, is held until the per-IP and global connection caps are the only
-  bound, because `PingInterval` is off by default. Set `WSOptions.PingInterval`
-  and `PongTimeout` where idle peers matter.
-- The default `MaxHeaderBytes` is 1 MiB, and there is no cap on connections
-  as a whole, so a half-open connection that streams an unterminated header
-  holds close to a megabyte for `ReadHeaderTimeout`. Lower `MaxHeaderBytes`
-  and put a connection limit in front where that matters.
+- An event-stream client that never reads is bounded by its keepalive writes
+  filling the socket, and by nothing else: a stream has no maximum lifetime.
+  `SSEStream` says so.
 - An HTTP/2 GET to a WebSocket route runs the route's guards before it is
   answered 426, as an HTTP/1 GET without an upgrade does, so that a client
   without credentials is told to authenticate first.

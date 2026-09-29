@@ -664,6 +664,8 @@ documentation, and it is listed as such.
 | F32 | Medium | A guarded nested mount was served, unguarded, through the parent mount under a spelling the filesystem folds to the same directory (ligatures, sharp s, NFD names on APFS), skipping its guard, providers, rate limit, `Cache-Control: private` and sandbox CSP; the third review's case check (S22) used simple case folding only | macOS and Windows | Fixed (by file identity) |
 | F33 | Low | A body that declared a length over the route limit was read up to the limit before the 413, and `Expect: 100-continue` was answered with a 100 first | Yes | Fixed |
 | F34 | Medium | A stalled socket write over HTTP/2 was not bounded: a client that granted a large window and stopped reading held every stream of its connection, SSE streams included, past `WriteTimeout` (40 SSE slots pinned for 60 s or more; the same client over HTTP/1 was cut in 0.7 s) | HTTP/2 | Fixed (`WriteByteTimeout`) |
+| F35 | Low | A WebSocket peer that connected and went silent, or whose network dropped, was bounded only by the connection caps, because keepalive was off by default and only worked while the handler was reading | Yes | Fixed (on by default, and only judged while a read is pending) |
+| F36 | Low | The default header limit was 1 MiB with no connection cap, so a half-open connection streaming an unterminated header pinned about 887 KiB for `ReadHeaderTimeout` | Yes | Fixed (64 KiB) |
 
 Two of these are behaviour changes worth knowing about. F32 also makes a directory with a mount of its own answer 404 through any outer mount under any name. F1 makes IPv6 counters
 in shared storage reset once, because the key changed. F20 and F23 make
@@ -687,9 +689,9 @@ residue over 200 attempts per mode; 200 streams on one connection hold the
 stream cap exactly; a rapid-reset loop of 5,000 never exceeds it), and about 45
 slow-client cases (every timeout fires exactly, nothing leaks, a shutdown with
 48 stalled connections ends at its timeout). The one failure was F34. What
-remains open is listed under **Known limits** in the changelog: no default
-idle bound on a silent WebSocket or SSE peer, the 1 MiB default header limit
-with no connection cap, and `ReadHeaderTimeout` not applying to HTTP/2.
+remains open is listed under **Known limits** in the changelog: an SSE client
+that never reads has no lifetime bound, and `ReadHeaderTimeout` does not apply
+to HTTP/2.
 
 Not established: HTTP/3 and the TLS handshake trickle, path aliasing by Windows
 trailing dots and streams (the mount-identity check should cover them where the

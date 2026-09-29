@@ -354,8 +354,9 @@ r.WS("/items/{item_id}/ws", func(ctx *muzak.Context, in WSItemIn, conn *muzak.WS
 - [x] Open connections are tracked so a graceful shutdown can tell each peer it
       is going away with 1001 and wait for the handlers, which `net/http` cannot
       do because a hijacked connection is no longer one of its own
-- [x] `PingInterval` keepalive, off by default, that ends a connection whose
-      peer stopped answering
+- [x] `PingInterval` keepalive, on by default and turned off by a negative
+      value, that ends a connection whose peer stopped answering while the
+      handler was reading
 - [x] Every response writer in the chain is told about the hijack, so a
       compressing wrapper does not try to finish a response that no longer exists
 - [x] OpenAPI describes the handshake: parameters, 101, 426 and 422, with no
@@ -648,6 +649,57 @@ Defects the tests found and fixed along the way:
     a handler streaming by hand behind `Compress` was buffered until the
     response ended. The event stream work found it, because a stream is the one
     response for which that is fatal rather than merely slow
+
+## Still to test
+
+Left open by the fourth security review (`docs/security-review.md`), which
+tested everything it could on macOS and loopback. Nothing here is a known bug;
+each is a place the review could not look.
+
+### On Windows (to be run by hand)
+
+- [ ] `go test -race ./...` passes on Windows. The nested-mount tests probe the
+      volume at run time and skip when it does not fold names, so on NTFS they
+      should run rather than skip: check that they do, and that they pass
+- [ ] A guarded nested mount is not reachable through its parent mount under
+      any spelling NTFS treats as the same directory: case, a trailing dot or
+      space (`/staff.`, `/staff `), an 8.3 short name (`/STAFF~1`), the
+      `\\?\` prefix, and a backslash in place of a slash
+- [ ] The dotfile block holds on NTFS: `.env`, `.env.`, `.env `, and the
+      alternate data stream forms `.env::$DATA` and `file:stream`
+- [ ] Reserved device names (`CON`, `NUL`, `AUX`, `COM1`, `LPT1`, with and
+      without an extension) served or requested through `Static` and
+      `Frontend` neither hang nor read a device
+- [ ] A symbolic link, a junction and a hard link inside and out of a served
+      directory: `Dir` and `os.Root` refuse one that leaves it, and the
+      nested-mount identity check answers 404 for one that leads into a
+      nested mount's directory
+- [ ] `RunSignals` ends the process on Ctrl-C, and a second Ctrl-C during the
+      drain ends it at once (SIGTERM is not delivered on Windows)
+- [ ] Multipart temp files are removed after a request even when the client
+      disconnects mid-upload (Windows refuses to delete an open file)
+
+### In the cloud (not started; needs a throwaway project and billing account)
+
+- [ ] Behind Cloud Run's front end: WebSocket, SSE, idle timeouts, HTTP/2 to
+      the backend, and which client address and `X-Forwarded-*` values arrive
+- [ ] Several instances against one shared rate-limit store: counters, window
+      expiry and the storage-failure path across nodes
+- [ ] A direct-to-internet server on a small VM for slow-client timing without
+      a proxy in between
+
+### Other
+
+- [ ] HTTP/3, if it is ever served
+- [ ] A TLS handshake that is trickled a byte at a time
+- [ ] An event stream from a client that reads nothing is bounded only by its
+      keepalive writes filling the socket; consider `SSEOptions.MaxLifetime`
+- [ ] Update the docs site for the next release: `PingInterval` now defaults to
+      30 seconds and a negative value turns it off, `MaxHeaderBytes` defaults
+      to 64 KiB, `ReadHeaderTimeout` does not apply to HTTP/2, and a body that
+      declares a length over the limit is refused unread
+- [ ] Merge the `audit-fix/binding-ui` branch of the `openapi` repository
+      (quoting in the generated code snippets)
 
 ## Deliverables
 

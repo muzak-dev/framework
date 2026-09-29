@@ -673,6 +673,13 @@ func TestWebSocketSurvivesAnAttackStorm(t *testing.T) {
 	if left := handlers.Load(); left != 0 {
 		t.Errorf("%d handlers are still running after every attacker disconnected", left)
 	}
+	// A connection keeps its place in the register until it has been closed,
+	// which comes a moment after its handler has returned, so the register is
+	// waited on rather than read at once.
+	settled := time.Now().Add(wsTestTimeout)
+	for time.Now().Before(settled) && app.websockets.count() > 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if tracked := app.websockets.count(); tracked != 0 {
 		t.Errorf("the register still holds %d connections, so a shutdown would wait on them", tracked)
 	}

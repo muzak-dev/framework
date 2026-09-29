@@ -508,6 +508,12 @@ func TestLoadConfigRefusesUnreachableSettings(t *testing.T) {
 	t.Parallel()
 	values := ConfigValues(map[string]string{"TOKEN": "t", "SECRET": "s"})
 
+	// The fields exist to be found by reflection; naming them keeps the
+	// linter from calling them unused.
+	_ = hasUnexportedTagged{secret: "s"}
+	_ = hasUnexportedUntagged{cache: nil, unexportedNoConfig: &unexportedNoConfig{n: 1}}
+	_ = hasUnexportedOptedOut{secret: "s"}
+
 	_, err := LoadConfig[embedsUnexportedPointer](WithoutEnvironment(), values)
 	if err == nil || !strings.Contains(err.Error(), "unexportedInner") {
 		t.Errorf("embedded unexported pointer: LoadConfig = %v, want an error naming the field", err)

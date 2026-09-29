@@ -351,6 +351,9 @@ func parseMultipart(c *Context, route *Route, hasFiles bool) error {
 		limit = route.maxBodySize
 		what = "form"
 	}
+	if declaredOverLimit(c.r, limit) {
+		return uploadReadError(&http.MaxBytesError{Limit: limit}, limit, what)
+	}
 	memory := maxMultipartMemory
 	if limit > 0 {
 		c.r.Body = http.MaxBytesReader(c.w, c.r.Body, limit)
@@ -374,6 +377,9 @@ func parseMultipart(c *Context, route *Route, hasFiles bool) error {
 // off net/http's own cap, so when the route has no limit at all the body is
 // left unwrapped and that cap still applies.
 func parseURLEncodedForm(c *Context, route *Route) error {
+	if declaredOverLimit(c.r, route.maxBodySize) {
+		return uploadReadError(&http.MaxBytesError{Limit: route.maxBodySize}, route.maxBodySize, "form")
+	}
 	if route.maxBodySize > 0 {
 		c.r.Body = http.MaxBytesReader(c.w, c.r.Body, route.maxBodySize)
 	}

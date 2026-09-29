@@ -928,11 +928,30 @@ func (b *paramBinder) lookup(c *Context, query url.Values) ([]string, bool) {
 	}
 }
 
+// declaredOverLimit reports whether a request declares a body longer than
+// limit, which is known from its Content-Length before any of the body is read.
+//
+// Reading up to the limit and refusing then gives the same answer at the cost
+// of the bytes, and worse, a request that sent Expect: 100-continue has been
+// told to go ahead by the time the first read happens. A body that does not
+// declare a length, as a chunked one does not, is still bounded as it is read.
+// A limit that is not positive is no limit.
+func declaredOverLimit(r *http.Request, limit int64) bool {
+	return limit > 0 && r.ContentLength > limit
+}
+
 // bindBody reads, size-limits and decodes the JSON request body.
 func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *ValidationError) error {
 	labelled, err := checkContentType(c.r)
 	if err != nil {
 		return err
+	}
+
+	// A body that declares a length over the limit is refused before it is
+	// read, so a client that asked for a 100 Continue is not told to send it.
+	if declaredOverLimit(c.r, route.maxBodySize) {
+		return NewHTTPErrorf(http.StatusRequestEntityTooLarge,
+			"request body exceeds the %d byte limit for this route", route.maxBodySize)
 	}
 
 	buf := bodyBufferPool.Get().(*bytes.Buffer)

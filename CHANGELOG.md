@@ -85,11 +85,14 @@ regression test. Several fixes tighten a default; each one is listed under
   vendor extensions on the operation, `"x-category"` and `"x-title"`, emitted
   only where one was set, and are exposed as `Route.Category` and `Route.Title`;
   generic, WebSocket and event stream routes carry them alike. A category is not
-  a tag, and tags behave exactly as before. **The document says only that.** It
-  has no list of categories, so a tool orders them as it first meets them among
-  the operations, which the document lists in sorted path order, not in the
-  order routers were registered. Nothing changes for an application that sets
-  neither: the document carries neither key. Both are checked when the
+  a tag, and tags behave exactly as before. The document also carries
+  a top-level `"x-categories"` array naming every category some operation in it
+  has, each once, in the order they were first registered: a route counts where
+  it was declared and a router included into another counts where the `Include`
+  call was made, so a hundred routers list in the order the application
+  mounted them and not in the sorted order of their paths. A category met only
+  on a hidden route is left out. Nothing changes for an application that sets
+  neither: the document carries neither extension nor the list. Both are checked when the
   application is built, and the error names the route or the router (by its
   mount prefix): after trimming surrounding whitespace the value must not be
   empty, must be valid UTF-8 of at most 64 characters for a category and 120 for

@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -130,6 +131,12 @@ type Document struct {
 	Components *Components `json:"components,omitzero"`
 	// Tags lists the groups operations are sorted into.
 	Tags []Tag `json:"tags,omitzero"`
+	// Categories lists every distinct category an operation in the document
+	// carries, in the order the routes were first registered, as the
+	// "x-categories" vendor extension. It is what a documentation tool orders
+	// its categories by, since the paths are listed in sorted order. It is
+	// absent when no operation has a category. See [WithCategory].
+	Categories []string `json:"x-categories,omitzero"`
 }
 
 // Info carries the metadata describing an API.
@@ -389,6 +396,14 @@ func (a *App) buildDocument() *Document {
 		op    *Operation
 	}
 	var operations []documented
+	// Categories are gathered with the position their route was registered at,
+	// because the paths are listed in sorted order and say nothing of it.
+	type categorized struct {
+		rank     int
+		category string
+	}
+	var categories []categorized
+	ranks := a.registrationOrder()
 	for _, rt := range a.routes {
 		if rt.Hidden {
 			continue
@@ -406,6 +421,15 @@ func (a *App) buildDocument() *Document {
 			continue
 		}
 		tags = append(tags, rt.Tags...)
+		if rt.Category != "" {
+			categories = append(categories, categorized{ranks[rt.seq], rt.Category})
+		}
+	}
+	slices.SortStableFunc(categories, func(x, y categorized) int { return cmp.Compare(x.rank, y.rank) })
+	for _, c := range categories {
+		if !slices.Contains(doc.Categories, c.category) {
+			doc.Categories = append(doc.Categories, c.category)
+		}
 	}
 	builder.sealResponses()
 	for _, d := range operations {

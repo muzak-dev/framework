@@ -1,12 +1,14 @@
 package muzak
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 )
@@ -297,11 +299,14 @@ func Title(title string) RouteOption {
 // always was.
 //
 // The category is written into the OpenAPI document as the operation's
-// "x-category" extension, and nothing else in the document mentions it: there
-// is no list of categories, so a tool orders them as it meets them among the
-// operations. The document lists its paths in sorted order, so that is the
-// order a category is first met in, and not the order the routers or routes
-// were registered in. It is checked when the application is built: after
+// "x-category" extension. The document also lists every category some
+// operation carries once, as the top-level "x-categories" array, in the order
+// the categories were first registered: a route counts where it was declared,
+// a router included into another counts where the Include call was made, and a
+// category first met on a route the document leaves out, such as a [Hidden]
+// one, is not listed. That order is what a documentation tool should present
+// them in, since the document's paths are sorted and say nothing of it. It is
+// checked when the application is built: after
 // surrounding whitespace is trimmed it must not be empty, must be valid UTF-8
 // of at most 64 characters, and must hold no control character, line break or
 // bidirectional control. Two spellings that differ in case are two categories.
@@ -540,6 +545,7 @@ type Route struct {
 	// cfg is the configuration declared directly on the route, retained until
 	// the application is built and the inherited configuration is known.
 	cfg      routeConfig
+	seq      uint64
 	rawPath  string
 	registry *Router
 }
@@ -549,6 +555,57 @@ type Route struct {
 type include struct {
 	child *Router
 	cfg   routerConfig
+	// seq places the inclusion among the routes registered on the same router;
+	// see [registrations].
+	seq uint64
+}
+
+// registrations numbers every route registered and every router included, in
+// the order it happened. A router keeps its routes and its includes in lists
+// of their own, so this is what lets the two be put back in the order they
+// were declared in, which decides the order the documentation lists categories
+// in. The count is only ever compared, so it does not matter that routers built
+// by different goroutines interleave in it.
+var registrations atomic.Uint64
+
+// addRoute records a registered route on the router, numbering it.
+func (r *Router) addRoute(rt *Route) {
+	rt.seq = registrations.Add(1)
+	r.routes = append(r.routes, rt)
+}
+
+// registrationOrder ranks every route beneath the router by where it was
+// registered, keyed by the number [Router.addRoute] gave it. A route registered
+// on a router counts where it was declared, and a router included into another
+// counts where the Include call was made, so the routes of one included between
+// two of its parent's are ranked between them.
+func (r *Router) registrationOrder() map[uint64]int {
+	ranks := make(map[uint64]int)
+	var walk func(*Router)
+	walk = func(r *Router) {
+		type step struct {
+			seq   uint64
+			route *Route
+			child *Router
+		}
+		steps := make([]step, 0, len(r.routes)+len(r.includes))
+		for _, rt := range r.routes {
+			steps = append(steps, step{seq: rt.seq, route: rt})
+		}
+		for _, inc := range r.includes {
+			steps = append(steps, step{seq: inc.seq, child: inc.child})
+		}
+		slices.SortFunc(steps, func(a, b step) int { return cmp.Compare(a.seq, b.seq) })
+		for _, s := range steps {
+			if s.route != nil {
+				ranks[s.route.seq] = len(ranks)
+				continue
+			}
+			walk(s.child)
+		}
+	}
+	walk(r)
+	return ranks
 }
 
 // Router groups related routes under a shared prefix, tag set and dependency
@@ -642,7 +699,7 @@ func (r *Router) Include(child *Router, opts ...RouterOption) {
 	for _, opt := range opts {
 		opt.applyRouter(&cfg)
 	}
-	r.includes = append(r.includes, include{child: child, cfg: cfg})
+	r.includes = append(r.includes, include{child: child, cfg: cfg, seq: registrations.Add(1)})
 }
 
 // Routes returns the routes registered directly on this router, excluding
@@ -777,7 +834,7 @@ func register[In, Out any](r *Router, method, path string, h Handler[In, Out], o
 		}
 		return c.writeResponse(out)
 	}
-	r.routes = append(r.routes, rt)
+	r.addRoute(rt)
 	return rt
 }
 

@@ -349,7 +349,7 @@ func registerSSE[In, Out any](r *Router, method, path string, h SSEHandler[In, O
 		stream := &SSEStream[Out]{core: core}
 		return c.app.serveSSE(c, core, func() error { return h(c, in, stream) })
 	}
-	r.routes = append(r.routes, rt)
+	r.addRoute(rt)
 	return rt
 }
 

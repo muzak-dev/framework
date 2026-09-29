@@ -100,6 +100,9 @@ func main() {
 	// route and file below and leaves /docs readable.
 	guarded := muzak.WithDependencies(core.GetQueryToken)
 
+	// The documentation lists categories in the order they are first
+	// registered, and a router counts where it is included, so the order of
+	// these calls is the order of the sidebar's headings.
 	app.Include(routers.Users(), guarded)
 	app.Include(routers.Items(), guarded)
 	app.Include(routers.Meta(), guarded)

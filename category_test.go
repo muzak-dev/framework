@@ -238,7 +238,7 @@ func TestAnApplicationThatSetsNeitherDocumentsNothingNew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"x-category", "x-title"} {
+	for _, key := range []string{"x-category", "x-title", "x-categories"} {
 		if strings.Contains(string(raw), key) {
 			t.Errorf("the document mentions %s though nothing set it", key)
 		}
@@ -461,4 +461,173 @@ func TestTitleNeedNotBeUnique(t *testing.T) {
 	app.Get("/a", noop, Title("Same"))
 	app.Get("/b", noop, Title("Same"))
 	mustBuild(t, app)
+}
+
+// categoriesOf builds an application and returns the document's
+// "x-categories" list, and whether the key is present at all.
+func categoriesOf(t *testing.T, app *App) ([]string, bool) {
+	t.Helper()
+	doc := documentOf(t, app)
+	raw, present := doc["x-categories"]
+	if !present {
+		return nil, false
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("x-categories is %T, want an array", raw)
+	}
+	out := make([]string, len(list))
+	for i, v := range list {
+		out[i], _ = v.(string)
+	}
+	return out, true
+}
+
+func TestTheDocumentListsCategoriesInRegistrationOrder(t *testing.T) {
+	t.Parallel()
+	// The paths sort the other way round, so a list that followed them would
+	// read Alpha before Zulu.
+	app := New(quietOptions())
+	zulu := NewRouter(WithCategory("Zulu"))
+	zulu.Get("/zulu", noop)
+	alpha := NewRouter(WithCategory("Alpha"))
+	alpha.Get("/alpha", noop)
+	app.Include(zulu)
+	app.Include(alpha)
+	got, present := categoriesOf(t, app)
+	if !present || !slices.Equal(got, []string{"Zulu", "Alpha"}) {
+		t.Errorf("x-categories = %v (present %v), want [Zulu Alpha]", got, present)
+	}
+}
+
+func TestTheExactCategoryListOnTheWire(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/b", noop, WithCategory("Second"))
+	app.Get("/a", noop, WithCategory("First"))
+	mustBuild(t, app)
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := doc.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Multiline output puts each element on a line of its own.
+	compact := strings.Join(strings.Fields(string(raw)), "")
+	if !strings.Contains(compact, `"x-categories":["Second","First"]`) {
+		t.Errorf("the document lacks the exact list; it reads %s", raw)
+	}
+}
+
+func TestCategoryOrderFollowsWhereARouterIsIncluded(t *testing.T) {
+	t.Parallel()
+	inner := NewRouter(WithCategory("Nested"))
+	inner.Get("/n", noop)
+	deep := NewRouter()
+	deep.Get("/deep", noop, WithCategory("Deep"))
+	inner.Include(deep, WithPrefix("/deep"))
+	inner.Get("/late", noop, WithCategory("Late"))
+
+	// The child is built before the app registers anything, and is included
+	// between the parent's own routes, so its place is the Include call's.
+	app := New(quietOptions())
+	app.Get("/x", noop, WithCategory("Before"))
+	app.Include(inner, WithPrefix("/inner"))
+	app.Get("/y", noop, WithCategory("After"))
+	got, _ := categoriesOf(t, app)
+	// Nested, then what it included when it did, then Late; the parent's own
+	// route registered after the Include follows all of them.
+	if want := []string{"Before", "Nested", "Deep", "Late", "After"}; !slices.Equal(got, want) {
+		t.Errorf("x-categories = %v, want %v", got, want)
+	}
+}
+
+func TestCategoryOrderAmongRoutesOfOneRouterFollowsRegistration(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/z", noop, WithCategory("C"))
+	app.Get("/a", noop, WithCategory("A"))
+	app.Get("/m", noop, WithCategory("B"))
+	app.Get("/z2", noop, WithCategory("A"))
+	got, _ := categoriesOf(t, app)
+	if want := []string{"C", "A", "B"}; !slices.Equal(got, want) {
+		t.Errorf("x-categories = %v, want %v", got, want)
+	}
+}
+
+func TestSharedCategoriesAreListedOnce(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	for _, prefix := range []string{"/one", "/two", "/three"} {
+		r := NewRouter(WithCategory("Billing"))
+		r.Get("/x", noop)
+		app.Include(r, WithPrefix(prefix))
+	}
+	other := NewRouter(WithCategory("Other"))
+	other.Get("/x", noop)
+	app.Include(other, WithPrefix("/four"))
+	app.Get("/again", noop, WithCategory("Billing"))
+	got, _ := categoriesOf(t, app)
+	if want := []string{"Billing", "Other"}; !slices.Equal(got, want) {
+		t.Errorf("x-categories = %v, want %v", got, want)
+	}
+}
+
+func TestNoCategoryListWhenNoRouteHasACategory(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/a", noop, Title("Titled but uncategorized"))
+	if got, present := categoriesOf(t, app); present {
+		t.Errorf("x-categories = %v, want the key absent", got)
+	}
+}
+
+func TestCategoriesFromEveryKindOfRouteAreListed(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.WS("/ws", wsEcho, WithCategory("Sockets"))
+	app.SSE("/sse", streamItems("x"), WithCategory("Streams"))
+	app.Post("/generic", withBody, WithCategory("Plain"))
+	got, _ := categoriesOf(t, app)
+	if want := []string{"Sockets", "Streams", "Plain"}; !slices.Equal(got, want) {
+		t.Errorf("x-categories = %v, want %v", got, want)
+	}
+}
+
+func TestCategoriesOfRoutesLeftOutOfTheDocumentAreNotListed(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/secret", noop, WithCategory("Internal"), Hidden())
+	hiddenRouter := NewRouter(WithCategory("AlsoInternal"), Hidden())
+	hiddenRouter.Get("/x", noop)
+	app.Include(hiddenRouter, WithPrefix("/h"))
+	app.Get("/open", noop, WithCategory("Public"))
+	// A category met first on a hidden route is not listed, but is one the
+	// document lists when a visible route carries it.
+	app.Get("/shared", noop, WithCategory("Internal"))
+	got, _ := categoriesOf(t, app)
+	if want := []string{"Public", "Internal"}; !slices.Equal(got, want) {
+		t.Errorf("x-categories = %v, want %v", got, want)
+	}
+
+	onlyHidden := New(quietOptions())
+	onlyHidden.Get("/secret", noop, WithCategory("Internal"), Hidden())
+	if got, present := categoriesOf(t, onlyHidden); present {
+		t.Errorf("x-categories = %v, want the key absent", got)
+	}
+}
+
+func TestCategoryOrderSurvivesVersionedExpansion(t *testing.T) {
+	t.Parallel()
+	opts := quietOptions()
+	opts.Versioning = VersioningOptions{Type: VersioningURI}
+	app := New(opts)
+	app.Get("/b", noop, WithVersion("1", "2"), WithCategory("B"))
+	app.Get("/a", noop, WithVersion("1"), WithCategory("A"))
+	got, _ := categoriesOf(t, app)
+	if want := []string{"B", "A"}; !slices.Equal(got, want) {
+		t.Errorf("x-categories = %v, want %v", got, want)
+	}
 }

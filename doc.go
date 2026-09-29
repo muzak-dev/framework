@@ -683,10 +683,11 @@
 // replaces the category it would have inherited, where tags would add up. Both
 // are emitted as vendor extensions on the operation, "x-category" and
 // "x-title", and only where one was set, so an application that sets neither
-// publishes the same document as before. There is no list of categories in the
-// document: a tool orders them as it first meets them among the operations,
-// which the document lists in sorted path order rather than the order they were
-// registered in. A category of at most 64 characters and a title of at most 120
+// publishes the same document as before. The document also carries a top-level
+// "x-categories" list, holding each category some operation in it carries once,
+// in the order the categories were first registered (a router counts where it
+// was included), which is the order to present them in because the paths are
+// listed sorted. A category of at most 64 characters and a title of at most 120
 // must be one line of text, which is checked when the application is built.
 //
 // [AppOptions.DocsPath] and [AppOptions.OpenAPIPath] decide where the two are

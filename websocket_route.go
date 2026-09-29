@@ -511,7 +511,7 @@ func (r *Router) WS[In any](path string, h WSHandler[In], opts ...RouteOption) *
 		}
 		return c.app.serveWebSocket(c, conn, func() error { return h(c, in, conn) })
 	}
-	r.routes = append(r.routes, rt)
+	r.addRoute(rt)
 	return rt
 }
 

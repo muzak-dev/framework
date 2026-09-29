@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"reflect"
@@ -301,14 +302,20 @@ func (d *Document) Marshal() ([]byte, error) {
 // and middleware is in place: configuring the application afterwards panics,
 // as it does after [App.Build].
 //
-// The document describes what the binder and the validation rules enforce, and
-// does not describe authentication. A guard is a function that Muzak can run
-// but not read, so it cannot say whether it wants a bearer token, an API key
-// or a session cookie, and no security scheme or security requirement is
-// emitted. Every member of a JSON body that is not a pointer and carries no
-// omitempty or omitzero is listed as required, which is a statement about the
-// shape of the Go type: the decoder itself accepts a body that leaves it out,
-// and only a Required rule turns its absence into a failure.
+// The document describes what the binder and the validation rules enforce. A
+// member of a JSON request body is listed as required only when the runtime
+// refuses a body without it, which is when a Required rule is declared for it:
+// the decoder itself accepts a body that leaves any member out, whatever the Go
+// type's shape suggests, so a member with no such rule is optional and a
+// pointer that a Required rule speaks for is required and not nullable. The
+// response side keeps the shape, since a member that is not a pointer and not
+// omitempty is always written; a type used both ways therefore has a component
+// for the response and a copy for the request, named for it with Input after.
+// Members of a form are required as the binder decides.
+//
+// It does not describe authentication. A guard is a function that Muzak can run
+// but not read, so it cannot say whether it wants a bearer token, an API key or
+// a session cookie, and no security scheme or security requirement is emitted.
 func (a *App) Document() (*Document, error) {
 	if err := a.Build(); err != nil {
 		return nil, err
@@ -336,6 +343,16 @@ func (a *App) buildDocument() *Document {
 	builder := newSchemaBuilder()
 	var tags []string
 
+	// The request bodies are described after everything else. What a body
+	// member is required to be is decided by what the binder refuses, which
+	// is less than what the Go type's shape says a response always carries, so
+	// a type the responses already described has to be told apart from one
+	// only a request uses, and that is known once the responses are done.
+	type documented struct {
+		route *Route
+		op    *Operation
+	}
+	var operations []documented
 	for _, rt := range a.routes {
 		if rt.Hidden {
 			continue
@@ -345,12 +362,18 @@ func (a *App) buildDocument() *Document {
 			item = &PathItem{}
 			doc.Paths[rt.docPath()] = item
 		}
-		if !item.set(rt.Method, a.operationFor(rt, builder)) {
+		op := a.operationFor(rt, builder)
+		operations = append(operations, documented{rt, op})
+		if !item.set(rt.Method, op) {
 			// A method OpenAPI has no slot for is routable but cannot be
 			// described, so it is simply left out of the document.
 			continue
 		}
 		tags = append(tags, rt.Tags...)
+	}
+	builder.sealResponses()
+	for _, d := range operations {
+		a.describeRequestBody(d.route, d.op, builder)
 	}
 
 	doc.Tags = a.tagList(tags)
@@ -445,38 +468,6 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		op.Parameters = append(op.Parameters, parameter)
 	}
 	switch {
-	case rt.plan.multipart:
-		body := builder.multipartSchema(rt.plan)
-		// The binder already decided which form values are required, and it
-		// enforces that whatever the rules say, so the rules may only add to
-		// the list here.
-		builder.applyBodyConstraints(body, constraints, elements, false, srcForm.String(), srcFile.String(), "body")
-		op.RequestBody = &RequestBody{
-			Required: len(body.Required) > 0,
-			Content:  multipartContent(rt.plan, body),
-		}
-	case rt.plan.body != nil:
-		// The schema is built once and then annotated. Building it twice would
-		// leave the constraints on a throwaway for a mixed input, whose body is
-		// described inline rather than by reference.
-		body := builder.bodySchema(rt.plan)
-		builder.applyBodyDefaults(body, rt.plan.body.defaults)
-		builder.applyBodyConstraints(body, constraints, elements, true, "body")
-		for _, nested := range rt.nestedModelsForDocs() {
-			// A nested model's rules land on the component of its type, which
-			// is where a reference to it leads. One that was described inline,
-			// as an anonymous struct is, has no component to carry them.
-			if ref, described := builder.byType[nested.typ]; described {
-				builder.applyBodyConstraints(ref, nested.constraints, nested.elements, true, "body")
-			}
-		}
-		op.RequestBody = &RequestBody{
-			Required: rt.plan.body.required,
-			Content:  map[string]MediaType{"application/json": {Schema: body}},
-		}
-	}
-
-	switch {
 	case rt.websocket != nil:
 		// A WebSocket route has no response body to describe. What it has is a
 		// handshake, and what OpenAPI can say about one is that it answers 101
@@ -510,25 +501,72 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 	return op
 }
 
+// describeRequestBody attaches the body a route accepts to its operation.
+//
+// It runs after every route's parameters and responses have been described,
+// which is what tells it whether a type the body is made of was already
+// described for a response.
+func (a *App) describeRequestBody(rt *Route, op *Operation, builder *schemaBuilder) {
+	constraints := rt.constraintsForDocs()
+	elements := rt.elementConstraintsForDocs()
+
+	switch {
+	case rt.plan.multipart:
+		body := builder.multipartSchema(rt.plan)
+		// The binder already decided which form values are required, and it
+		// enforces that whatever the rules say, so the rules may only add to
+		// the list here. A rule that named itself with As() and is bound to
+		// nothing in the model is reported under "body", so it is looked for
+		// there too.
+		locations := []string{srcForm.String(), srcFile.String(), "body"}
+		builder.applyBodyConstraints(body, constraints, elements, locations...)
+		for _, location := range locations {
+			for name, property := range builder.resolve(body).Properties {
+				if constraints[fieldKey{location, name}].Required && property != nil {
+					body.Required = setRequired(body.Required, name, true)
+				}
+			}
+		}
+		op.RequestBody = &RequestBody{
+			Required: len(body.Required) > 0,
+			Content:  multipartContent(rt.plan, body),
+		}
+	case rt.plan.body != nil:
+		// The schema is built once and then annotated. Building it twice would
+		// leave the constraints on a throwaway for a mixed input, whose body is
+		// described inline rather than by reference.
+		body := builder.bodySchema(rt.plan)
+		builder.applyBodyDefaults(body, rt.plan.body.defaults)
+		builder.applyBodyConstraints(body, constraints, elements, "body")
+		body = builder.requireOnlyWhatIsEnforced(body, constraints, true)
+		for _, nested := range rt.nestedModelsForDocs() {
+			// A nested model's rules land on the component of its type, which
+			// is where a reference to it leads. One that was described inline,
+			// as an anonymous struct is, has no component to carry them.
+			if ref, described := builder.byType[nested.typ]; described {
+				builder.applyBodyConstraints(ref, nested.constraints, nested.elements, "body")
+				builder.requireOnlyWhatIsEnforced(ref, nested.constraints, false)
+			}
+		}
+		op.RequestBody = &RequestBody{
+			Required: rt.plan.body.required,
+			Content:  map[string]MediaType{"application/json": {Schema: body}},
+		}
+	}
+}
+
 // applyBodyConstraints writes a model's validation rules onto the schema its
-// body was described with.
+// body was described with, for the fields read from any of the given
+// locations.
 //
 // The schema may be a reference into components, in which case the constraints
 // land on the shared definition. That is correct: the rules belong to the type,
 // so every operation that accepts it enforces them.
 //
-// requiredFromRules reports whether the rules also decide which members are
-// required. That is true for a JSON body, where the only alternative is the Go
-// type's shape, and false for a form, where the binder has already decided and
-// will enforce it whatever the rules say.
-//
-// A rule speaks for the field it was declared for, so it is matched by where
-// the field is read from as well as by its name: a body member and a query
-// parameter may share a name and keep their own rules. The locations are the
-// ones a rule may report, in the order they are tried; a form is described
-// under "form" and "file", and a rule that named itself with As() and is bound
-// to nothing in the model reports under "body".
-func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[fieldKey]validate.Constraints, requiredFromRules bool, locations ...string) {
+// Which members are required is not decided here; see
+// [schemaBuilder.requireOnlyWhatIsEnforced] for a JSON body, and the caller for
+// a form.
+func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[fieldKey]validate.Constraints, locations ...string) {
 	if len(constraints) == 0 && len(elements) == 0 {
 		return
 	}
@@ -536,39 +574,145 @@ func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements
 	if schema == nil || schema.Properties == nil {
 		return
 	}
+	// Locations are tried in the order given, so that when a form is described
+	// the value a rule declared for a form field wins over one that only
+	// borrowed its name.
 	for _, location := range locations {
-		for name, c := range constraints {
-			if name.location != location {
-				continue
+		for name, property := range schema.Properties {
+			if c, described := constraints[fieldKey{location, name}]; described {
+				applyConstraints(property, c)
 			}
-			property, described := schema.Properties[name.name]
-			if !described {
-				continue
-			}
-			applyConstraints(property, c)
-
-			switch {
-			case requiredFromRules:
-				// A JSON member the rules speak for is required exactly when they
-				// say so. Without this the document would fall back to the Go
-				// type's shape, which calls every non-pointer field required and
-				// would contradict a model that deliberately left one optional.
-				schema.Required = setRequired(schema.Required, name.name, c.Required)
-			case c.Required:
-				// A form value carries its own requiredness from the tag, which the
-				// binder enforces. A rule can only add to it, never take it away,
-				// or the document would promise a body the route then rejects.
-				schema.Required = setRequired(schema.Required, name.name, true)
-			}
-		}
-		for name, c := range elements {
-			if name.location != location {
-				continue
-			}
-			if property, described := schema.Properties[name.name]; described && property.Items != nil {
+			if c, described := elements[fieldKey{location, name}]; described && property.Items != nil {
 				applyConstraints(property.Items, c)
 			}
 		}
+	}
+}
+
+// requireOnlyWhatIsEnforced lists a JSON body's required members as the ones
+// the runtime refuses to be without, and returns the schema to describe the body
+// with.
+//
+// The decoder accepts a body that leaves out any member: what it does not find
+// it leaves as the zero value, and only a Required rule turns that into a
+// failure, so only a member with one is required. Absence is what Required
+// refuses in a pointer too, and null reads as absence there, so a required
+// pointer member is no longer described as nullable. Listing the rest, as the Go type's shape suggests, would tell a client, or a gateway
+// validating requests against the document, that a request the server accepts
+// is malformed.
+//
+// A component is also described for the responses that carry it, and there the
+// shape is the truth: a member that is not a pointer and not omitempty is always
+// present. Rewriting it in place for the request would take that away from
+// every client of the response, so a body type a response already described
+// gets a component of its own for the request, named for the type with Input
+// after it. A type only requests use keeps its name and is rewritten in place.
+// The types nested within a body are held to the same rule where the rules
+// speak for them, but are never split, since telling a parent to point at the
+// copy would mean describing it again; one a response shares keeps the shape.
+func (b *schemaBuilder) requireOnlyWhatIsEnforced(body *Schema, constraints map[fieldKey]validate.Constraints, split bool) *Schema {
+	schema := b.resolve(body)
+	if schema == nil || schema.Properties == nil {
+		return body
+	}
+	var required []string
+	for name := range schema.Properties {
+		if constraints[fieldKey{"body", name}].Required {
+			required = append(required, name)
+		}
+	}
+	slices.Sort(required)
+
+	if body.Ref == "" {
+		// A schema described inline belongs to this operation alone.
+		schema.Required = required
+		refuseNull(schema, required)
+		return body
+	}
+	name := strings.TrimPrefix(body.Ref, componentPrefix)
+	signature := strings.Join(required, "\x00")
+	if claimed, isClaimed := b.claimed[name]; isClaimed {
+		// Another route already decided this component, and described it for
+		// the same members, or this one takes a copy like any other.
+		if claimed == signature {
+			return body
+		}
+	} else if !b.responded[name] {
+		b.claimed[name] = signature
+		schema.Required = required
+		refuseNull(schema, required)
+		return body
+	}
+	if !split {
+		return body
+	}
+	if slices.Equal(schema.Required, required) && !anyNullable(schema, required) {
+		// The shape a response has is already what the request is.
+		return body
+	}
+	return b.inputVariant(body, required)
+}
+
+// anyNullable reports whether any of the named members is described as
+// accepting null.
+func anyNullable(schema *Schema, names []string) bool {
+	for _, name := range names {
+		if property := schema.Properties[name]; property != nil && notNullable(property) != property {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseNull stops describing the named members as nullable. It is for the
+// members a Required rule refuses to be without, which reads a null as nothing
+// having been sent.
+func refuseNull(schema *Schema, names []string) {
+	for _, name := range names {
+		if property := schema.Properties[name]; property != nil {
+			schema.Properties[name] = notNullable(property)
+		}
+	}
+}
+
+// inputVariant returns a reference to a copy of a component whose required
+// members are the ones given, creating it the first time it is asked for.
+func (b *schemaBuilder) inputVariant(ref *Schema, required []string) *Schema {
+	name := strings.TrimPrefix(ref.Ref, componentPrefix)
+	key := name + "\x00" + strings.Join(required, "\x00")
+	if variant, ok := b.variants[key]; ok {
+		return variant
+	}
+	copied := *b.schemas[name]
+	copied.Required = required
+	// The properties are shared with the component the responses use, so the
+	// ones narrowed for the request are set on a map of the copy's own.
+	copied.Properties = maps.Clone(copied.Properties)
+	refuseNull(&copied, required)
+	variantName := name + "Input"
+	for n := 2; ; n++ {
+		if _, taken := b.names[variantName]; !taken {
+			break
+		}
+		variantName = fmt.Sprintf("%sInput%d", name, n)
+	}
+	b.names[variantName] = reflect.TypeFor[inputVariantName]()
+	b.schemas[variantName] = &copied
+	variant := &Schema{Ref: componentPrefix + variantName}
+	b.variants[key] = variant
+	return variant
+}
+
+// inputVariantName stands in the table of component names for the ones given to
+// the copy of a type made for a request, so that a type which is really called
+// that is not given the same name.
+type inputVariantName struct{}
+
+// sealResponses records which components the responses, and the parameters, have
+// described, which is every one that exists when it is called.
+func (b *schemaBuilder) sealResponses() {
+	for name := range b.schemas {
+		b.responded[name] = true
 	}
 }
 
@@ -714,6 +858,13 @@ type schemaBuilder struct {
 	// walking holds the named collection types being described, so that one
 	// containing itself is described once rather than for ever.
 	walking map[reflect.Type]bool
+	// responded holds the components that existed once every response was
+	// described, and claimed those a request body has since decided the
+	// required members of. variants holds the copies made for a request where a
+	// component could not be rewritten.
+	responded map[string]bool
+	claimed   map[string]string
+	variants  map[string]*Schema
 }
 
 // newSchemaBuilder returns an empty builder.
@@ -723,6 +874,10 @@ func newSchemaBuilder() *schemaBuilder {
 		byType:  map[reflect.Type]*Schema{},
 		names:   map[string]reflect.Type{},
 		walking: map[reflect.Type]bool{},
+
+		responded: map[string]bool{},
+		claimed:   map[string]string{},
+		variants:  map[string]*Schema{},
 	}
 }
 
@@ -1152,6 +1307,31 @@ func intFormat(t reflect.Type) string {
 	default:
 		return "int64"
 	}
+}
+
+// notNullable is the inverse of [nullable]: it narrows a schema so that null is
+// no longer permitted. A schema that never permitted it is returned as it is.
+func notNullable(schema *Schema) *Schema {
+	if len(schema.AnyOf) == 2 && schema.AnyOf[1].Type == "null" {
+		// What a nullable reference was widened to: the reference is the schema,
+		// and what the wrapper was annotated with goes with it.
+		narrowed := *schema.AnyOf[0]
+		if schema.Description != "" {
+			narrowed.Description = schema.Description
+		}
+		return &narrowed
+	}
+	types, ok := schema.Type.([]string)
+	if !ok {
+		return schema
+	}
+	i := slices.Index(types, "null")
+	if i < 0 || len(types) != 2 {
+		return schema
+	}
+	narrowed := *schema
+	narrowed.Type = types[1-i]
+	return &narrowed
 }
 
 // nullable widens a schema so that null is permitted, which is how OpenAPI 3.1

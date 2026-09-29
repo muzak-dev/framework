@@ -128,8 +128,10 @@ func TestOpenAPIRequestAndResponseBodies(t *testing.T) {
 	if _, has := body.Properties["name"]; !has {
 		t.Errorf("the body schema has no name property: %+v", body.Properties)
 	}
-	if len(body.Required) != 1 || body.Required[0] != "name" {
-		t.Errorf("required = %v, want [name] (async carries omitzero)", body.Required)
+	// The decoder accepts a body without any member, and this type declares no
+	// rule that says otherwise, so the document requires nothing of it.
+	if len(body.Required) != 0 {
+		t.Errorf("required = %v, want none: nothing refuses a body that leaves a member out", body.Required)
 	}
 }
 
@@ -160,8 +162,8 @@ func TestOpenAPIMixedInputBodySchema(t *testing.T) {
 	if _, present := body.Properties["name"]; !present {
 		t.Errorf("the body schema is missing name: %+v", body.Properties)
 	}
-	if len(body.Required) != 1 || body.Required[0] != "name" {
-		t.Errorf("required = %v, want [name]", body.Required)
+	if len(body.Required) != 0 {
+		t.Errorf("required = %v, want none: nothing refuses a body that leaves name out", body.Required)
 	}
 }
 

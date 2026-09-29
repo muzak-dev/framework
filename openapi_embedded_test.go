@@ -43,8 +43,8 @@ func TestAnEmbeddedPointerIsPromotedInTheDocument(t *testing.T) {
 	if _, nested := schema.Properties["EmbeddedBase"]; nested {
 		t.Errorf("properties = %v, want no member named for the embedded type", keysOf(schema.Properties))
 	}
-	if slices.Contains(schema.Required, "id") || !slices.Contains(schema.Required, "name") {
-		t.Errorf("required = %v, want name only", schema.Required)
+	if slices.Contains(schema.Required, "id") {
+		t.Errorf("required = %v, want the embedded pointer's members optional", schema.Required)
 	}
 }
 

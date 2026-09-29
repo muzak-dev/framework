@@ -609,6 +609,12 @@
 // type, because the binding plan and the response schema were both compiled at
 // start-up.
 //
+// The document says of a request only what the server enforces. A member of a
+// JSON body is listed as required when a Required rule refuses a body without
+// it; the decoder accepts an absent member otherwise, so it is optional however
+// the Go field is declared. What a response always carries is described from
+// the shape of its type, as before.
+//
 // The document is what the framework publishes; rendering it is a separate
 // concern, and a separate module. [AppOptions.DocsUI] is nil by default, so a
 // service describes itself at /openapi.json and carries no page at all:

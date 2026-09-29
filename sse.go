@@ -51,6 +51,12 @@ var errSSEFinished = ended("the handler has returned")
 // payload, which cannot both be the data field.
 var errSSEBothPayloads = errors.New("muzak: an event carries either Data or Text, not both")
 
+// sseLifetimeComment is the last thing a stream says when it ends because
+// [SSEOptions.MaxLifetime] has passed. Like the keepalive it is a comment, so
+// no client acts on it, and it is spelled out so that a person watching the
+// stream sees that the end was intended and that reconnecting is expected.
+const sseLifetimeComment = "the stream has reached its maximum lifetime; reconnect to continue"
+
 // sseKeepAliveComment is what a keepalive says. The content is meaningless to
 // every client, which ignores comments; it is spelled out so that anyone
 // watching a stream by hand can see what it is.
@@ -124,13 +130,17 @@ type SSEEvent[Out any] struct {
 // used after the handler returns. A send a producer goroutine still has in
 // progress at that moment writes nothing and reports [ErrSSEStreamEnded].
 //
-// Nothing limits how long a stream lasts. [SSEOptions.WriteTimeout] bounds one
-// write and the keepalive bounds how long a proxy sees silence, so a client
-// that keeps reading holds its stream, and its slot in [SSEOptions.MaxStreams]
-// and [SSEOptions.MaxStreamsPerIP], for as long as its handler runs. That suits
-// the streams that are meant to be open for hours, and a handler that wants a
-// ceiling, to shed clients that never reconnect or to pick up a rotated
-// credential, sets one itself: derive a context with a timeout from
+// Unless [SSEOptions.MaxLifetime] is set, nothing limits how long a stream
+// lasts. [SSEOptions.WriteTimeout] bounds one write and the keepalive bounds
+// how long a proxy sees silence, so a client that keeps reading holds its
+// stream, and its slot in [SSEOptions.MaxStreams] and
+// [SSEOptions.MaxStreamsPerIP], for as long as its handler runs. So does one
+// that reads nothing: a keepalive is a few bytes, which never fill a socket
+// buffer, so no write ever stalls long enough for the write timeout to tell it
+// from a client that is listening. That suits the streams that are meant to be
+// open for hours, and a route that clients one does not control can open sets
+// a MaxLifetime, which ends the stream cleanly when it has passed, or the
+// handler sets a ceiling of its own: derive a context with a timeout from
 // [SSEStream.Context] and return when it ends. A browser's EventSource
 // reconnects on its own and resumes from the last event identifier, so ending a
 // stream on purpose costs it a moment.
@@ -247,6 +257,11 @@ type sseStream struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	unwatch func() bool
+
+	// lifetime ends the stream when [SSEOptions.MaxLifetime] has passed. It is
+	// nil for a stream without one, and is set by the request's own goroutine
+	// after the stream opens, which is also the one that finishes it.
+	lifetime *time.Timer
 
 	mu  sync.Mutex
 	err error
@@ -813,6 +828,9 @@ func (s *sseStream) finish() {
 	if s.unwatch != nil {
 		s.unwatch()
 	}
+	if s.lifetime != nil {
+		s.lifetime.Stop()
+	}
 }
 
 // acquireFinal takes the write semaphore for the last time.
@@ -854,6 +872,20 @@ func (s *sseStream) keepalive(interval time.Duration) {
 			return
 		}
 	}
+}
+
+// expire ends a stream whose [SSEOptions.MaxLifetime] has passed.
+//
+// The end is the one a shutdown makes: the stream is failed, which cancels its
+// context, so the handler returns and the response ends the way any finished
+// response does, with nothing cut short and nothing for the client to take for
+// a fault. The comment goes first, queued behind whatever event is being
+// written, so the event in progress arrives whole. It is written best effort:
+// the write is bounded by the stream's write timeout, and a client that will
+// not take even a comment is ended all the same.
+func (s *sseStream) expire() {
+	_ = s.send(sseFrame{comment: sseLifetimeComment})
+	_ = s.fail(ended("the stream reached its maximum lifetime"))
 }
 
 // monotonicStamp records a moment for a long-lived connection to measure an

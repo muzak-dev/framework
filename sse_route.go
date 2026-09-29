@@ -97,8 +97,30 @@ type SSEOptions struct {
 	// either, but its timeout is not enforced and the first such stream on a
 	// route logs a warning saying so. The bound covers one write: it says
 	// nothing about how long a stream may last, which is set by the client, by
-	// the handler and by [SSEOptions.MaxStreams] and MaxStreamsPerIP.
+	// the handler and by [SSEOptions.MaxLifetime].
 	WriteTimeout time.Duration
+
+	// MaxLifetime is the longest a stream stays open, unset by default, which
+	// leaves a stream open for as long as its handler runs and its client keeps
+	// the connection. When it has passed, the stream writes a comment saying so
+	// and ends, which a client sees as the response ending normally: a
+	// browser's EventSource reconnects on its own, sending the identifier of
+	// the last event it saw in the Last-Event-ID header, so a handler that
+	// resumes from [SSEStream.LastEventID] loses nothing. The handler is told
+	// the way it is told of a disconnect, through [SSEStream.Context] and the
+	// [ErrSSEStreamEnded] every later send reports, and the stream's slot in
+	// MaxStreams and MaxStreamsPerIP is released when it returns.
+	//
+	// It is worth setting on any route a client one does not control can open.
+	// The write timeout bounds one write and the keepalive is a few bytes, so a
+	// client that reads nothing at all never fills a socket buffer and holds
+	// its stream, a goroutine and a file descriptor until the server stops,
+	// and nothing but a ceiling on the stream's age can tell it from one that
+	// is listening. A stream is not cut mid-event: the ceiling is applied
+	// between events, after the one being written. A negative value removes
+	// the bound a wider scope set, for a route whose streams are meant to
+	// outlast it.
+	MaxLifetime time.Duration
 
 	// Retry is the reconnection delay advertised to the client at the start of
 	// every stream, sent as the retry field of the event stream. A browser's
@@ -156,6 +178,9 @@ func (o SSEOptions) overlay(over SSEOptions) SSEOptions {
 	if over.WriteTimeout != 0 {
 		o.WriteTimeout = over.WriteTimeout
 	}
+	if over.MaxLifetime != 0 {
+		o.MaxLifetime = over.MaxLifetime
+	}
 	if over.Retry != 0 {
 		o.Retry = over.Retry
 	}
@@ -175,6 +200,9 @@ func (o SSEOptions) withDefaults() SSEOptions {
 	o.WriteTimeout = orDefaultDuration(o.WriteTimeout, DefaultSSEWriteTimeout)
 	if o.Retry < 0 {
 		o.Retry = 0
+	}
+	if o.MaxLifetime < 0 {
+		o.MaxLifetime = 0
 	}
 	return o
 }
@@ -416,6 +444,9 @@ func (a *App) acceptSSE(c *Context, cfg *sseConfig) (*sseStream, error) {
 	}
 	if cfg.opts.KeepAlive > 0 {
 		go stream.keepalive(cfg.opts.KeepAlive)
+	}
+	if cfg.opts.MaxLifetime > 0 {
+		stream.lifetime = time.AfterFunc(cfg.opts.MaxLifetime, stream.expire)
 	}
 	return stream, nil
 }

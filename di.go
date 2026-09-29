@@ -12,8 +12,12 @@ import (
 // Guard is a dependency that validates or authorizes a request without
 // producing a value.
 //
-// A guard runs before the handler and before any value dependency declared
-// after it. Returning a non-nil error aborts the request, and the error is
+// Every guard on a route runs before any value dependency does, whatever order
+// they were declared in, and before the handler. A guard therefore cannot read
+// a value a [Needs] produces: [TryFrom] reports false for it and [From] panics,
+// which fails the request closed. A check that needs the caller's identity
+// belongs in the provider that resolves it, which returns the error itself.
+// Returning a non-nil error aborts the request, and the error is
 // mapped to a response exactly as one returned from a handler would be, so
 // returning [NewHTTPError](401, "unauthorized") is the idiomatic way to reject.
 // Guards are attached to an application or a router with [WithDependencies], so

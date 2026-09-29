@@ -296,3 +296,40 @@ func TestGuardCanSetResponseHeaders(t *testing.T) {
 		t.Errorf("X-Checked = %q, want %q", got, "yes")
 	}
 }
+
+// Guards run before every provider on the chain, however the two were
+// interleaved when declared: an outer Needs does not get to run ahead of a
+// route's own guard, so a guard can never read a value, and a rejection by a
+// guard costs no provider work.
+func TestGuardsRunBeforeEveryProviderWhateverTheDeclarationOrder(t *testing.T) {
+	t.Parallel()
+	var order []string
+	var sawValue bool
+	app := New(quietOptions(), Needs(func(ctx *Context) (diValue, error) {
+		order = append(order, "app-provider")
+		return diValue{Text: "outer"}, nil
+	}))
+	app.Get("/x", okHandler, WithDependencies(func(ctx *Context) error {
+		order = append(order, "route-guard")
+		_, sawValue = TryFrom[diValue](ctx)
+		return nil
+	}))
+	app.Get("/denied", okHandler, WithDependencies(func(ctx *Context) error {
+		order = append(order, "denying-guard")
+		return NewHTTPError(http.StatusForbidden, "no")
+	}))
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, "GET", "/x"), http.StatusOK)
+	if got := strings.Join(order, ","); got != "route-guard,app-provider" {
+		t.Errorf("order = %s, want the guard first", got)
+	}
+	if sawValue {
+		t.Error("a guard saw a value a provider had not yet resolved")
+	}
+	order = nil
+	assertStatus(t, do(t, app, "GET", "/denied"), http.StatusForbidden)
+	if got := strings.Join(order, ","); got != "denying-guard" {
+		t.Errorf("order = %s, want no provider to run for a rejected request", got)
+	}
+}

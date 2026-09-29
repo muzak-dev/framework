@@ -10,10 +10,27 @@ import "strings"
 // package ships. An application that translates neither still reads exactly
 // what it read before, which is what makes turning this feature on safe.
 func (c *Context) message(key, english string) string {
-	if c.i18n == nil || !c.i18n.Exists(c.locale, key) {
-		return english
+	if text, ok := c.frameworkText(key); ok {
+		return text
 	}
-	return c.i18n.Translate(c.locale, key)
+	return english
+}
+
+// frameworkText renders a translation of one of the framework's own messages,
+// and reports whether there was one to use.
+//
+// A translation that exists but cannot be rendered, because it names a value
+// the framework's call site never passes, comes back from the store as the
+// empty string, its exception handler having swallowed the failure. Sent as it
+// is, that is a response with a blank message where the English it falls back
+// to would have said what happened, so an empty rendering counts as no
+// translation at all.
+func (c *Context) frameworkText(key string, args ...any) (string, bool) {
+	if c.i18n == nil || !c.i18n.Exists(c.locale, key) {
+		return "", false
+	}
+	text := c.i18n.Translate(c.locale, key, args...)
+	return text, text != ""
 }
 
 // translateDetails renders each validation failure in the request's locale.
@@ -59,15 +76,17 @@ func (c *Context) translateDetail(model string, detail ErrorDetail) (string, boo
 		args = append(append([]any{}, args...), "attribute", detail.Field)
 	}
 
-	if detail.Key != "" && c.i18n.Exists(c.locale, detail.Key) {
-		return c.i18n.Translate(c.locale, detail.Key, args...), true
+	if detail.Key != "" {
+		if text, ok := c.frameworkText(detail.Key, args...); ok {
+			return text, true
+		}
 	}
 	if detail.Kind == "" {
 		return "", false
 	}
 	for _, key := range detailKeys(model, detail.Field, detail.Kind) {
-		if c.i18n.Exists(c.locale, key) {
-			return c.i18n.Translate(c.locale, key, args...), true
+		if text, ok := c.frameworkText(key, args...); ok {
+			return text, true
 		}
 	}
 	return "", false
@@ -128,10 +147,13 @@ func snakeCase(name string) string {
 // by hand meant to say, and what every one of the status constructors already
 // carries.
 func (c *Context) httpMessage(e *HTTPError) string {
-	if c.i18n == nil || e.MessageKey == "" || !c.i18n.Exists(c.locale, e.MessageKey) {
+	if e.MessageKey == "" {
 		return e.Message
 	}
-	return c.i18n.Translate(c.locale, e.MessageKey, e.MessageArgs...)
+	if text, ok := c.frameworkText(e.MessageKey, e.MessageArgs...); ok {
+		return text
+	}
+	return e.Message
 }
 
 // bindingKey names the translation of a binding failure, or the empty string

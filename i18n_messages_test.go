@@ -855,3 +855,51 @@ func TestEnglishIsUnchangedForTheNewRules(t *testing.T) {
 		}
 	}
 }
+
+// A translation that names a value the framework's call site never passes
+// fails to render, and the default exception handler answers a failure with
+// the empty string. The response then went out with a blank message, where the
+// English the framework would otherwise have produced is what it should say.
+func TestATranslationThatCannotRenderFallsBackToEnglish(t *testing.T) {
+	t.Parallel()
+	own, err := i18n.Load(fstest.MapFS{"locales/es.yml": &fstest.MapFile{Data: []byte(`es:
+  errors:
+    messages:
+      blank: "%{oops} vacio"
+  muzak:
+    http:
+      403: "%{oops}"
+    validation:
+      summary: "%{oops}"
+`)}}, "locales")
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	options := quietOptions()
+	options.I18n = I18nOptions{Store: own}
+	app := New(options)
+	app.Post("/enrol", func(*Context, enrolment) (struct{}, error) { return struct{}{}, nil })
+	app.Get("/forbidden", func(*Context, struct{}) (struct{}, error) {
+		return struct{}{}, Forbidden("")
+	})
+	app.Get("/keyed", func(*Context, struct{}) (struct{}, error) {
+		return struct{}{}, Forbidden("no entry").WithMessageKey("errors.messages.blank")
+	})
+	mustBuild(t, app)
+
+	body := inSpanish(t, app, http.MethodPost, "/enrol", `{"email": "", "name": ""}`)
+	if body.Error.Message != validationMessage {
+		t.Errorf("the summary is %q, want the English one", body.Error.Message)
+	}
+	for _, detail := range body.Error.Details {
+		if detail.Issue != "is required" {
+			t.Errorf("the %s says %q, want the framework's English", detail.Field, detail.Issue)
+		}
+	}
+	if got := inSpanish(t, app, http.MethodGet, "/forbidden", "").Error.Message; got != statusMessages[403] {
+		t.Errorf("the 403 says %q, want the English sentence", got)
+	}
+	if got := inSpanish(t, app, http.MethodGet, "/keyed", "").Error.Message; got != "no entry" {
+		t.Errorf("a keyed message says %q, want the error's own", got)
+	}
+}

@@ -925,7 +925,7 @@ func newSchemaBuilder() *schemaBuilder {
 
 // parameterFor describes one bound request parameter.
 func (b *schemaBuilder) parameterFor(p *paramBinder) Parameter {
-	schema := b.inline(p.typ)
+	schema := b.textSchema(p.typ)
 	if p.hasDef {
 		schema.Default = typedDefault(p.typ, p.defValue)
 	}
@@ -936,6 +936,30 @@ func (b *schemaBuilder) parameterFor(p *paramBinder) Parameter {
 		Required:    p.required,
 		Schema:      schema,
 	}
+}
+
+// textSchema describes a type as a request parameter or a form value carries
+// it, which is as text the binder converts, not as JSON.
+//
+// It differs from [schemaBuilder.inline] for a byte slice. A JSON body carries
+// one as base64, but the binder reads each value of a parameter as one element,
+// so `?data=65` is []byte{65} and a base64 string is refused. It is described
+// as the list of numbers it is.
+func (b *schemaBuilder) textSchema(t reflect.Type) *Schema {
+	if isTextCoded(t) {
+		return b.inline(t)
+	}
+	switch t.Kind() {
+	case reflect.Pointer:
+		return nullable(b.textSchema(t.Elem()))
+	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 && !isTextCoded(t.Elem()) {
+			zero, top := 0.0, float64(math.MaxUint8)
+			return &Schema{Type: "array", Items: &Schema{Type: "integer", Format: "int32", Minimum: &zero, Maximum: &top}}
+		}
+		return &Schema{Type: "array", Items: b.textSchema(t.Elem())}
+	}
+	return b.inline(t)
 }
 
 // bodySchema describes the JSON body a route accepts. When the whole input
@@ -986,7 +1010,7 @@ func (b *schemaBuilder) multipartSchema(plan *bindPlan) *Schema {
 	}
 	for i := range plan.form {
 		p := &plan.form[i]
-		property := b.inline(p.typ)
+		property := b.textSchema(p.typ)
 		property.Description = p.doc
 		if p.hasDef {
 			property.Default = typedDefault(p.typ, p.defValue)
@@ -1299,7 +1323,10 @@ func (b *schemaBuilder) inline(t reflect.Type) *Schema {
 	case uuidType:
 		return &Schema{Type: "string", Format: "uuid"}
 	case durationType:
-		return &Schema{Type: "string", Format: "duration", Description: "A Go duration such as 1500ms or 2h45m."}
+		// Not format "duration": that is ISO 8601, such as PT1.5S, and a client
+		// that checks formats would refuse the "1500ms" the binder and the JSON
+		// codec read. The text is described by what it looks like instead.
+		return &Schema{Type: "string", Pattern: durationPattern, Description: "A Go duration such as 1500ms or 2h45m."}
 	}
 	if t.Kind() != reflect.String && isTextCoded(t) {
 		return &Schema{Type: "string"}
@@ -1339,6 +1366,14 @@ func (b *schemaBuilder) inline(t reflect.Type) *Schema {
 		return &Schema{Description: fmt.Sprintf("Values of Go type %s have no JSON representation.", t)}
 	}
 }
+
+// durationPattern matches the text time.ParseDuration reads: a sign, then
+// either a bare zero or one or more numbers each followed by a unit.
+//
+// The two micro signs, U+00B5 and U+03BC, are written as escapes so that the
+// pattern holds the characters themselves, which is what every regular
+// expression dialect reads alike.
+const durationPattern = `^[-+]?(0|((\d+(\.\d*)?|\.\d+)(ns|us|` + "\u00b5s|\u03bcs" + `|ms|s|m|h))+)$`
 
 // intFormat reports the OpenAPI format for an integer type, which tells a
 // client generator how wide the value can be.

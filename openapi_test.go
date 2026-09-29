@@ -244,7 +244,7 @@ func TestSchemaGeneration(t *testing.T) {
 		{"bool", func(s *Schema) bool { return s.Type == "boolean" }, "boolean"},
 		{"time", func(s *Schema) bool { return s.Type == "string" && s.Format == "date-time" }, "date-time"},
 		{"uuid", func(s *Schema) bool { return s.Type == "string" && s.Format == "uuid" }, "uuid"},
-		{"duration", func(s *Schema) bool { return s.Type == "string" && s.Format == "duration" }, "duration"},
+		{"duration", func(s *Schema) bool { return s.Type == "string" && s.Format == "" && s.Pattern != "" }, "a string with a pattern"},
 		{"bytes", func(s *Schema) bool { return s.Type == "string" && s.Format == "byte" }, "base64"},
 		{"strings", func(s *Schema) bool { return s.Type == "array" && s.Items != nil }, "an array"},
 		{"array", func(s *Schema) bool { return s.Type == "array" }, "an array"},

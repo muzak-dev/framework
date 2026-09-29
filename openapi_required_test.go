@@ -158,3 +158,64 @@ func TestOpenAPINestedModelRequiresOnlyWhatItsRulesRefuse(t *testing.T) {
 		t.Errorf("required = %v, want [name]", got)
 	}
 }
+
+// defaultedIn has a Required rule on members that also carry a default, which
+// the binder fills in before any rule runs, so leaving them out is no failure.
+type defaultedIn struct {
+	Limit int    `query:"limit" default:"10"`
+	Role  string `json:"role" default:"user"`
+	Name  string `json:"name"`
+}
+
+func (in *defaultedIn) Validate(v *Validation) {
+	v.Number(&in.Limit).Required()
+	v.String(&in.Role).Required()
+	v.String(&in.Name).Required()
+}
+
+// TestOpenAPIDoesNotRequireWhatADefaultFillsIn holds the document to the runtime
+// for a member whose absence is answered with a default.
+func TestOpenAPIDoesNotRequireWhatADefaultFillsIn(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/d", func(ctx *Context, in defaultedIn) (Empty, error) { return Empty{}, nil })
+	mustBuild(t, app)
+	assertStatus(t, do(t, app, "POST", "/d", `{"name":"a"}`), http.StatusOK)
+	assertStatus(t, do(t, app, "POST", "/d", `{"role":"r"}`), http.StatusUnprocessableEntity)
+
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := doc.Paths["/d"].Post
+	if op.Parameters[0].Required {
+		t.Error("limit is required although a default answers its absence")
+	}
+	body := op.RequestBody.Content["application/json"].Schema
+	if !slices.Equal(body.Required, []string{"name"}) {
+		t.Errorf("required = %v, want [name]: role has a default", body.Required)
+	}
+}
+
+type defaultedForm struct {
+	Kind string `form:"kind" default:"a"`
+	Name string `form:"name"`
+}
+
+func (in *defaultedForm) Validate(v *Validation) {
+	v.String(&in.Kind).Required()
+}
+
+func TestOpenAPIFormDefaultIsNotRequiredByARule(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/f", func(ctx *Context, in defaultedForm) (Empty, error) { return Empty{}, nil })
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := doc.Paths["/f"].Post.RequestBody.Content["multipart/form-data"].Schema
+	if !slices.Equal(body.Required, []string{"name"}) {
+		t.Errorf("required = %v, want [name]: kind has a default", body.Required)
+	}
+}

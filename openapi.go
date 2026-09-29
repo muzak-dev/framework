@@ -488,7 +488,9 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		key := fieldKey{parameter.In, parameter.Name}
 		if c, described := constraints[key]; described {
 			applyConstraints(parameter.Schema, c)
-			if c.Required {
+			// A default is written before any rule runs, so a parameter that
+			// has one is not refused for being left out, whatever Required says.
+			if c.Required && !rt.plan.params[i].hasDef {
 				parameter.Required = true
 			}
 		}
@@ -550,9 +552,13 @@ func (a *App) describeRequestBody(rt *Route, op *Operation, builder *schemaBuild
 		// there too.
 		locations := []string{srcForm.String(), srcFile.String(), "body"}
 		builder.applyBodyConstraints(body, constraints, elements, locations...)
+		defaulted := make(map[string]bool, len(rt.plan.form))
+		for i := range rt.plan.form {
+			defaulted[rt.plan.form[i].name] = rt.plan.form[i].hasDef
+		}
 		for _, location := range locations {
 			for name, property := range builder.resolve(body).Properties {
-				if constraints[fieldKey{location, name}].Required && property != nil {
+				if constraints[fieldKey{location, name}].Required && property != nil && !defaulted[name] {
 					body.Required = setRequired(body.Required, name, true)
 				}
 			}
@@ -568,14 +574,18 @@ func (a *App) describeRequestBody(rt *Route, op *Operation, builder *schemaBuild
 		body := builder.bodySchema(rt.plan)
 		builder.applyBodyDefaults(body, rt.plan.body.defaults)
 		builder.applyBodyConstraints(body, constraints, elements, "body")
-		body = builder.requireOnlyWhatIsEnforced(body, constraints, true)
+		defaulted := make(map[string]bool, len(rt.plan.body.defaults))
+		for _, d := range rt.plan.body.defaults {
+			defaulted[d.name] = true
+		}
+		body = builder.requireOnlyWhatIsEnforced(body, constraints, defaulted, true)
 		for _, nested := range rt.nestedModelsForDocs() {
 			// A nested model's rules land on the component of its type, which
 			// is where a reference to it leads. One that was described inline,
 			// as an anonymous struct is, has no component to carry them.
 			if ref, described := builder.byType[nested.typ]; described {
 				builder.applyBodyConstraints(ref, nested.constraints, nested.elements, "body")
-				builder.requireOnlyWhatIsEnforced(ref, nested.constraints, false)
+				builder.requireOnlyWhatIsEnforced(ref, nested.constraints, nil, false)
 			}
 		}
 		op.RequestBody = &RequestBody{
@@ -627,9 +637,11 @@ func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements
 // it leaves as the zero value, and only a Required rule turns that into a
 // failure, so only a member with one is required. Absence is what Required
 // refuses in a pointer too, and null reads as absence there, so a required
-// pointer member is no longer described as nullable. Listing the rest, as the Go type's shape suggests, would tell a client, or a gateway
-// validating requests against the document, that a request the server accepts
-// is malformed.
+// pointer member is no longer described as nullable. Listing the rest, as the
+// Go type's shape suggests, would tell a client, or a gateway validating
+// requests against the document, that a request the server accepts is
+// malformed. A member with a default is not required either, since the default
+// is written before the rules run and leaving it out is not a failure.
 //
 // A component is also described for the responses that carry it, and there the
 // shape is the truth: a member that is not a pointer and not omitempty is always
@@ -640,14 +652,14 @@ func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements
 // The types nested within a body are held to the same rule where the rules
 // speak for them, but are never split, since telling a parent to point at the
 // copy would mean describing it again; one a response shares keeps the shape.
-func (b *schemaBuilder) requireOnlyWhatIsEnforced(body *Schema, constraints map[fieldKey]validate.Constraints, split bool) *Schema {
+func (b *schemaBuilder) requireOnlyWhatIsEnforced(body *Schema, constraints map[fieldKey]validate.Constraints, defaulted map[string]bool, split bool) *Schema {
 	schema := b.resolve(body)
 	if schema == nil || schema.Properties == nil {
 		return body
 	}
 	var required []string
 	for name := range schema.Properties {
-		if constraints[fieldKey{"body", name}].Required {
+		if constraints[fieldKey{"body", name}].Required && !defaulted[name] {
 			required = append(required, name)
 		}
 	}

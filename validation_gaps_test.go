@@ -173,7 +173,7 @@ func TestApplyBodyConstraintsWithNothingToDo(t *testing.T) {
 	// A reference that names nothing resolves to nothing rather than panicking.
 	builder.applyBodyConstraints(&Schema{Ref: componentPrefix + "absent"},
 		map[fieldKey]validate.Constraints{{"body", "a"}: {Required: true}}, nil, "body")
-	builder.requireOnlyWhatIsEnforced(&Schema{Ref: componentPrefix + "absent"}, nil, true)
+	builder.requireOnlyWhatIsEnforced(&Schema{Ref: componentPrefix + "absent"}, nil, nil, true)
 }
 
 // TestValidationWithoutAModel covers the paths a plan takes when the input type

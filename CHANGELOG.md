@@ -16,6 +16,61 @@ reproduced with a test before it was fixed, and each of those tests is now a
 regression test. Several fixes tighten a default; each one is listed under
 **Changed** with its migration.
 
+### Added
+
+- **Declare how a route authenticates, so the documentation can offer
+  Authorize.** A guard is a function the framework can run but not read, so the
+  document could never say whether a route wants a bearer token, an API key or a
+  session cookie, and guarded operations looked public. `AppOptions.SecuritySchemes`
+  now declares named schemes (`muzak.BearerAuth("JWT")`, `BasicAuth()`,
+  `HTTPAuth("digest")`, `APIKeyHeader` / `APIKeyQuery` / `APIKeyCookie`,
+  `OAuth2(OAuthFlows{...})`, `OpenIDConnect(url)`), and `WithSecurity` says which
+  a router or route sits behind, with scopes: `muzak.WithSecurity(muzak.Require("oauth", "items:read"))`.
+  `Public()` marks an exception, and is written as an empty `security` list. They
+  are emitted as `components.securitySchemes` and a `security` list on each
+  operation that declared one. A route's declaration replaces its router's, and
+  several requirements are alternatives (a `SecurityRequirement` naming several
+  schemes needs all of them). Nothing changes for an application that declares
+  none: the document carries neither. **A scheme only describes.** It is never
+  consulted while a request is served, so naming one protects nothing; the route
+  still needs the `Guard` that refuses. Schemes are checked when the application
+  is built: a name outside `[A-Za-z0-9._-]`, a type OpenAPI does not define, an
+  `http` scheme with no `Scheme`, an `apiKey` with no valid `In` or `Name`, an
+  `oauth2` scheme with no flow or a flow without the URL its kind needs, an
+  `openIdConnect` URL, a flow URL that is not `http` or `https`, a route naming a
+  scheme that is not declared or a scope an OAuth 2.0 scheme does not offer, and
+  a `WithSecurity()` naming nothing are all build errors.
+
+- **`SSEOptions.MaxLifetime` and `WSOptions.MaxLifetime` end a long-lived
+  connection on purpose.** The write timeout bounds one write and a keepalive
+  is a few bytes, so a client that reads nothing while comments trickle in
+  never fills a socket buffer, and a websocket peer that answers every ping and
+  says nothing is alive as far as a keepalive can tell. Either held its slot,
+  a goroutine and a file descriptor until the server stopped. When the lifetime
+  has passed an event stream writes a closing comment and ends the way a
+  finished response does, and a websocket is closed with `1001` going away, so
+  a browser's `EventSource` reconnects on its own with `Last-Event-ID` and a
+  handler that resumes from `stream.LastEventID()` loses nothing. The handler
+  is told through its context and the errors later sends report, and the slot
+  is released when it returns. Both are unset by default, which leaves
+  connections unbounded as before; a negative value removes a bound a wider
+  scope set. They are worth setting on any route a client one does not control
+  can open. Migration: none; a client that does not reconnect on its own (a
+  script using `SSEDial`) must be written to.
+
+- **`WSOptions.AllowedHosts` says which `Host` values make an origin the
+  server's own.** The same-origin rule compared the `Origin` header's host with
+  the request's `Host`, which is whatever the client wrote, so in a
+  DNS-rebinding attack a page served from the attacker's name, made to resolve
+  to the server, sent that name as both and read as same-origin. A route that
+  lists the names it answers to refuses any other `Host` with 403 unless
+  `AllowedOrigins` or `AllowOriginFunc` names the origin. Unset, the rule is
+  what it was, so nothing changes until it is set; it is worth setting for a
+  server on a loopback or private address, where such a page is a real threat.
+  The option bounds the websocket handshake only: a plain HTTP route is not
+  protected against rebinding by it, and an application that wants every
+  request held to its own names checks `Host` in a middleware.
+
 ### Changed
 
 - **A JSON body sent without a `Content-Type` is refused with 415.** Accepting
@@ -443,6 +498,95 @@ regression test. Several fixes tighten a default; each one is listed under
   megabyte each adds up. An ordinary request, with its cookies and a token,
   needs a small fraction of the new limit. Migration: set
   `ServerOptions.MaxHeaderBytes` for a deployment that sends larger headers.
+
+- **The document lists a JSON body member as `required` only when a `Required()`
+  rule refuses a body without it.** Every non-pointer member without `omitempty`
+  was listed, but the decoder accepts a body that leaves any member out, so a
+  client, or a gateway validating requests against the document, was told that a
+  request the server accepts was malformed. A member of a request body is now
+  required exactly when a `Required()` rule is declared for it (and it has no
+  default, which is written before the rules run). This changes the emitted
+  document for existing applications: a request schema that listed every member
+  now lists only those with a rule, or none. A `Required()` on a pointer refuses
+  `null` as well as absence, so the member is required and no longer described as
+  nullable. The response side is unchanged, since a member that is not a pointer
+  and not `omitempty` is always written. A type used both as a request and as a
+  response therefore gets two schemas: the component keeps its shape for the
+  response, and the request refers to a copy named for it with `Input` after
+  (`Item` and `ItemInput`); a type only requests use keeps its name. Types nested
+  inside a body keep their shape unless their own rules speak for them, and are
+  never split. Form values keep the binder's own rule, to which a rule can only
+  add. Migration: a client generator will now type an unruled request member as
+  optional; declare `Required()` on the members that must be sent.
+
+- **`format: duration` is gone from a `time.Duration`.** It is ISO 8601 (`PT1.5S`)
+  in JSON Schema, while the binder and the JSON codec read `1500ms`, so a client
+  that checks formats refused the value the document told it to send. The schema
+  is a string with a `pattern` that agrees with `time.ParseDuration`, and the
+  description is kept.
+
+- **A `[]byte` query, header, cookie or form value is described as an array of
+  integers from 0 to 255, not a base64 string.** The binder reads each value of a
+  parameter as one element, so `?data=65` is `[]byte{65}` and `?data=aGk=` is a
+  422. A `[]byte` in a JSON body is still base64. The runtime is unchanged.
+
+- **`Unique()` is linear for every element type.** Elements that cannot be
+  hashed as they are, pointers, interfaces, slices, maps, and structs holding
+  them, were compared pair by pair, so twenty thousand of them, a few hundred
+  kilobytes of JSON, cost minutes of CPU unless the rule carried a `MaxItems`
+  bound the developer had to know to write. They are now keyed by a canonical
+  encoding that is equal exactly when `reflect.DeepEqual` is, with the two
+  exceptions `Unique` already made: a `time.Time` is the instant it names,
+  wherever in an element it sits, and `-0` is `0`. A nil slice or map is still
+  not an empty one, two pointers to equal values are a repeat, a map is the
+  same map in any order, and a `NaN` equals nothing. A cyclic value is encoded
+  once. Memory follows the size of the collection, so the body limit bounds it,
+  and no build error or default cap is needed. `MaxItems` and `Items` still
+  short-circuit a collection that is already too long. Migration: none.
+
+- **`WSDial` refuses a 101 that names an extension.** The client never offers
+  one, and RFC 6455 section 4.1 says a response that negotiates one it did not
+  ask for fails the connection. It used to read on with frames whose meaning
+  the server had changed. Migration: none for a server that does not negotiate
+  extensions unasked.
+
+- **Middleware installed with `App.Use` now runs inside the CORS policy, not
+  outside it.** Until now the policy was the innermost layer, so an
+  authenticating middleware refused every preflight (a browser never sends
+  credentials on one) and its own 401 or 429 carried no
+  `Access-Control-Allow-Origin`, which a browser reports as a network error
+  rather than the status. The chain is now the built-in layers (request id,
+  security headers, recovery, locale, access log), then CORS, then `Use`
+  middleware. A preflight is answered by the policy and no longer reaches
+  `Use` middleware; a response such a middleware writes itself carries the
+  policy's headers for an allowed origin and none for a denied one.
+
+  Migration: a `Use` middleware that relied on seeing an `OPTIONS` preflight
+  (to log it, or to answer CORS itself) no longer does when
+  `AppOptions.CORS` names origins; without a CORS policy nothing changes.
+
+- **`RateLimitStorage.Increment` now runs under a timeout.**
+  `RateLimitOptions.StorageTimeout` bounds each call, defaulting to
+  `DefaultRateLimitStorageTimeout` (2 seconds); a negative value removes the
+  bound. A store that stopped answering used to hold every request that reached
+  it until its client gave up, and `FailOpen` could not help because no error
+  ever came back. A call that outlives the bound has its context cancelled and
+  counts as a storage failure: 503, or unmetered with `FailOpen`. The
+  process-local storage is called without the deadline. A custom storage must
+  return when its context ends, which any client library's context-taking call
+  does.
+
+- **A file larger than 8 MiB from a filesystem whose files cannot seek is
+  streamed, not read whole into memory.** Smaller files are still buffered, so
+  range and conditional requests keep working for them; a streamed one is sent
+  with its size as `Content-Length` when known and `Last-Modified`, without
+  range support.
+
+- **A configuration setting declared where it cannot be loaded is an error.**
+  A tagged unexported field, or an unexported embedded pointer whose type holds
+  tagged fields, loaded nothing without a word, so a `required` setting was
+  never enforced. `LoadConfig` now reports the field. Export it, embed the
+  struct by value, or tag it `env:"-"` to opt out.
 
 ### Security
 
@@ -911,6 +1055,79 @@ regression test. Several fixes tighten a default; each one is listed under
   accepts no bytes for that long is closed, and a disabled `WriteTimeout`
   disables it too.
 
+- **A query parameter and a body member of the same name shared their rules.**
+  The rules were collected and matched by name alone, so a body member's
+  `Required`, `MaxLen` or `Pattern` landed on the query parameter (or header,
+  cookie, form value) called the same, and the other way round, in the generated
+  document. They are keyed by where the field is read from as well as by its
+  name, in the collection, in the parameters, in the body schema and in nested
+  models, and the same holds at runtime: a query value that failed to parse no
+  longer hides the failure of a body member of the same name.
+
+- **A `Required()` rule on a parameter, form value or body member that has a
+  default made the document call it required.** The default is written before any
+  rule runs, so leaving it out is not a failure.
+
+- **A cancelled context could end the next websocket read.** `context.AfterFunc`
+  does not wait for a callback that has already started when it is stopped, so
+  a context cancelled at the moment its read finished had its callback run
+  after the next read had cleared the deadline, and moved that read's deadline
+  into the past: a healthy connection closed with 1008 for a message that
+  "did not arrive". Stopping now waits for a callback in progress, and one that
+  had not begun finds itself stopped. The same applies to writes and to a
+  transport without deadlines.
+
+- **The OpenAPI document lists what a websocket handshake or an event stream
+  is refused with.** A websocket route documented 101, 426, 422 and the default
+  but not the 400 for a malformed handshake, the 403 for a foreign origin (left
+  out for a route that skips the check) or the 503 for a draining or full
+  server; an event stream did not document the 503. A status a route declared
+  with `WithResponseDoc` keeps its own description.
+
+- **A failed start-up, or a run whose socket could not be opened, no longer
+  waits forever on a lifecycle component's `Stop`.** Nothing bounded the release
+  on those paths, so a `Stop` stuck on an unreachable broker held `Run` (or
+  `StartLifecycle`) for good. It now uses `ServerOptions.ShutdownTimeout`, never
+  less than one second. `StartLifecycle` called while another is still starting
+  waits for it and reports its outcome instead of returning success early, and
+  a `StopLifecycle` that overtakes a start makes it release what it had started
+  rather than leave it running. The documentation now says that components are
+  stopped in parallel, in no order, and must not need each other in `Stop`.
+
+- **`Content-Digest`, `Repr-Digest`, `Digest`, `Content-MD5`, `Accept-Ranges`,
+  `Trailer`, `Content-Location` and `Location` set by a handler that then
+  failed no longer ride on the error response.** They describe the body that
+  was never sent. `Location` is kept when the error itself answers with a 3xx.
+
+- **An env file value can be followed by a comment after its closing quote.**
+  `KEY="value" # note` (and the single-quoted form) was refused as an unclosed
+  quote; it now reads `value`. A comment needs whitespace before it, and a value
+  that ends in the quote it opened with reads as before.
+
+- **Rate limit seconds and counts no longer wrap.** A window near 292 years made
+  `RateLimit-Reset` negative and `Retry-After` 1; seconds now clamp to what a
+  32-bit int holds. The in-memory storage's count saturates at the top of an
+  `int` instead of wrapping under every limit.
+
+- **A pooled route `Params` no longer keeps the captured path.** `Reset` and a
+  rewound branch left the request path's substrings in the backing array until
+  a later request overwrote the slot.
+
+- **An `Accept-Language` or `Accept-Encoding` quality is read only between 0
+  and 1.** `q=NaN`, `q=Inf` and `q=1e9` parsed as valid, so an infinity
+  outranked every honest range and NaN made the ordering meaningless. NaN is
+  unreadable (one, as before), anything above one is one, and a negative value
+  is a refusal.
+
+- **A translation of a framework message that cannot render falls back to
+  English.** A translation naming a value the call site never passes came back
+  as the empty string, so the summary, an issue or a status message went out
+  blank.
+
+- **An empty `ValidationError` has a message.** `Error()` indexed its first
+  detail and panicked for one an application built with none, inside the code
+  that reports the error.
+
 ### Documentation
 
 - **The symbolic-link guarantee holds for `Dir` and for the `FS` of an
@@ -942,28 +1159,57 @@ regression test. Several fixes tighten a default; each one is listed under
   dotfiles included, unless the link leads into the directory of a mount
   beneath.
 
+- `SSEStream` and `SSEOptions.WriteTimeout` now say what bounds a stream's
+  age (`MaxLifetime`) and why a client that reads nothing is not caught by the
+  write timeout. `WSOptions.AllowedOrigins` says what the same-origin rule
+  trusts.
+- The residual "a `Unique()` on an element type that cannot be keyed still
+  needs a `MaxItems` bound" in the changelog's known limits and in
+  `docs/security-review.md` no longer holds and can be dropped.
+
+- `Guard`: every guard on a route runs before any provider, whatever order they
+  were declared in, so a guard cannot read a `Needs` value; a check that needs
+  the caller's identity belongs in the provider.
+- `Quota`: a window is fixed, so up to twice `Limit` can be spent across a
+  boundary; a short quota in the same policy bounds that.
+
 ### Known limits
 
 The latest review found these and left them, each with the reason.
 
-- The document still emits no `securitySchemes` or `security`: a guard is a
-  function the framework can run but not read, so it does not know whether it
-  wants a bearer token, an API key or a cookie. `Document` says so.
-- Every non-pointer body member is still listed `required`, a statement about
-  the shape of the Go type; the decoder accepts an absent member and only a
-  `Required()` rule refuses it. `Document` says so.
-- A `Unique()` on an element type that cannot be keyed still needs a `MaxItems`
-  bound; no build error demands one.
+- The rules that have no JSON Schema keyword (`Prefix`, `Suffix`, `Contains`,
+  `NotBlank`, `MinBytes`, the date rules and others) are not described in the
+  document, which therefore says less than the server enforces there, not
+  more. A member of a JSON body that is not a pointer still accepts `null`,
+  which the decoder reads as the zero value, and the schema does not list
+  `null` for it. `Matches()` writes its Go (RE2) pattern into the document as
+  it stands.
 - `ReadHeaderTimeout` does not apply to HTTP/2: `net/http` reads an HTTP/2
   header block under the connection's own timeouts, so a client that never
   finishes one is held until `IdleTimeout` (2 minutes by default), not for 5
   seconds. `ServerOptions.WriteTimeout` says so.
 - An event-stream client that never reads is bounded by its keepalive writes
-  filling the socket, and by nothing else: a stream has no maximum lifetime.
-  `SSEStream` says so.
+  filling the socket, and by nothing else, unless `SSEOptions.MaxLifetime` is
+  set, which it is not by default. `SSEStream` says so.
 - An HTTP/2 GET to a WebSocket route runs the route's guards before it is
   answered 426, as an HTTP/1 GET without an upgrade does, so that a client
   without credentials is told to authenticate first.
+
+### Investigated, not reproduced
+
+- `SSEReader` read-timeout timer racing a returned `Next`: the timer is stopped
+  when the event completes and none runs between events; 150 events straddling
+  the timeout never lost a stream. An event that finishes in the same instant
+  its timer fires is delivered and the stream ends on the next call, which is
+  what an event that took the whole timeout is due.
+- A zoned IPv6 address (`%a`, `%b`, `%eth0`) as its own client under
+  `ConnectionIPv6Prefix: 128`: the zone is dropped before a key is made.
+- Keepalive against a handler that reads slowly: pongs wait in the socket for
+  the next read and an unanswered ping is judged only while a read is pending.
+- A route's `InsecureSkipOriginCheck` cannot be switched off by a narrower
+  scope, and an application's `AllowOriginFunc` stays in force for a route that
+  only lists origins: this is the field-by-field layering the options document,
+  pinned by a test.
 
 ## [0.2.7] - 2026-09-03
 

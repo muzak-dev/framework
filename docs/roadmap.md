@@ -691,9 +691,8 @@ each is a place the review could not look.
 ### Other
 
 - [ ] HTTP/3, if it is ever served
-- [ ] A TLS handshake that is trickled a byte at a time
-- [ ] An event stream from a client that reads nothing is bounded only by its
-      keepalive writes filling the socket; consider `SSEOptions.MaxLifetime`
+- [x] A TLS handshake that is trickled a byte at a time (cut at ReadHeaderTimeout)
+- [x] `SSEOptions.MaxLifetime` and `WSOptions.MaxLifetime`, unset by default
 - [ ] Update the docs site for the next release: `PingInterval` now defaults to
       30 seconds and a negative value turns it off, `MaxHeaderBytes` defaults
       to 64 KiB, `ReadHeaderTimeout` does not apply to HTTP/2, and a body that

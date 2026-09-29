@@ -545,7 +545,7 @@ overflow in binding, and multipart limits.
 `[]any`, nested slices) is still quadratic and should carry a `MaxItems`
 bound, as its documentation now says. The case check between mounts does not
 cover Unicode normalization on volumes that fold composed and decomposed
-accents.
+accents. Both were closed in the fourth review (F32, F38).
 
 ---
 
@@ -666,6 +666,14 @@ documentation, and it is listed as such.
 | F34 | Medium | A stalled socket write over HTTP/2 was not bounded: a client that granted a large window and stopped reading held every stream of its connection, SSE streams included, past `WriteTimeout` (40 SSE slots pinned for 60 s or more; the same client over HTTP/1 was cut in 0.7 s) | HTTP/2 | Fixed (`WriteByteTimeout`) |
 | F35 | Low | A WebSocket peer that connected and went silent, or whose network dropped, was bounded only by the connection caps, because keepalive was off by default and only worked while the handler was reading | Yes | Fixed (on by default, and only judged while a read is pending) |
 | F36 | Low | The default header limit was 1 MiB with no connection cap, so a half-open connection streaming an unterminated header pinned about 887 KiB for `ReadHeaderTimeout` | Yes | Fixed (64 KiB) |
+| F37 | Low | Rules were keyed by field name only: a body member's constraints landed on a same-named query parameter in the document, and a failed query parse hid a same-named body member's validation error | Yes | Fixed (keyed by location and name) |
+| F38 | Low | `Unique()` on pointer, interface, slice, map and struct elements compared pairs, so an attacker-sized body cost quadratic CPU (99,990,000 allocations for 10,000 elements) | With `Unique()` | Fixed (canonical keys) |
+| F39 | Low | A stale `context.AfterFunc` deadline closed the next WebSocket read with 1008 | Yes | Fixed |
+| F40 | Low | The WebSocket client accepted a handshake that negotiated an extension it never offered | Client side | Fixed |
+| F41 | Low | Middleware from `App.Use` ran outside CORS, so a preflight reached it and its own 401 or 429 carried no CORS headers | Yes | Fixed |
+| F42 | Low | A hung rate-limit store blocked every request, and the window arithmetic wrapped near 292 years | Custom storage | Fixed (`StorageTimeout`, clamping) |
+| F43 | Low | A hung lifecycle `Stop` after a failed start hung `Run` forever, and `Start` and `Stop` could race | Yes | Fixed |
+| F44 | Low | OpenAPI listed body members as required that the runtime accepts absent, described durations and byte slices differently from how the binder reads them, and omitted the 400, 403 and 503 of a WebSocket handshake | Yes | Fixed |
 
 Two of these are behaviour changes worth knowing about. F32 also makes a directory with a mount of its own answer 404 through any outer mount under any name. F1 makes IPv6 counters
 in shared storage reset once, because the key changed. F20 and F23 make
@@ -688,12 +696,13 @@ CONNECT is refused with no handler run and no slot, goroutine or registry
 residue over 200 attempts per mode; 200 streams on one connection hold the
 stream cap exactly; a rapid-reset loop of 5,000 never exceeds it), and about 45
 slow-client cases (every timeout fires exactly, nothing leaks, a shutdown with
-48 stalled connections ends at its timeout). The one failure was F34. What
+48 stalled connections ends at its timeout; an unfinished TLS handshake is cut at
+`ReadHeaderTimeout`). The one failure was F34. What
 remains open is listed under **Known limits** in the changelog: an SSE client
 that never reads has no lifetime bound, and `ReadHeaderTimeout` does not apply
 to HTTP/2.
 
-Not established: HTTP/3 and the TLS handshake trickle, path aliasing by Windows
+Not established: HTTP/3, path aliasing by Windows
 trailing dots and streams (the mount-identity check should cover them where the
 filesystem reports identity, but it has not been run on Windows), real-proxy
 behaviour behind a load balancer, and the behaviour of a shared rate-limit

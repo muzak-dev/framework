@@ -663,6 +663,7 @@ documentation, and it is listed as such.
 | F31 | Low | `Static` and `Frontend` do not stop a symlink escaping through `os.DirFS`; OPTIONS and 405 skip a route's guards and disclose which paths and methods exist | `os.DirFS`; yes | Documented |
 | F32 | Medium | A guarded nested mount was served, unguarded, through the parent mount under a spelling the filesystem folds to the same directory (ligatures, sharp s, NFD names on APFS), skipping its guard, providers, rate limit, `Cache-Control: private` and sandbox CSP; the third review's case check (S22) used simple case folding only | macOS and Windows | Fixed (by file identity) |
 | F33 | Low | A body that declared a length over the route limit was read up to the limit before the 413, and `Expect: 100-continue` was answered with a 100 first | Yes | Fixed |
+| F34 | Medium | A stalled socket write over HTTP/2 was not bounded: a client that granted a large window and stopped reading held every stream of its connection, SSE streams included, past `WriteTimeout` (40 SSE slots pinned for 60 s or more; the same client over HTTP/1 was cut in 0.7 s) | HTTP/2 | Fixed (`WriteByteTimeout`) |
 
 Two of these are behaviour changes worth knowing about. F32 also makes a directory with a mount of its own answer 404 through any outer mount under any name. F1 makes IPv6 counters
 in shared storage reset once, because the key changed. F20 and F23 make
@@ -679,9 +680,22 @@ parser against an independent decoder (1.3 million executions, no divergence);
 SSE event-field injection; the CORS origin matcher; and rate-limit counter
 atomicity. There is no `unsafe` in the framework.
 
-Not established: WebSocket over HTTP/2 and HTTP/3, real-network slow-client
-timing, path aliasing by Windows trailing dots and macOS Unicode normalisation,
-and the behaviour of a shared rate-limit store across nodes.
+Also tested locally, on a real listener and raw sockets, after the fixes:
+WebSocket and SSE over HTTP/2 and h2c (an HTTP/1-style upgrade or an extended
+CONNECT is refused with no handler run and no slot, goroutine or registry
+residue over 200 attempts per mode; 200 streams on one connection hold the
+stream cap exactly; a rapid-reset loop of 5,000 never exceeds it), and about 45
+slow-client cases (every timeout fires exactly, nothing leaks, a shutdown with
+48 stalled connections ends at its timeout). The one failure was F34. What
+remains open is listed under **Known limits** in the changelog: no default
+idle bound on a silent WebSocket or SSE peer, the 1 MiB default header limit
+with no connection cap, and `ReadHeaderTimeout` not applying to HTTP/2.
+
+Not established: HTTP/3 and the TLS handshake trickle, path aliasing by Windows
+trailing dots and streams (the mount-identity check should cover them where the
+filesystem reports identity, but it has not been run on Windows), real-proxy
+behaviour behind a load balancer, and the behaviour of a shared rate-limit
+store across nodes.
 
 ---
 

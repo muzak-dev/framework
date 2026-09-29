@@ -883,6 +883,16 @@ regression test. Several fixes tighten a default; each one is listed under
   the declared length, for JSON, urlencoded and multipart bodies. A body that
   declares no length is still bounded as it is read.
 
+- **A stalled socket write over HTTP/2 is bounded by `WriteTimeout`.** A write
+  deadline on an HTTP/2 stream cannot interrupt a frame already being written,
+  so a client that granted a large flow-control window and then stopped reading
+  the socket kept every stream on its connection open past every timeout, SSE
+  streams included, and a shutdown ran to its full timeout. The same client
+  over HTTP/1 was cut in under a second. `http.HTTP2Config.WriteByteTimeout`
+  now follows `ServerOptions.WriteTimeout`, so a connection whose socket
+  accepts no bytes for that long is closed, and a disabled `WriteTimeout`
+  disables it too.
+
 ### Documentation
 
 - **The symbolic-link guarantee holds for `Dir` and for the `FS` of an
@@ -926,6 +936,21 @@ The latest review found these and left them, each with the reason.
   `Required()` rule refuses it. `Document` says so.
 - A `Unique()` on an element type that cannot be keyed still needs a `MaxItems`
   bound; no build error demands one.
+- `ReadHeaderTimeout` does not apply to HTTP/2: `net/http` reads an HTTP/2
+  header block under the connection's own timeouts, so a client that never
+  finishes one is held until `IdleTimeout` (2 minutes by default), not for 5
+  seconds. `ServerOptions.WriteTimeout` says so.
+- A WebSocket peer that goes silent, or an event-stream client that never
+  reads, is held until the per-IP and global connection caps are the only
+  bound, because `PingInterval` is off by default. Set `WSOptions.PingInterval`
+  and `PongTimeout` where idle peers matter.
+- The default `MaxHeaderBytes` is 1 MiB, and there is no cap on connections
+  as a whole, so a half-open connection that streams an unterminated header
+  holds close to a megabyte for `ReadHeaderTimeout`. Lower `MaxHeaderBytes`
+  and put a connection limit in front where that matters.
+- An HTTP/2 GET to a WebSocket route runs the route's guards before it is
+  answered 426, as an HTTP/1 GET without an upgrade does, so that a client
+  without credentials is told to authenticate first.
 
 ## [0.2.7] - 2026-09-03
 

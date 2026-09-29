@@ -138,13 +138,11 @@ func (r *SliceRules[E]) evaluate(limit int) []Problem {
 //
 // Checks otherwise run in the order written and stop at the first failure,
 // and for most rules that order is only a matter of which message a client
-// reads first. For Unique it is a matter of cost. Its comparison is linear for
-// elements that can be hashed, but a collection of elements that cannot, such
-// as structs holding pointers or slices, is compared pair by pair, and a
-// quarter of a megabyte of JSON is enough elements to spend seconds of CPU on.
-// Unique().MaxItems(100) reads as bounded, so it has to be: a collection over
-// a MaxItems or Items bound is never searched for repeats, and the bound
-// reports it instead when its turn comes.
+// reads first. For Unique it is a matter of cost. The search is linear for
+// every element type, but a collection that is already too long has nothing to
+// gain from being searched, and Unique().MaxItems(100) reads as bounded, so it
+// is: a collection over a MaxItems or Items bound is never searched for
+// repeats, and the bound reports it instead when its turn comes.
 func runSlice[E any](values *[]E, steps []step[[]E]) []Problem {
 	for i := range steps {
 		s := &steps[i]
@@ -233,18 +231,22 @@ func (r *SliceRules[E]) MaxItems(n int) *SliceRules[E] {
 // Unique requires every element to differ from every other.
 //
 // Elements are compared the way reflect.DeepEqual compares them, so a slice of
-// structs is deduplicated by content rather than by identity. The exception is
-// time.Time, whose elements are the same when they are the same instant, as
-// time.Time.Equal has it, in whatever zone they were written. The failure
-// names the earliest element that appears again later.
+// structs is deduplicated by content rather than by identity, and so are
+// pointers, interfaces, slices and maps: two pointers to equal values are a
+// repeat, and a nil slice is not an empty one. The exception is time.Time,
+// whose elements are the same when they are the same instant, as
+// time.Time.Equal has it, in whatever zone they were written, wherever in an
+// element the time sits. The failure names the earliest element that appears
+// again later.
 //
-// The cost depends on the element type. Strings, numbers, booleans, arrays
-// and structs built only from those, times and netip addresses are hashed, so
-// a collection of any length is checked in linear time. Anything else, a
-// struct holding a pointer, a slice, a map or an interface, cannot be hashed
-// the way DeepEqual compares it and is compared pair by pair, which is quadratic: a few hundred kilobytes
-// of JSON is enough elements to cost seconds. Declare [SliceRules.MaxItems]
-// alongside Unique for such a collection. Unique defers to MaxItems and
+// The check is linear in the size of the collection for every element type.
+// Strings, numbers, booleans, arrays and structs built only from those,
+// times and netip addresses are hashed as they are; anything else, a struct
+// holding a pointer, a slice, a map or an interface, is hashed by a canonical
+// encoding of what it holds, which costs the size of the element. A
+// collection's cost follows its size in memory, so a body limit bounds it, and
+// [SliceRules.MaxItems] is worth declaring for the sake of the collection's
+// meaning, not to protect the server. Unique defers to MaxItems and
 // [SliceRules.Items] in either order of declaration: a collection over the
 // bound is reported as too long and never searched for repeats.
 func (r *SliceRules[E]) Unique() *SliceRules[E] {
@@ -413,16 +415,6 @@ func firstRepeat[E any](list []E) (int, bool) {
 		return 0, false
 	}
 	key := keyFor[E]()
-	if key == nil {
-		for i := range list {
-			for j := i + 1; j < len(list); j++ {
-				if reflect.DeepEqual(list[i], list[j]) {
-					return i, true
-				}
-			}
-		}
-		return 0, false
-	}
 	seen := make(map[any]int, len(list))
 	first := -1
 	for j := range list {
@@ -445,9 +437,9 @@ type instant struct {
 }
 
 // keyFor returns a function that maps an element to a map key which is equal
-// for two elements exactly when [SliceRules.Unique] counts them as the same,
-// or nil when the type has no such key and elements have to be compared pair
-// by pair.
+// for two elements exactly when [SliceRules.Unique] counts them as the same.
+// Every type has one, so no collection is compared pair by pair: an attacker's
+// choice of element type is not a choice of cost.
 //
 // Two element types are common enough, and slow enough under the pairwise
 // search, to be given a key of their own. A time.Time holds a *Location, so
@@ -461,7 +453,9 @@ type instant struct {
 // since the epoch rather than UnixNano, which cannot represent a year past
 // 2262. A netip.Addr, or an address with a port or a prefix, is comparable
 // and made only of values the standard library interns, so == on it and
-// DeepEqual on it are the same function and it is used as its own key.
+// DeepEqual on it are the same function and it is used as its own key. So is
+// any type [hashable] accepts. The rest, which is everything with a pointer,
+// slice, map, interface or func inside, is keyed by [canonicalizer].
 func keyFor[E any]() func(E) any {
 	t := reflect.TypeFor[E]()
 	switch t {
@@ -476,7 +470,8 @@ func keyFor[E any]() func(E) any {
 	if hashable(t) {
 		return func(e E) any { return any(e) }
 	}
-	return nil
+	var c canonicalizer
+	return func(e E) any { return c.key(any(e)) }
 }
 
 // hashable reports whether values of a type can be told apart with a map

@@ -90,6 +90,17 @@ type ServerOptions struct {
 	// Setting only one of them is a build error.
 	CertFile string
 	KeyFile  string
+	// UnencryptedHTTP2 also accepts HTTP/2 without TLS, sent with prior
+	// knowledge, on the same port as HTTP/1. It is for a server behind a
+	// platform that speaks HTTP/2 to the container in the clear, such as Cloud
+	// Run with an h2c port, where it is what lets a request be cancelled the
+	// moment its client leaves: over HTTP/1 the platform's proxy keeps the
+	// connection to the container open, and a handler runs on for as long as it
+	// likes after its client has gone. Leave it off anywhere the proxy speaks
+	// HTTP/1, and never for a server reachable directly from an untrusted
+	// network. A WebSocket handshake is not carried over HTTP/2 and is answered
+	// 426, and Cloud Run does not pass one to an h2c container at all.
+	UnencryptedHTTP2 bool
 	// BaseContext returns the base context for incoming requests. When nil,
 	// requests derive from context.Background.
 	BaseContext func(net.Listener) context.Context
@@ -262,7 +273,7 @@ func (t *handlerTracker) wait(timeout time.Duration) int64 {
 // configured limit.
 func (a *App) newServer() *http.Server {
 	opts := a.opts.ServerOptions
-	return &http.Server{
+	server := &http.Server{
 		Addr:              a.opts.Addr,
 		Handler:           a,
 		ReadHeaderTimeout: opts.ReadHeaderTimeout,
@@ -282,6 +293,16 @@ func (a *App) newServer() *http.Server {
 		// as WriteTimeout, which is the bound HTTP/1 already has.
 		HTTP2: &http.HTTP2Config{WriteByteTimeout: opts.WriteTimeout},
 	}
+	if opts.UnencryptedHTTP2 {
+		// Naming the protocols replaces net/http's own choice, so the two it
+		// makes by default are named again alongside the one asked for.
+		var protocols http.Protocols
+		protocols.SetHTTP1(true)
+		protocols.SetHTTP2(true)
+		protocols.SetUnencryptedHTTP2(true)
+		server.Protocols = &protocols
+	}
+	return server
 }
 
 // Run starts the server and blocks until it stops.

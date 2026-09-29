@@ -43,8 +43,11 @@ const (
 	// that binds files and does not override it, at 32 mebibytes.
 	DefaultMaxUploadSize int64 = 32 << 20
 	// DefaultMaxHeaderBytes is the largest request header block accepted, at
-	// one mebibyte.
-	DefaultMaxHeaderBytes = 1 << 20
+	// 64 KiB. net/http's own default is a mebibyte, and a client that never
+	// finishes a header block holds all of what it has sent for as long as
+	// ReadHeaderTimeout allows; a browser's cookies and an ordinary token fit
+	// in a small fraction of this.
+	DefaultMaxHeaderBytes = 64 << 10
 )
 
 // AppOptions configures an application.

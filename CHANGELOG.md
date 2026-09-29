@@ -1177,6 +1177,19 @@ regression test. Several fixes tighten a default; each one is listed under
   `MaxLifetime`.** A keepalive already waiting for the write lock could go out
   behind it.
 
+- **A handler on a route with no bound input can read the whole request
+  body.** The framework drained up to 4 KiB of the body before the handler ran
+  whenever the route's input bound nothing from it (`Empty`, or only path,
+  query, header and cookie fields), so a handler that read
+  `ctx.Request().Body` itself, a proxy, an upload streamed to disk or a
+  signature check over the raw bytes, lost the first 4 KiB without any error.
+  Seen on Cloud Run. The drain now happens after the handler returns, which is
+  still what lets a keep-alive connection be reused when the body was not
+  read, and is still bounded at 4 KiB. A route that binds a body is unchanged.
+  An event stream route is treated the same way, and a WebSocket handshake
+  still drains first: it is refused if it carries a body, and nothing may be
+  left to be taken for frames.
+
 ### Documentation
 
 - **The symbolic-link guarantee holds for `Dir` and for the `FS` of an

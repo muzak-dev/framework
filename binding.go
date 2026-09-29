@@ -1118,8 +1118,10 @@ var durationJSON = json.JoinOptions(
 	})),
 )
 
-// discardBody drains and closes a request body that no handler will read, so
-// that keep-alive connections can be reused instead of being torn down.
+// discardBody drops what is left of a request body that nothing more will read,
+// up to 4 KiB, so that a keep-alive connection can be reused instead of being
+// torn down. It is for after a handler, never before one: it would take the
+// front of a body the handler meant to read.
 func discardBody(r *http.Request) {
 	if r.Body != nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 4<<10))

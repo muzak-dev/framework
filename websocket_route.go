@@ -497,7 +497,10 @@ func (r *Router) WS[In any](path string, h WSHandler[In], opts ...RouteOption) *
 	rt.invoke = func(c *Context) error {
 		// A handshake carries no body, so whatever arrived with it is drained
 		// rather than read, which keeps the connection reusable if the
-		// handshake is refused.
+		// handshake is refused. Unlike on the other routes this is done first
+		// and on purpose: no handler reads a handshake's body, and one that
+		// slipped past the refusal would sit on the transport and be taken for
+		// frames once it was upgraded.
 		discardBody(c.r)
 		var in In
 		if !rt.plan.empty {

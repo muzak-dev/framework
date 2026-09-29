@@ -340,7 +340,11 @@ func registerSSE[In, Out any](r *Router, method, path string, h SSEHandler[In, O
 				return err
 			}
 		} else {
-			discardBody(c.r)
+			// A handler may read the body itself before it sends the first
+			// event, so it is not read ahead of it. What is left is dropped
+			// when the stream ends, which for a stream that was served is
+			// late: net/http has already done the same on the first write.
+			defer discardBody(c.r)
 		}
 		core, err := c.app.acceptSSE(c, rt.sse)
 		if err != nil {

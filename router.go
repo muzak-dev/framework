@@ -826,7 +826,10 @@ func register[In, Out any](r *Router, method, path string, h Handler[In, Out], o
 				return err
 			}
 		} else {
-			discardBody(c.r)
+			// The body is left for the handler, which may want the raw bytes
+			// of a route that binds nothing from it, and what it did not read
+			// is dropped once it has returned.
+			defer discardBody(c.r)
 		}
 		out, err := h(c, in)
 		if err != nil {

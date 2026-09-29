@@ -513,6 +513,9 @@ func (a *App) build() {
 	if err := a.opts.validate(); err != nil {
 		state.errs = append(state.errs, err)
 	}
+	if err := a.opts.validateSecuritySchemes(); err != nil {
+		state.errs = append(state.errs, err)
+	}
 
 	a.routers = countRouters(a.Router)
 	a.finalize(inherited{
@@ -550,6 +553,9 @@ func (a *App) build() {
 	// The documentation paths are checked once every route is known, because
 	// one of the things that can be wrong with them is colliding with a route.
 	a.validateDocsPaths(state)
+	if err := a.validateSecurity(); err != nil {
+		state.errs = append(state.errs, err)
+	}
 	if a.clientIPErr != nil {
 		state.errs = append(state.errs, a.clientIPErr)
 	}

@@ -92,6 +92,8 @@ type routerConfig struct {
 	deprecated         bool
 	hidden             bool
 	skipRateLimit      bool
+	security           []SecurityRequirement
+	securitySet        bool
 }
 
 // routeConfig accumulates the settings declared on a single route.
@@ -118,6 +120,8 @@ type routeConfig struct {
 	deprecated         bool
 	hidden             bool
 	skipRateLimit      bool
+	security           []SecurityRequirement
+	securitySet        bool
 }
 
 // WithPrefix mounts a router under a path prefix.
@@ -440,6 +444,11 @@ type Route struct {
 	allowUnknownFields bool
 	captureBody        bool
 	skipValidation     bool
+	// security and securitySet are what the document says the route needs to
+	// authenticate, resolved from [WithSecurity] and [Public]. They describe
+	// and are never read while a request is served.
+	security    []SecurityRequirement
+	securitySet bool
 
 	// rateLimit is the route's resolved request policy, and is nil for a route
 	// that is not rate limited. rateLimitOpts is the resolved configuration it
@@ -731,6 +740,8 @@ type inherited struct {
 	deprecated            bool
 	hidden                bool
 	skipRateLimit         bool
+	security              []SecurityRequirement
+	securitySet           bool
 }
 
 // merge layers a router's own configuration on top of what it inherited,
@@ -758,6 +769,11 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		deprecated:            in.deprecated || cfg.deprecated,
 		hidden:                in.hidden || cfg.hidden,
 		skipRateLimit:         in.skipRateLimit || cfg.skipRateLimit,
+		security:              in.security,
+		securitySet:           in.securitySet,
+	}
+	if cfg.securitySet {
+		out.security, out.securitySet = cfg.security, true
 	}
 	if cfg.maxBodySize > 0 {
 		out.maxBodySize = cfg.maxBodySize
@@ -855,6 +871,10 @@ func (rt *Route) resolve(in inherited) error {
 	rt.Description = cfg.description
 	rt.Deprecated = in.deprecated || cfg.deprecated
 	rt.Hidden = in.hidden || cfg.hidden
+	rt.security, rt.securitySet = in.security, in.securitySet
+	if cfg.securitySet {
+		rt.security, rt.securitySet = cfg.security, true
+	}
 
 	rt.Status = cfg.status
 	if rt.Status == 0 {

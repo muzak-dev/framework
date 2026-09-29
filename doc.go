@@ -648,6 +648,27 @@
 // token covers the documentation as well as the API it describes. Declare the
 // guard on an included router instead to keep the documentation public.
 //
+// A guard is a function, which Muzak can run and cannot read, so the document
+// does not say how a route authenticates unless the application does. Declare
+// the schemes once in [OpenAPIOptions.SecuritySchemes] and say which a route,
+// or a router, sits behind with [WithSecurity], or [Public] for an exception:
+//
+//	app := muzak.New(muzak.AppOptions{
+//		SecuritySchemes: map[string]muzak.SecurityScheme{
+//			"bearer": muzak.BearerAuth("JWT"),
+//		},
+//	})
+//	admin := muzak.NewRouter(muzak.WithSecurity(muzak.Require("bearer")), muzak.WithDependencies(requireStaff))
+//	admin.Get("/status", status, muzak.Public())
+//
+// They are emitted as components.securitySchemes and a security list on each
+// operation that declared one, which is what gives the documentation UI
+// something to offer under Authorize. They describe and nothing more: a scheme
+// is never consulted while a request is served, so a route that names one is
+// only protected by the guard it also has. An application that declares none
+// emits none, and a scheme, a scope or a requirement that cannot be described is
+// reported when the application is built.
+//
 // [AppOptions.DocsPath] and [AppOptions.OpenAPIPath] decide where the two are
 // served, and [AppOptions.DisableDocs] turns both off for a deployment that
 // must not describe itself. Where they ended up is reported as the socket

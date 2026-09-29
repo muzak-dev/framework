@@ -59,6 +59,22 @@ type OpenAPIOptions struct {
 	// describes still appears, after the described ones, in the order the
 	// routes named it.
 	Tags []Tag
+	// SecuritySchemes declares the ways a client can authenticate, by the name
+	// a route refers to them with in [WithSecurity]. It is documentation: the
+	// schemes are written into the document so that a tool can offer the means
+	// to authenticate, and nothing is enforced by declaring one. What refuses
+	// a request is a [Guard], which Muzak can run but cannot read, so the
+	// document says only what the application says about its guards here. An
+	// application that declares none emits none.
+	//
+	//	SecuritySchemes: map[string]muzak.SecurityScheme{
+	//		"bearer": muzak.BearerAuth("JWT"),
+	//		"key":    muzak.APIKeyHeader("X-API-Key"),
+	//	}
+	//
+	// A scheme is checked when the application is built: its type has to be
+	// one OpenAPI defines, and carry what that type needs.
+	SecuritySchemes map[string]SecurityScheme
 }
 
 // Contact identifies the people responsible for an API.
@@ -186,6 +202,10 @@ type Operation struct {
 	Responses map[string]*Response `json:"responses"`
 	// Deprecated marks the operation as no longer recommended.
 	Deprecated bool `json:"deprecated,omitzero"`
+	// Security lists the alternatives a client satisfies one of, as declared
+	// with [WithSecurity]. It is absent for a route that declared nothing, and
+	// an empty list, which is emitted, says the route needs no credentials.
+	Security []SecurityRequirement `json:"security,omitzero"`
 }
 
 // Parameter describes one path, query, header or cookie parameter.
@@ -232,6 +252,9 @@ type Response struct {
 type Components struct {
 	// Schemas maps a schema name to its definition.
 	Schemas map[string]*Schema `json:"schemas,omitzero"`
+	// SecuritySchemes maps a name to the way of authenticating it stands for,
+	// as declared in [OpenAPIOptions.SecuritySchemes].
+	SecuritySchemes map[string]SecurityScheme `json:"securitySchemes,omitzero"`
 }
 
 // Schema is a JSON Schema 2020-12 description of a value, which is the schema
@@ -313,9 +336,14 @@ func (d *Document) Marshal() ([]byte, error) {
 // for the response and a copy for the request, named for it with Input after.
 // Members of a form are required as the binder decides.
 //
-// It does not describe authentication. A guard is a function that Muzak can run
-// but not read, so it cannot say whether it wants a bearer token, an API key or
-// a session cookie, and no security scheme or security requirement is emitted.
+// It describes authentication only as the application declares it. A guard is a
+// function that Muzak can run but not read, so it cannot say whether it wants a
+// bearer token, an API key or a session cookie; the schemes of
+// [OpenAPIOptions.SecuritySchemes] and the requirements of [WithSecurity] are
+// what the application says about its guards, and are emitted as it said them,
+// as components.securitySchemes and a security list on each operation that
+// declared one. Nothing is inferred and nothing is verified against the guards,
+// and an application that declares none emits none.
 func (a *App) Document() (*Document, error) {
 	if err := a.Build(); err != nil {
 		return nil, err
@@ -377,8 +405,9 @@ func (a *App) buildDocument() *Document {
 	}
 
 	doc.Tags = a.tagList(tags)
-	if len(builder.schemas) > 0 {
-		doc.Components = &Components{Schemas: builder.schemas}
+	schemes := a.opts.securitySchemesForDocs()
+	if len(builder.schemas) > 0 || len(schemes) > 0 {
+		doc.Components = &Components{Schemas: builder.schemas, SecuritySchemes: schemes}
 	}
 	return doc
 }
@@ -443,6 +472,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		Description: rt.Description,
 		OperationID: rt.OperationID,
 		Deprecated:  rt.Deprecated,
+		Security:    rt.securityForDocs(),
 		Responses:   make(map[string]*Response, 2+len(rt.responses)),
 	}
 

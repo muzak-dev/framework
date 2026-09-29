@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -269,6 +270,13 @@ type WSConn struct {
 	// to compare against.
 	lastPong monotonicStamp
 
+	// reading counts the reads in progress, and notReading is the last moment
+	// none was. A pong is consumed by a read like any other frame, so the
+	// keepalive can only conclude that a peer is gone if a read was waiting for
+	// its answer the whole time; see [WSConn.keepalive].
+	reading    atomic.Int32
+	notReading monotonicStamp
+
 	// spent counts the frames that carried no message, and spentSince is when
 	// the count began; see [WSConn.chargeFrame]. Both are owned by the half of
 	// the connection that holds readSem.
@@ -324,6 +332,7 @@ func newWSConn(rwc io.ReadWriteCloser, br *bufio.Reader, client bool, subprotoco
 		c.nc = conn
 	}
 	c.lastPong.start()
+	c.notReading.epoch = c.lastPong.epoch
 	return c
 }
 
@@ -628,6 +637,11 @@ const wsReadChunk = 32 << 10
 func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error) {
 	stop := c.armRead(ctx)
 	defer stop()
+	c.reading.Add(1)
+	defer func() {
+		c.reading.Add(-1)
+		c.notReading.mark()
+	}()
 
 	message := []byte{}
 	var typ WSMessageType
@@ -1287,8 +1301,16 @@ func (c *WSConn) drain() {
 // answering, which is how a connection lost without a close frame is noticed
 // before the operating system gets round to noticing it.
 //
-// It runs only when [WSOptions.PingInterval] asks for it, and it stops as soon
+// It runs unless [WSOptions.PingInterval] turned it off, and it stops as soon
 // as the connection does.
+//
+// A pong is consumed by a read like any other frame, so an unanswered ping
+// says something about the peer only when a read was waiting for the answer
+// throughout. A handler that only writes, or one that is busy with a message,
+// has not looked, and is left alone: closing a healthy peer for that would be
+// worse than the silence being checked for. A peer that has really gone
+// leaves the handler blocked in its read, so the next round finds it waiting
+// and closes the connection then.
 func (c *WSConn) keepalive(ctx context.Context, interval, timeout time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1314,7 +1336,7 @@ func (c *WSConn) keepalive(ctx context.Context, interval, timeout time.Duration)
 			return
 		case <-wait.C:
 		}
-		if c.lastPong.last() < sent {
+		if c.lastPong.last() < sent && c.reading.Load() > 0 && c.notReading.last() < sent {
 			_ = c.Close(WSStatusPolicyViolation, "the peer did not answer a ping")
 			return
 		}

@@ -529,8 +529,12 @@ func TestWSOptionsWithDefaults(t *testing.T) {
 	if filled.CloseGracePeriod != DefaultWSCloseGracePeriod {
 		t.Errorf("CloseGracePeriod = %v, want %v", filled.CloseGracePeriod, DefaultWSCloseGracePeriod)
 	}
-	if filled.PongTimeout != 0 {
-		t.Errorf("PongTimeout = %v, want none while keepalive is off", filled.PongTimeout)
+	if filled.PingInterval != DefaultWSPingInterval {
+		t.Errorf("PingInterval = %v, want %v: a peer that goes silent must not hold a slot for as long as it likes",
+			filled.PingInterval, DefaultWSPingInterval)
+	}
+	if filled.PongTimeout != DefaultWSPongTimeout {
+		t.Errorf("PongTimeout = %v, want %v", filled.PongTimeout, DefaultWSPongTimeout)
 	}
 
 	// A negative duration disables the bound, as it does everywhere else, and
@@ -547,6 +551,10 @@ func TestWSOptionsWithDefaults(t *testing.T) {
 		if got != 0 {
 			t.Errorf("%s = %v, want it disabled", name, got)
 		}
+	}
+
+	if disabled.PongTimeout != 0 {
+		t.Errorf("PongTimeout = %v, want none once keepalive is off", disabled.PongTimeout)
 	}
 
 	if huge := (WSOptions{ReadLimit: math.MaxInt64}).withDefaults(); huge.ReadLimit > math.MaxInt {

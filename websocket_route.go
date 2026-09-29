@@ -33,9 +33,12 @@ const (
 	// DefaultWSCloseGracePeriod is how long a closing connection waits for the
 	// peer's own close frame before the transport goes, at 250 milliseconds.
 	DefaultWSCloseGracePeriod = 250 * time.Millisecond
+	// DefaultWSPingInterval is how often a connection is pinged when
+	// [WSOptions.PingInterval] does not say, at thirty seconds.
+	DefaultWSPingInterval = 30 * time.Second
 	// DefaultWSPongTimeout is how long a keepalive ping waits for its answer,
-	// at ten seconds. It applies only when [WSOptions.PingInterval] asks for
-	// keepalive at all.
+	// at ten seconds. It applies unless [WSOptions.PingInterval] turned
+	// keepalive off.
 	DefaultWSPongTimeout = 10 * time.Second
 	// DefaultWSReadTimeout bounds how long one message may take to arrive once
 	// it has begun, at thirty seconds.
@@ -116,8 +119,8 @@ type WSOptions struct {
 	// for as long as it cares to.
 	//
 	// It does not bound how long a connection may sit idle between messages,
-	// because waiting is what most connections are for. Use PingInterval to
-	// notice a peer that has stopped answering at all. A negative value
+	// because waiting is what most connections are for. Keepalive, on by
+	// default, notices a peer that has stopped answering at all. A negative value
 	// removes the bound.
 	ReadTimeout time.Duration
 
@@ -173,19 +176,23 @@ type WSOptions struct {
 	// value closes immediately.
 	CloseGracePeriod time.Duration
 
-	// PingInterval turns on keepalive: the server pings this often and closes
-	// the connection when the peer stops answering, which is what notices a
-	// connection dropped by a network that told nobody. It is off by default.
+	// PingInterval is how often the server pings a connection, defaulting to
+	// [DefaultWSPingInterval]. It closes the connection when the peer stops
+	// answering, which is what notices a connection dropped by a network that
+	// told nobody, and what stops a peer that connects and goes silent from
+	// holding a connection slot for as long as it likes. A negative value turns
+	// keepalive off.
 	//
-	// Keepalive only works while the handler is reading, because a pong is
-	// consumed by a read like any other frame. A handler that only ever writes
-	// should ping by hand instead, with [WSConn.Ping].
+	// A pong is consumed by a read like any other frame, so the connection is
+	// closed for an unanswered ping only when the handler was reading during
+	// it. A handler that only ever writes is never closed by keepalive, and
+	// should ping by hand with [WSConn.Ping] if it wants that.
 	PingInterval time.Duration
 
 	// PongTimeout is how long a keepalive ping waits for its answer, defaulting
 	// to [DefaultWSPongTimeout], which is also what a negative value means: no
-	// answer is not a bound worth having. It is meaningful only alongside
-	// PingInterval.
+	// answer is not a bound worth having. It means nothing once PingInterval
+	// has turned keepalive off.
 	PongTimeout time.Duration
 
 	// MessageLimits bounds how fast a peer may send messages, using the same
@@ -320,9 +327,7 @@ func (o WSOptions) withDefaults() WSOptions {
 	o.WriteTimeout = orDefaultDuration(o.WriteTimeout, DefaultWSWriteTimeout)
 	o.ReadTimeout = orDefaultDuration(o.ReadTimeout, DefaultWSReadTimeout)
 	o.CloseGracePeriod = orDefaultDuration(o.CloseGracePeriod, DefaultWSCloseGracePeriod)
-	if o.PingInterval < 0 {
-		o.PingInterval = 0
-	}
+	o.PingInterval = orDefaultDuration(o.PingInterval, DefaultWSPingInterval)
 	if o.PingInterval > 0 {
 		if o.PongTimeout <= 0 {
 			o.PongTimeout = DefaultWSPongTimeout

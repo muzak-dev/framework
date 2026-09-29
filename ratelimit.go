@@ -76,6 +76,12 @@ const maxRateLimitKey = 256
 // Every quota in a policy is counted for every request, so a client that
 // overruns the short window still accrues against the long one and cannot
 // escape a sustained limit by pausing between bursts.
+//
+// A window is fixed, not sliding: a client's counter starts with its first
+// request and ends Window later, and the next request opens a new one. A
+// client can therefore spend a whole Limit at the end of one window and
+// another at the start of the next, up to twice Limit in a span of Window, and
+// the short quota in the policy above is what bounds that.
 type Quota struct {
 	// Name identifies the quota. It is the namespace its counters are stored
 	// under, so two quotas that share a name share a budget and must agree on

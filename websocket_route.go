@@ -189,6 +189,23 @@ type WSOptions struct {
 	// should ping by hand with [WSConn.Ping] if it wants that.
 	PingInterval time.Duration
 
+	// MaxLifetime is the longest a connection stays open, unset by default,
+	// which leaves a connection open for as long as its peer answers pings and
+	// its handler runs. When it has passed the connection is closed with
+	// [WSStatusGoingAway], the status of a server that is done with a
+	// connection rather than one that failed, which the handler sees as the
+	// close it reads, and the connection's slot in MaxConnections and
+	// MaxConnectionsPerIP is released once the transport is closed. A client
+	// that reconnects on going away, as a browser application usually does,
+	// carries on.
+	//
+	// Keepalive closes a peer that stops answering. It cannot close one that
+	// answers every ping and never says anything, which costs that peer a TCP
+	// connection and holds a slot, a goroutine and a file descriptor here, so
+	// it is worth setting on any route a client one does not control can open.
+	// A negative value removes the bound a wider scope set.
+	MaxLifetime time.Duration
+
 	// PongTimeout is how long a keepalive ping waits for its answer, defaulting
 	// to [DefaultWSPongTimeout], which is also what a negative value means: no
 	// answer is not a bound worth having. It means nothing once PingInterval
@@ -317,6 +334,9 @@ func (o WSOptions) overlay(over WSOptions) WSOptions {
 	if over.PongTimeout != 0 {
 		o.PongTimeout = over.PongTimeout
 	}
+	if over.MaxLifetime != 0 {
+		o.MaxLifetime = over.MaxLifetime
+	}
 	if over.MessageLimits != nil {
 		o.MessageLimits = over.MessageLimits
 	}
@@ -355,6 +375,9 @@ func (o WSOptions) withDefaults() WSOptions {
 	o.ReadTimeout = orDefaultDuration(o.ReadTimeout, DefaultWSReadTimeout)
 	o.CloseGracePeriod = orDefaultDuration(o.CloseGracePeriod, DefaultWSCloseGracePeriod)
 	o.PingInterval = orDefaultDuration(o.PingInterval, DefaultWSPingInterval)
+	if o.MaxLifetime < 0 {
+		o.MaxLifetime = 0
+	}
 	if o.PingInterval > 0 {
 		if o.PongTimeout <= 0 {
 			o.PongTimeout = DefaultWSPongTimeout
@@ -1045,6 +1068,15 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 	// slot freed before that would let a peer that withholds its close frame
 	// hold sockets and goroutines the caps say nobody may.
 	defer a.websockets.remove(conn)
+
+	if lifetime := c.route.websocket.opts.MaxLifetime; lifetime > 0 {
+		// The close is the ordinary one, so the handler blocked in a read is
+		// woken by it and returns, and the peer is told why in the way it is
+		// told everything else.
+		defer time.AfterFunc(lifetime, func() {
+			_ = conn.Close(WSStatusGoingAway, "the connection reached its maximum lifetime")
+		}).Stop()
+	}
 
 	status, reason := WSStatusNormalClosure, ""
 	defer func() {

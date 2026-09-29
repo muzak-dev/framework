@@ -89,6 +89,13 @@ type Quota struct {
 	Limit int
 }
 
+// DefaultRateLimitStorageTimeout is how long one call to a
+// [RateLimitStorage] may take before it is cancelled and counted as a failure,
+// when [RateLimitOptions.StorageTimeout] does not say. Two seconds is far more
+// than a healthy shared store needs and short enough that one that stopped
+// answering costs each request less than a client's own timeout.
+const DefaultRateLimitStorageTimeout = 2 * time.Second
+
 // RateLimitStorage counts requests.
 //
 // It is the whole of what the limiter needs from the outside world, and it is
@@ -105,6 +112,10 @@ type Quota struct {
 //		res, err := s.script.Run(ctx, s.client, []string{"ratelimit:" + quota + ":" + key}, window.Milliseconds()).Result()
 //		// INCR, then PEXPIRE when the counter is new, then PTTL.
 //	}
+//
+// Increment must return when its context ends: the limiter cancels it after
+// [RateLimitOptions.StorageTimeout], so that a store that has stopped
+// answering fails the request instead of holding it.
 //
 // If the implementation also satisfies [Lifecycle], the application starts it
 // before serving and stops it after draining, so a pool or a sweeper needs no
@@ -295,6 +306,19 @@ type RateLimitOptions struct {
 	// run.
 	Resolver QuotaResolver
 
+	// StorageTimeout bounds one call to [RateLimitStorage.Increment]. It
+	// defaults to [DefaultRateLimitStorageTimeout]; a negative value removes
+	// the bound.
+	//
+	// The request's own context has no deadline, so without this a shared
+	// store that stopped answering would hold every request that reached it,
+	// and a limiter that hangs is not one FailOpen can act on, since that only
+	// hears about an error. A call that outlives the bound has its context
+	// cancelled and counts as a storage failure, refused with 503 or, with
+	// FailOpen, served unmetered. An implementation must return when its
+	// context ends, which every client library's context-taking call does.
+	StorageTimeout time.Duration
+
 	// FailOpen serves a request that the storage could not count.
 	//
 	// By default a storage that cannot answer refuses the request with 503,
@@ -347,6 +371,9 @@ func (o RateLimitOptions) overlay(over RateLimitOptions) RateLimitOptions {
 	}
 	if over.Resolver != nil {
 		o.Resolver = over.Resolver
+	}
+	if over.StorageTimeout != 0 {
+		o.StorageTimeout = over.StorageTimeout
 	}
 	if over.FailOpen {
 		o.FailOpen = true
@@ -433,7 +460,9 @@ type rateLimitConfig struct {
 	resolver QuotaResolver
 	// policy is the fixed RateLimit-Policy header value for the static quotas.
 	// A request whose resolver adds quotas renders its own.
-	policy            string
+	policy string
+	// storageTimeout bounds one Increment; zero leaves it unbounded.
+	storageTimeout    time.Duration
 	failOpen          bool
 	headers           bool
 	afterDependencies bool
@@ -490,12 +519,20 @@ func newRateLimitConfig(opts RateLimitOptions, quotas []Quota) (*rateLimitConfig
 		policy.WriteString(";w=")
 		policy.WriteString(strconv.Itoa(windowSeconds(quota.Window)))
 	}
+	storageTimeout := opts.StorageTimeout
+	switch {
+	case storageTimeout == 0:
+		storageTimeout = DefaultRateLimitStorageTimeout
+	case storageTimeout < 0:
+		storageTimeout = 0
+	}
 	return &rateLimitConfig{
 		quotas:            quotas,
 		storage:           opts.Storage,
 		tracker:           opts.Tracker,
 		resolver:          opts.Resolver,
 		policy:            policy.String(),
+		storageTimeout:    storageTimeout,
 		failOpen:          opts.FailOpen,
 		headers:           !opts.DisableHeaders,
 		afterDependencies: opts.AfterDependencies,
@@ -588,6 +625,20 @@ func boundRateLimitKey(key string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// increment counts one request against one quota in the storage, within
+// [RateLimitOptions.StorageTimeout]. The process-local storage never waits on
+// anything, so it is called without the deadline's cost.
+func (cfg *rateLimitConfig) increment(ctx context.Context, quota Quota, key string) (int, time.Duration, error) {
+	if cfg.storageTimeout > 0 {
+		if _, local := cfg.storage.(*MemoryRateLimitStorage); !local {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, cfg.storageTimeout)
+			defer cancel()
+		}
+	}
+	return cfg.storage.Increment(ctx, quota.Name, key, quota.Window)
+}
+
 // check counts a request against every quota and reports whether it may
 // proceed, setting the RateLimit headers on the way.
 func (cfg *rateLimitConfig) check(c *Context) error {
@@ -611,7 +662,7 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 	var tightest outcome
 	counted := 0
 	for _, quota := range quotas {
-		count, reset, storageErr := cfg.storage.Increment(ctx, quota.Name, key, quota.Window)
+		count, reset, storageErr := cfg.increment(ctx, quota, key)
 		if storageErr != nil {
 			if failure := cfg.storageFailed(c, quota, storageErr); failure != nil {
 				return failure
@@ -772,7 +823,7 @@ type wsMessageLimiter struct {
 // closed with, or zero when the peer may carry on.
 func (l *wsMessageLimiter) allow(ctx context.Context) (WSStatus, string) {
 	for _, quota := range l.cfg.quotas {
-		count, _, err := l.cfg.storage.Increment(ctx, quota.Name, l.key, quota.Window)
+		count, _, err := l.cfg.increment(ctx, quota, l.key)
 		if err != nil {
 			return l.storageFailed(ctx, quota, err)
 		}

@@ -110,10 +110,13 @@ func main() {
 
 	// The admin router is written without a prefix or a guard. Both are applied
 	// here, which is what keeps that router reusable and puts the security
-	// decision somewhere a reviewer will find it.
+	// decision somewhere a reviewer will find it. The category is applied here
+	// for the same reason: the router does not know which heading of the
+	// documentation the application files it under.
 	app.Include(routers.Admin(),
 		muzak.WithPrefix("/admin"),
 		muzak.WithTags("admin"),
+		muzak.WithCategory("Administration"),
 		guarded,
 		muzak.WithDependencies(core.GetTokenHeader(settings)),
 		muzak.WithResponseDoc(http.StatusTeapot, "I'm a teapot"),

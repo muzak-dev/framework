@@ -8,9 +8,10 @@ import (
 // Meta returns the router for the service's own endpoints: what it is
 // configured with, what it can predict, and whether it is alive.
 func Meta() *muzak.Router {
-	r := muzak.NewRouter(muzak.WithTags("meta"))
+	r := muzak.NewRouter(muzak.WithTags("meta"), muzak.WithCategory("Operations"))
 
 	r.Get("/info", handlers.Info,
+		muzak.Title("Show Running Configuration"),
 		muzak.Summary("Report the running configuration"))
 
 	r.Get("/predict", handlers.Predict,

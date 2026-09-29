@@ -9,9 +9,9 @@ import (
 	"muzak.dev/framework/example/handlers"
 )
 
-// Items returns the items router.
+// Items returns the items router, filed under the "Catalog" category.
 func Items() *muzak.Router {
-	r := muzak.NewRouter(muzak.WithTags("items"),
+	r := muzak.NewRouter(muzak.WithTags("items"), muzak.WithCategory("Catalog"),
 		// This is the one router whose routes resolve a caller, so it is the
 		// one router where the budget is worth spending per caller rather than
 		// per address. Deferring the count is what lets the tracker see the
@@ -19,9 +19,11 @@ func Items() *muzak.Router {
 		muzak.WithRateLimit(muzak.RateLimitOptions{AfterDependencies: true}))
 
 	r.Get("/items/", handlers.ListItems,
+		muzak.Title("List Items"),
 		muzak.Summary("List items"))
 
 	r.Get("/items/{item_id}", handlers.ReadItem,
+		muzak.Title("Fetch An Item"),
 		muzak.Summary("Read an item"),
 		muzak.WithResponseDoc(http.StatusNotFound, "The item does not exist"),
 		// Only this route resolves the caller, so only this route pays for it.
@@ -41,6 +43,7 @@ func Items() *muzak.Router {
 	// of the stream is written, and the handler owns the stream until it
 	// returns.
 	r.SSE("/items/stream", handlers.StreamItems,
+		muzak.Title("Follow Item Changes"),
 		muzak.Summary("Follow every change to the items"),
 		muzak.WithSSE(muzak.SSEOptions{
 			// A stream that says nothing for long enough is closed by proxies
@@ -55,6 +58,7 @@ func Items() *muzak.Router {
 	// the handshake, the dependency resolves before the upgrade, and the
 	// handler owns the connection until it returns.
 	r.WS("/items/{item_id}/ws", handlers.ItemSocket,
+		muzak.Title("Talk To An Item"),
 		muzak.Summary("Talk to an item over a WebSocket"),
 		muzak.Needs(core.GetSessionOrToken),
 		muzak.WithWebSocket(muzak.WSOptions{

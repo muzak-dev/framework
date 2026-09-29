@@ -10,7 +10,7 @@ import (
 
 // Auth returns the router for signing in.
 func Auth() *muzak.Router {
-	r := muzak.NewRouter(muzak.WithTags("auth"))
+	r := muzak.NewRouter(muzak.WithTags("auth"), muzak.WithCategory("Accounts"))
 
 	r.Get("/login", handlers.LoginForm,
 		muzak.Summary("Serve the sign-in form"))

@@ -19,6 +19,7 @@ func Admin() *muzak.Router {
 	r.Post("/", handlers.AdminAction,
 		muzak.Status(http.StatusCreated),
 		muzak.WithTags("audit"),
+		muzak.Title("Run An Admin Action"),
 		muzak.Summary("Admin action"),
 		muzak.Description("Performs a privileged action. Requires the shared admin token."))
 

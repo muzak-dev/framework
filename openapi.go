@@ -424,19 +424,22 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 	}
 
 	// Validation rules describe themselves, so the document carries the limits
-	// the code actually enforces rather than a prose restatement of them.
+	// the code actually enforces rather than a prose restatement of them. A
+	// rule belongs to the parameter it was declared for and to no other field
+	// of the same name, so each is looked up by where it is read from too.
 	constraints := rt.constraintsForDocs()
 	elements := rt.elementConstraintsForDocs()
 
 	for i := range rt.plan.params {
 		parameter := builder.parameterFor(&rt.plan.params[i])
-		if c, described := constraints[parameter.Name]; described {
+		key := fieldKey{parameter.In, parameter.Name}
+		if c, described := constraints[key]; described {
 			applyConstraints(parameter.Schema, c)
 			if c.Required {
 				parameter.Required = true
 			}
 		}
-		if c, described := elements[parameter.Name]; described && parameter.Schema.Items != nil {
+		if c, described := elements[key]; described && parameter.Schema.Items != nil {
 			applyConstraints(parameter.Schema.Items, c)
 		}
 		op.Parameters = append(op.Parameters, parameter)
@@ -447,7 +450,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		// The binder already decided which form values are required, and it
 		// enforces that whatever the rules say, so the rules may only add to
 		// the list here.
-		builder.applyBodyConstraints(body, constraints, elements, false)
+		builder.applyBodyConstraints(body, constraints, elements, false, srcForm.String(), srcFile.String(), "body")
 		op.RequestBody = &RequestBody{
 			Required: len(body.Required) > 0,
 			Content:  multipartContent(rt.plan, body),
@@ -458,13 +461,13 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 		// described inline rather than by reference.
 		body := builder.bodySchema(rt.plan)
 		builder.applyBodyDefaults(body, rt.plan.body.defaults)
-		builder.applyBodyConstraints(body, constraints, elements, true)
+		builder.applyBodyConstraints(body, constraints, elements, true, "body")
 		for _, nested := range rt.nestedModelsForDocs() {
 			// A nested model's rules land on the component of its type, which
 			// is where a reference to it leads. One that was described inline,
 			// as an anonymous struct is, has no component to carry them.
 			if ref, described := builder.byType[nested.typ]; described {
-				builder.applyBodyConstraints(ref, nested.constraints, nested.elements, true)
+				builder.applyBodyConstraints(ref, nested.constraints, nested.elements, true, "body")
 			}
 		}
 		op.RequestBody = &RequestBody{
@@ -518,7 +521,14 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 // required. That is true for a JSON body, where the only alternative is the Go
 // type's shape, and false for a form, where the binder has already decided and
 // will enforce it whatever the rules say.
-func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[string]validate.Constraints, requiredFromRules bool) {
+//
+// A rule speaks for the field it was declared for, so it is matched by where
+// the field is read from as well as by its name: a body member and a query
+// parameter may share a name and keep their own rules. The locations are the
+// ones a rule may report, in the order they are tried; a form is described
+// under "form" and "file", and a rule that named itself with As() and is bound
+// to nothing in the model reports under "body".
+func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[fieldKey]validate.Constraints, requiredFromRules bool, locations ...string) {
 	if len(constraints) == 0 && len(elements) == 0 {
 		return
 	}
@@ -526,30 +536,38 @@ func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements
 	if schema == nil || schema.Properties == nil {
 		return
 	}
-	for name, c := range constraints {
-		property, described := schema.Properties[name]
-		if !described {
-			continue
-		}
-		applyConstraints(property, c)
+	for _, location := range locations {
+		for name, c := range constraints {
+			if name.location != location {
+				continue
+			}
+			property, described := schema.Properties[name.name]
+			if !described {
+				continue
+			}
+			applyConstraints(property, c)
 
-		switch {
-		case requiredFromRules:
-			// A JSON member the rules speak for is required exactly when they
-			// say so. Without this the document would fall back to the Go
-			// type's shape, which calls every non-pointer field required and
-			// would contradict a model that deliberately left one optional.
-			schema.Required = setRequired(schema.Required, name, c.Required)
-		case c.Required:
-			// A form value carries its own requiredness from the tag, which the
-			// binder enforces. A rule can only add to that, never take it away,
-			// or the document would promise a body the route then rejects.
-			schema.Required = setRequired(schema.Required, name, true)
+			switch {
+			case requiredFromRules:
+				// A JSON member the rules speak for is required exactly when they
+				// say so. Without this the document would fall back to the Go
+				// type's shape, which calls every non-pointer field required and
+				// would contradict a model that deliberately left one optional.
+				schema.Required = setRequired(schema.Required, name.name, c.Required)
+			case c.Required:
+				// A form value carries its own requiredness from the tag, which the
+				// binder enforces. A rule can only add to it, never take it away,
+				// or the document would promise a body the route then rejects.
+				schema.Required = setRequired(schema.Required, name.name, true)
+			}
 		}
-	}
-	for name, c := range elements {
-		if property, described := schema.Properties[name]; described && property.Items != nil {
-			applyConstraints(property.Items, c)
+		for name, c := range elements {
+			if name.location != location {
+				continue
+			}
+			if property, described := schema.Properties[name.name]; described && property.Items != nil {
+				applyConstraints(property.Items, c)
+			}
 		}
 	}
 }

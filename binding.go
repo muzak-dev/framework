@@ -748,9 +748,9 @@ func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 	// about every field at once. Fields that already failed to bind are left
 	// out, because a value that could not be parsed has nothing further to say.
 	if p.validation != nil && !route.skipValidation {
-		failed := make(map[string]bool, len(verr.Details))
+		failed := make(map[fieldKey]bool, len(verr.Details))
 		for _, detail := range verr.Details {
-			failed[detail.Field] = true
+			failed[fieldKey{detail.Location, detail.Field}] = true
 		}
 		verr.Details = append(verr.Details, p.runValidation(dst, failed)...)
 	}

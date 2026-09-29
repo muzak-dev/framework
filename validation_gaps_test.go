@@ -167,12 +167,12 @@ func TestSetRequiredAddsAndRemoves(t *testing.T) {
 func TestApplyBodyConstraintsWithNothingToDo(t *testing.T) {
 	t.Parallel()
 	builder := newSchemaBuilder()
-	builder.applyBodyConstraints(&Schema{}, nil, nil, true)
+	builder.applyBodyConstraints(&Schema{}, nil, nil, true, "body")
 	builder.applyBodyConstraints(&Schema{Type: "string"},
-		map[string]validate.Constraints{"a": {Required: true}}, nil, true)
+		map[fieldKey]validate.Constraints{{"body", "a"}: {Required: true}}, nil, true, "body")
 	// A reference that names nothing resolves to nothing rather than panicking.
 	builder.applyBodyConstraints(&Schema{Ref: componentPrefix + "absent"},
-		map[string]validate.Constraints{"a": {Required: true}}, nil, false)
+		map[fieldKey]validate.Constraints{{"body", "a"}: {Required: true}}, nil, false, "body")
 }
 
 // TestValidationWithoutAModel covers the paths a plan takes when the input type
@@ -383,7 +383,7 @@ func TestRuleNamedWithAsMayBindAnywhere(t *testing.T) {
 		t.Fatalf("a named rule was refused: %v", err)
 	}
 	constraints := plan.describeConstraints()
-	if _, described := constraints["computed"]; !described {
+	if _, described := constraints[fieldKey{"body", "computed"}]; !described {
 		t.Errorf("the named rule is missing from the document: %v", constraints)
 	}
 }

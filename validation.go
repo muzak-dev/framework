@@ -177,8 +177,10 @@ type validationRun struct {
 	out []ErrorDetail
 	// failed names the fields that already failed to bind, whose validation
 	// failures are left out because an unparseable value has nothing further
-	// to say.
-	failed map[string]bool
+	// to say. A field is named by where it is read from as well as what it is
+	// called: a query parameter and a body member may share a name, and one
+	// that could not be parsed says nothing about the other.
+	failed map[fieldKey]bool
 	// truncated records that a failure was found after the report was full,
 	// and is what stops everything that would have been evaluated after it.
 	truncated bool
@@ -206,7 +208,7 @@ func (r *validationRun) room() int {
 // add records one failure, or notes that there was no room for it.
 func (r *validationRun) add(detail ErrorDetail) {
 	switch {
-	case r.truncated, r.failed[detail.Field]:
+	case r.truncated, r.failed[fieldKey{detail.Location, detail.Field}]:
 	case len(r.out) >= MaxValidationDetails:
 		r.truncated = true
 	default:
@@ -832,79 +834,49 @@ func offsetOf(t reflect.Type, index []int) (uintptr, bool) {
 	return offset, true
 }
 
+// fieldKey names a field the way a request does: by the part of it the value
+// is read from, and by the name it has there. The name alone is not enough,
+// because a query parameter and a body member may both be called "name", each
+// with rules of its own, and neither speaks for the other.
+//
+// The location is the one a validation error reports: "path", "query",
+// "header", "cookie", "form", "file" or "body".
+type fieldKey struct {
+	location, name string
+}
+
 // describeConstraints reports what a model's rules demand of each field, keyed
-// by the name the field is reported under.
+// by where the field is read from and the name it is reported under.
 //
 // The rules are collected by running Validate once against a zero value, which
 // is safe because declaring a rule set has no effect beyond recording it. Only
 // the rules that map onto JSON Schema keywords contribute; a Must rule is
 // opaque by nature and adds nothing.
-func (p *bindPlan) describeConstraints() map[string]validate.Constraints {
+func (p *bindPlan) describeConstraints() map[fieldKey]validate.Constraints {
 	if p.validation == nil {
 		return nil
 	}
-	scratch := reflect.New(p.typ)
-	model, ok := scratch.Interface().(Validatable)
-	if !ok {
-		// coverage: the plan only carries a validation plan for a type that
-		// implements Validatable, which is checked when the route is compiled.
-		return nil
-	}
-
-	v := &Validation{plan: p.validation, base: scratch.Pointer(), size: p.typ.Size(), value: scratch.Elem()}
-	model.Validate(v)
-
-	out := make(map[string]validate.Constraints, len(v.rules))
-	for _, rules := range v.rules {
-		name, _ := v.describe(rules.Target(), rules.Label())
-		if name == "" {
-			continue
-		}
-		out[name] = rules.Describe()
-	}
-	return out
+	constraints, _ := describeRules(p.typ, p.validation)
+	return constraints
 }
 
 // elementConstraints reports the rules a model applies to the elements of each
 // of its collections, so an array's items can be described as precisely as the
 // array itself.
-func (p *bindPlan) elementConstraints() map[string]validate.Constraints {
+func (p *bindPlan) elementConstraints() map[fieldKey]validate.Constraints {
 	if p.validation == nil {
 		return nil
 	}
-	scratch := reflect.New(p.typ)
-	model, ok := scratch.Interface().(Validatable)
-	if !ok {
-		// coverage: guarded by the same check as describeConstraints.
-		return nil
-	}
-
-	v := &Validation{plan: p.validation, base: scratch.Pointer(), size: p.typ.Size(), value: scratch.Elem()}
-	model.Validate(v)
-
-	out := map[string]validate.Constraints{}
-	for _, rules := range v.rules {
-		describer, ok := rules.(interface{ DescribeElement() validate.Constraints })
-		if !ok {
-			continue
-		}
-		name, _ := v.describe(rules.Target(), rules.Label())
-		if name == "" {
-			continue
-		}
-		if constraints := describer.DescribeElement(); !constraints.IsZero() {
-			out[name] = constraints
-		}
-	}
-	return out
+	_, elements := describeRules(p.typ, p.validation)
+	return elements
 }
 
 // nestedModelDoc is what the rules of a model nested in another demand of its
 // fields, for the schema that describes the nested type.
 type nestedModelDoc struct {
 	typ         reflect.Type
-	constraints map[string]validate.Constraints
-	elements    map[string]validate.Constraints
+	constraints map[fieldKey]validate.Constraints
+	elements    map[fieldKey]validate.Constraints
 }
 
 // describeNestedModels reports the rules of every model the input nests, and
@@ -948,8 +920,9 @@ func (p *bindPlan) describeNestedModels() []nestedModelDoc {
 }
 
 // describeRules runs the Validate of a model type against a zero value and
-// reports the constraints of its fields and of the elements of its collections.
-func describeRules(typ reflect.Type, plan *validationPlan) (constraints, elements map[string]validate.Constraints) {
+// reports the constraints of its fields and of the elements of its collections,
+// each keyed by where the field is read from and what it is called there.
+func describeRules(typ reflect.Type, plan *validationPlan) (constraints, elements map[fieldKey]validate.Constraints) {
 	scratch := reflect.New(typ)
 	model, ok := scratch.Interface().(Validatable)
 	if !ok {
@@ -959,17 +932,18 @@ func describeRules(typ reflect.Type, plan *validationPlan) (constraints, element
 	v := &Validation{plan: plan, base: scratch.Pointer(), size: typ.Size(), value: scratch.Elem()}
 	model.Validate(v)
 
-	constraints = map[string]validate.Constraints{}
-	elements = map[string]validate.Constraints{}
+	constraints = make(map[fieldKey]validate.Constraints, len(v.rules))
+	elements = map[fieldKey]validate.Constraints{}
 	for _, rules := range v.rules {
-		name, _ := v.describe(rules.Target(), rules.Label())
+		name, location := v.describe(rules.Target(), rules.Label())
 		if name == "" {
 			continue
 		}
-		constraints[name] = rules.Describe()
+		key := fieldKey{location, name}
+		constraints[key] = rules.Describe()
 		if describer, ok := rules.(interface{ DescribeElement() validate.Constraints }); ok {
 			if c := describer.DescribeElement(); !c.IsZero() {
-				elements[name] = c
+				elements[key] = c
 			}
 		}
 	}
@@ -979,7 +953,7 @@ func describeRules(typ reflect.Type, plan *validationPlan) (constraints, element
 // constraintsForDocs reports the field constraints for the OpenAPI document,
 // or nothing when the route skips validation, because a document should
 // describe what the route actually enforces.
-func (rt *Route) constraintsForDocs() map[string]validate.Constraints {
+func (rt *Route) constraintsForDocs() map[fieldKey]validate.Constraints {
 	if rt.skipValidation {
 		return nil
 	}
@@ -995,7 +969,7 @@ func (rt *Route) nestedModelsForDocs() []nestedModelDoc {
 }
 
 // elementConstraintsForDocs reports the constraints on collection elements.
-func (rt *Route) elementConstraintsForDocs() map[string]validate.Constraints {
+func (rt *Route) elementConstraintsForDocs() map[fieldKey]validate.Constraints {
 	if rt.skipValidation {
 		return nil
 	}
@@ -1018,7 +992,7 @@ var validationPool = sync.Pool{
 // Fields that already failed to bind are left alone: telling a client that
 // "limit" is both unparseable and below the minimum says nothing the first
 // message did not.
-func (p *bindPlan) runValidation(dst reflect.Value, failed map[string]bool) []ErrorDetail {
+func (p *bindPlan) runValidation(dst reflect.Value, failed map[fieldKey]bool) []ErrorDetail {
 	if p.validation == nil {
 		return nil
 	}

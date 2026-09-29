@@ -9,12 +9,14 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
-This release is the result of two rounds of adversarial review of the
-framework, run as an attacker would against a service built on it, the second
-of them also against the first round's fixes. Every finding below was
-reproduced with a test before it was fixed, and each of those tests is now a
-regression test. Several fixes tighten a default; each one is listed under
-**Changed** with its migration.
+## [0.2.8] - 2026-09-29
+
+This release is the result of four rounds of adversarial review of the
+framework, run as an attacker would against a service built on it, each later
+round also against the earlier rounds' fixes, and of testing on a real network
+and on Cloud Run. Every finding below was reproduced with a test before it was
+fixed, and each of those tests is now a regression test. Several fixes tighten
+a default; each one is listed under **Changed** with its migration.
 
 ### Added
 
@@ -157,14 +159,6 @@ regression test. Several fixes tighten a default; each one is listed under
   innermost value. Migration: an outer provider that was deliberately replaced
   now also runs and can fail the request; declare it only where it applies, or
   give the two values distinct types.
-
-- **An IPv6 client is counted by its /64.** `IPTracker` and the per-client
-  connection caps (`MaxConnectionsPerIP`, `MaxStreamsPerIP`) keyed on the
-  exact address, so one /64 got a fresh budget from every address in it. IPv4
-  is still counted exactly and its keys are unchanged; IPv6 tracker keys are
-  now `ip:<prefix>/64`. Migration: clients sharing a /64 now share a budget.
-  Raise the limit, or set `Tracker: IPPrefixTracker(32, 128)` if a proxy in
-  front already bounds per-address traffic.
 
 - **A request that fails after its response has started aborts the
   connection.** A panic, or an error returned after the first byte, was logged
@@ -459,20 +453,22 @@ regression test. Several fixes tighten a default; each one is listed under
   each route now logs which writer stopped the chain. Migration: give the
   wrapper an `Unwrap` method.
 
-- **The default rate limit tracker counts an IPv6 client by its /56, not its
-  /64.** A /56 is what providers delegate to one home or small site (RFC 6177),
-  so keying on the /64 still handed one subscriber 256 budgets: rotating the
-  low bits of the fourth group of an address, all inside their own /56, turned a
-  limit of 5 a minute into more than a thousand. The per-client connection caps
-  already counted a /56 for exactly this reason; the rate limiter now uses the
-  same prefix, and the same setting. `ClientIPOptions.ConnectionIPv6Prefix`
-  (default 56) now also sets the prefix `IPTracker` counts, so one subscriber
-  has one budget however it is limited. IPv4 is unchanged, and its keys are
-  spelled as before.
+- **An IPv6 client is counted by its /56.** `IPTracker` and the per-client
+  connection caps (`MaxConnectionsPerIP`, `MaxStreamsPerIP`) keyed on the exact
+  address, so one subscriber got a fresh budget from every address it held. A
+  /56 is what providers delegate to one home or small site (RFC 6177): rotating
+  the low bits of the fourth group of an address, all inside its own /56,
+  turned a limit of 5 a minute into more than a thousand.
+  `ClientIPOptions.ConnectionIPv6Prefix` (default 56) sets the prefix both
+  count, so one subscriber has one budget however it is limited. IPv4 is still
+  counted exactly and its keys are unchanged; IPv6 tracker keys are now
+  `ip:<prefix>/56`.
 
   Migration: a counter kept in a shared storage under an IPv6 client's old
-  `ip:2001:db8:1:2::/64` key is not carried over, so IPv6 clients start with a
-  full budget once after the upgrade. Where many unrelated users share one /56
+  exact-address key is not carried over, so IPv6 clients start with a full
+  budget once after the upgrade. Raise the limit, or set
+  `Tracker: IPPrefixTracker(32, 128)`, if a proxy in front already bounds
+  per-address traffic. Where many unrelated users share one /56
   (a campus, or a carrier that gives each device a /64), set
   `ClientIPOptions.ConnectionIPv6Prefix: 64` to keep the old grouping, which
   also loosens the connection caps to match; for one route only,
@@ -678,7 +674,7 @@ regression test. Several fixes tighten a default; each one is listed under
 
 - **One rate limit quota can no longer evict another's counters.** When the
   in-memory storage was full, eviction was global, so flooding one quota with
-  new keys -- easily done from a single IPv6 /64 with the default tracker --
+  new keys -- easily done from a single IPv6 allocation with the default tracker --
   evicted and so reset a per-account login limit. It now evicts from the quota
   holding the most counters.
 
@@ -788,8 +784,8 @@ regression test. Several fixes tighten a default; each one is listed under
   custom headers such as `X-Api-Key` to another host, and `Authorization`
   over an https-to-http downgrade.
 
-- **One IPv6 allocation can no longer take every WebSocket or SSE slot.** With
-  the caps at /64, a home /56 held 256 separate allowances.
+- **One IPv6 allocation can no longer take every WebSocket or SSE slot.** A home
+  /56 held 256 separate allowances, one per /64, and now counts as one client.
 
 - **Log redaction covers groups.** A redacted key whose value was a group,
   through `slog.Group`, a `LogValuer` or `WithGroup`, was logged in full.
@@ -1942,7 +1938,10 @@ example application, but it is not frozen: expect it to move before 1.0.0.
   [Safe Defaults](https://muzak.dev/docs/security/safe-defaults).
 - Dual licence, MIT or Apache-2.0 at your option.
 
-[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/muzak-dev/framework/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/muzak-dev/framework/compare/v0.2.7...v0.2.8
+[0.2.7]: https://github.com/muzak-dev/framework/compare/v0.2.6...v0.2.7
+[0.2.6]: https://github.com/muzak-dev/framework/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/muzak-dev/framework/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/muzak-dev/framework/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/muzak-dev/framework/compare/v0.2.2...v0.2.3

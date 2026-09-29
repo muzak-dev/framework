@@ -44,7 +44,7 @@ The framework's default `WriteTimeout` is 30 seconds and Cloud Run's request tim
 - **Event streams** arrived incrementally through the platform: a producer sending every 500 ms was received at gaps of 495 to 506 ms, so nothing buffers them.
 - **Keepalive** comments keep an idle stream open. The test found the keepalive arriving at 15, 45 and 60 seconds when asked for every 15, a bug fixed in this release (it skipped a tick whenever its own previous write had landed just after the one before). After the fix it arrives every interval.
 - **`MaxLifetime`** ended a stream cleanly after 20 seconds, and a reconnect with `Last-Event-ID` resumed from the next event on the same instance.
-- **WebSockets** on the HTTP/1 port survived 100 seconds with no application traffic, with the default keepalive (a ping every 30 seconds) and for a handler that only reads. A message over the read limit ended the connection; the client saw the connection lost (1006) more often than the 1009 the server sends.
+- **WebSockets** on the HTTP/1 port survived 100 seconds with no application traffic, with the default keepalive (a ping every 30 seconds) and for a handler that only reads. A message over the read limit ended the connection, and the client saw the connection lost (1006) more often than the 1009 the server sends. That was fixed after this measurement, so that a peer still sending reads the close frame, and it was not measured again on Cloud Run.
 
 ## Deployments
 

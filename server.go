@@ -60,7 +60,14 @@ type ServerOptions struct {
 	// defaulting to [DefaultReadTimeout].
 	ReadTimeout time.Duration
 	// WriteTimeout bounds the time allowed to write the response, defaulting
-	// to [DefaultWriteTimeout].
+	// to [DefaultWriteTimeout]. Over HTTP/2 it also bounds how long the
+	// connection's socket may accept no bytes at all: a client that stops
+	// reading has the whole connection closed after this long, because a
+	// deadline on one stream cannot interrupt a write already in progress.
+	//
+	// ReadHeaderTimeout is not applied to HTTP/2, whose header blocks net/http
+	// reads under the connection's own timeouts; a client that never finishes
+	// one is held until IdleTimeout, not for ReadHeaderTimeout.
 	WriteTimeout time.Duration
 	// IdleTimeout bounds how long an idle keep-alive connection is kept,
 	// defaulting to [DefaultIdleTimeout].
@@ -266,6 +273,14 @@ func (a *App) newServer() *http.Server {
 		TLSConfig:         opts.TLSConfig,
 		BaseContext:       opts.BaseContext,
 		ErrorLog:          slog.NewLogLogger(a.logger.Handler(), slog.LevelWarn),
+		// A write deadline set on an HTTP/2 stream cannot interrupt the write
+		// of a frame that is already in progress: the connection's one
+		// writer parks in the socket, and a client that grants a huge flow
+		// control window and then stops reading the socket keeps it there,
+		// with every stream on the connection, past every WriteTimeout. This
+		// closes a connection that a write makes no progress on for as long
+		// as WriteTimeout, which is the bound HTTP/1 already has.
+		HTTP2: &http.HTTP2Config{WriteByteTimeout: opts.WriteTimeout},
 	}
 }
 

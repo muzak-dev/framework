@@ -100,6 +100,15 @@ regression test. Several fixes tighten a default; each one is listed under
   control. Titles need not be unique. The `example/` application now files its
   routers under categories and titles some routes.
 
+- **`ServerOptions.UnencryptedHTTP2` accepts HTTP/2 without TLS.** It is for a
+  server behind a platform that speaks HTTP/2 to the container in the clear,
+  such as Cloud Run with an `h2c` port, where a request is cancelled the moment
+  its client leaves; over HTTP/1 the platform's proxy keeps the connection to
+  the container open and a handler runs on. `App.Run` and `App.RunSignals`
+  could not serve it before. See `docs/cloud-run.md`, which records what was
+  measured on Cloud Run: the proxy's peer address and `TrustedProxies`, HTTP/1
+  against `h2c`, timeouts, streams and rollouts.
+
 ### Changed
 
 - **A JSON body sent without a `Content-Type` is refused with 415.** Accepting
@@ -1156,6 +1165,17 @@ regression test. Several fixes tighten a default; each one is listed under
 - **An empty `ValidationError` has a message.** `Error()` indexed its first
   detail and panicked for one an application built with none, inside the code
   that reports the error.
+
+- **An event stream keepalive arrives every interval.** It waited on fixed
+  ticks and skipped a tick whose last write was younger than the interval; its
+  own write lands a hair after its tick, so the tick after it always skipped,
+  and a keepalive asked for every 15 seconds arrived at 15, 45 and 60: twice
+  the silence a proxy idle timeout was meant to be kept off with. Seen behind
+  Cloud Run. The wait is now measured from the last write.
+
+- **Nothing is written after the closing comment of a stream that reached its
+  `MaxLifetime`.** A keepalive already waiting for the write lock could go out
+  behind it.
 
 ### Documentation
 

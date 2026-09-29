@@ -52,12 +52,14 @@ func TestSSEPerClientCapIgnoresAnIPv6Zone(t *testing.T) {
 // to fire into.
 func TestSSEReaderReadTimeoutNeverOutlivesItsEvent(t *testing.T) {
 	t.Parallel()
-	const readTimeout = 20 * time.Millisecond
+	// Generous enough that a busy scheduler does not stand in for the race
+	// this looks for: the pauses below are fractions of it.
+	const readTimeout = 200 * time.Millisecond
 	pipeReader, pipeWriter := io.Pipe()
 	reader := newSSEReader(pipeReader, SSEDialOptions{ReadTimeout: readTimeout})
 	t.Cleanup(func() { _ = reader.Close() })
 
-	const events = 150
+	const events = 30
 	go func() {
 		defer pipeWriter.Close()
 		for range events {

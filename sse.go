@@ -42,6 +42,10 @@ func endedBy(reason string, cause error) error {
 	return fmt.Errorf("%w: %s: %w", ErrSSEStreamEnded, reason, cause)
 }
 
+// errSSELifetime reports a stream that has reached its maximum lifetime, and
+// what a send made after that is refused with.
+var errSSELifetime = ended("the stream reached its maximum lifetime")
+
 // errSSEFinished reports something sent after the handler returned. The stream
 // is over by then: the response has gone back to net/http, and writing into it
 // would write into whatever request comes next on the same connection.
@@ -262,6 +266,9 @@ type sseStream struct {
 	// nil for a stream without one, and is set by the request's own goroutine
 	// after the stream opens, which is also the one that finishes it.
 	lifetime *time.Timer
+	// closing is set once the lifetime has passed and the closing comment is on
+	// its way, after which nothing else may be written; see [sseStream.expire].
+	closing atomic.Bool
 
 	mu  sync.Mutex
 	err error
@@ -433,6 +440,9 @@ type sseFrame struct {
 	hasData bool
 	text    string
 	hasText bool
+	// final marks the comment that says a stream has reached its lifetime. It
+	// is the one frame allowed through once the stream is closing.
+	final bool
 }
 
 // ssePayloads holds the buffers an event's data field is encoded into. They
@@ -484,6 +494,9 @@ func (s *sseStream) send(frame sseFrame) error {
 		// Nothing is encoded for a stream that has already ended.
 		return err
 	}
+	if s.closing.Load() && !frame.final {
+		return errSSELifetime
+	}
 
 	payload := ssePayloads.Get().(*[]byte)
 	defer putSSEPayload(payload)
@@ -499,6 +512,12 @@ func (s *sseStream) send(frame sseFrame) error {
 		return err
 	}
 	defer s.release()
+	// Writes go out in the order they take the semaphore, so what was queued
+	// behind the closing comment must not follow it: the check made before
+	// waiting is too early to catch a keepalive that was already waiting.
+	if s.closing.Load() && !frame.final {
+		return errSSELifetime
+	}
 
 	s.buf = frame.appendFields(s.buf[:0])
 	if frame.hasData || frame.hasText {
@@ -884,8 +903,11 @@ func (s *sseStream) keepalive(interval time.Duration) {
 // the write is bounded by the stream's write timeout, and a client that will
 // not take even a comment is ended all the same.
 func (s *sseStream) expire() {
-	_ = s.send(sseFrame{comment: sseLifetimeComment})
-	_ = s.fail(ended("the stream reached its maximum lifetime"))
+	// From here on nothing but the closing comment is written, so that it is
+	// the last thing on the stream and not one of the last few.
+	s.closing.Store(true)
+	_ = s.send(sseFrame{comment: sseLifetimeComment, final: true})
+	_ = s.fail(errSSELifetime)
 }
 
 // monotonicStamp records a moment for a long-lived connection to measure an

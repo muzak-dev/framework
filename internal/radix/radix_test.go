@@ -524,3 +524,44 @@ func TestInsertRejectsDuplicateParamNames(t *testing.T) {
 		t.Errorf("distinct names rejected: %v", err)
 	}
 }
+
+// A pooled Params outlives the request it captured from, so what a Reset or a
+// rewound branch leaves in its backing arrays is retained, up to a whole
+// request path, until a later request writes over the same slot.
+func TestParamsDoNotRetainCapturedPaths(t *testing.T) {
+	t.Parallel()
+	tree := New[string]()
+	for _, pattern := range []string{"/a/{one}/deep/{two}", "/a/{rest...}"} {
+		if err := tree.Insert(pattern, pattern); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retained := func(p *Params) []string {
+		var held []string
+		for _, v := range p.values[:cap(p.values)] {
+			if v != "" {
+				held = append(held, v)
+			}
+		}
+		return held
+	}
+
+	var params Params
+	// The first branch captures {one} and then fails at "nomatch"; the
+	// wildcard then answers. The rewind must not leave {one} behind.
+	if _, ok := tree.Lookup("/a/secret-one/nomatch/secret-two", &params); !ok {
+		t.Fatal("no match")
+	}
+	params.Reset()
+	if held := retained(&params); len(held) != 0 {
+		t.Errorf("Reset left %q in the backing array", held)
+	}
+
+	if _, ok := tree.Lookup("/a/secret-one/deep/secret-two", &params); !ok {
+		t.Fatal("no match")
+	}
+	params.Reset()
+	if held := retained(&params); len(held) != 0 {
+		t.Errorf("Reset left %q in the backing array", held)
+	}
+}

@@ -68,7 +68,12 @@ func (p *Params) SetValue(i int, value string) {
 
 // Reset discards every captured parameter while keeping the allocated backing
 // arrays for reuse. Call it before handing a Params to Lookup again.
+//
+// The values are cleared rather than only forgotten: a value is a slice of the
+// request path, so one left in the array would keep that whole path alive for
+// as long as the pooled Params sat unused.
 func (p *Params) Reset() {
+	clear(p.values)
 	p.names = p.names[:0]
 	p.values = p.values[:0]
 }
@@ -82,6 +87,7 @@ func (p *Params) push(name, value string) {
 // truncate rewinds the capture list to length n, undoing the pushes performed
 // by a branch that turned out not to match.
 func (p *Params) truncate(n int) {
+	clear(p.values[n:])
 	p.names = p.names[:n]
 	p.values = p.values[:n]
 }

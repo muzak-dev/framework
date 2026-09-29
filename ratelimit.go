@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/textproto"
 	"reflect"
@@ -569,10 +570,19 @@ func checkQuota(quota Quota) error {
 // windowSeconds renders a window for the policy header, where a window shorter
 // than a second still has to be described as one.
 func windowSeconds(window time.Duration) int {
-	if seconds := int(window / time.Second); seconds > 0 {
+	if seconds := wholeSeconds(window / time.Second); seconds > 0 {
 		return seconds
 	}
 	return 1
+}
+
+// wholeSeconds converts a count of seconds to an int without wrapping. The
+// longest Duration is about 292 years, which is more seconds than a 32-bit int
+// holds, and a header that says a negative number of seconds is worse than one
+// that says 68 years for a wait of 292. Anything longer than a 32-bit int is
+// reported as its largest value.
+func wholeSeconds(seconds time.Duration) int {
+	return int(min(seconds, math.MaxInt32))
 }
 
 // outcome is what one quota said about one request.
@@ -798,7 +808,14 @@ func resetSeconds(reset time.Duration) int {
 	if reset <= 0 {
 		return 0
 	}
-	return int((reset + time.Second - 1) / time.Second)
+	// Rounded up by adding one to the quotient of a remainder, not by adding
+	// a second to the duration first, which wraps for a reset near the
+	// longest a Duration holds and reports it as negative.
+	seconds := reset / time.Second
+	if reset%time.Second != 0 {
+		seconds++
+	}
+	return wholeSeconds(seconds)
 }
 
 // wsMessageLimiter counts the messages one WebSocket connection sends.

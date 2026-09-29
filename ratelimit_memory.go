@@ -3,6 +3,7 @@ package muzak
 import (
 	"container/heap"
 	"context"
+	"math"
 	"sync"
 	"time"
 )
@@ -190,7 +191,11 @@ func (s *MemoryRateLimitStorage) Increment(_ context.Context, quota, key string,
 	stored := memoryKey(quota, key)
 	if counter, held := s.entries[stored]; held {
 		if now.Before(counter.expiresAt) {
-			counter.count++
+			// A count that reaches the top of an int stays there rather than
+			// wrapping to a negative one, which no limit would exceed.
+			if counter.count < math.MaxInt {
+				counter.count++
+			}
 			return counter.count, counter.expiresAt.Sub(now), nil
 		}
 		counter.count = 1

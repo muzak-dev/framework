@@ -342,7 +342,7 @@ func New(opts AppOptions, routerOpts ...RouterOption) *App {
 		tree:        radix.New[*pathEntry](),
 		entries:     make(map[string]*pathEntry),
 	}
-	app.lifecycle = &lifecycleManager{logger: Scoped(logger, ScopeServer)}
+	app.lifecycle = &lifecycleManager{logger: Scoped(logger, ScopeServer), stopTimeout: opts.ShutdownTimeout}
 	app.clientIP, app.clientIPErr = newClientIPResolver(opts.ClientIP)
 	app.ctxPool.New = func() any { return new(Context) }
 	app.installDefaultMiddleware()

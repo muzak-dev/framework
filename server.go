@@ -372,7 +372,7 @@ func (a *App) listen(ctx context.Context, runner *serverRunner) (net.Listener, e
 	}
 	listener, err := net.Listen("tcp", a.opts.Addr)
 	if err != nil {
-		return nil, errors.Join(err, a.StopLifecycle(context.WithoutCancel(ctx)))
+		return nil, errors.Join(err, a.stopAfterFailedStart(ctx))
 	}
 	server := a.newServer()
 	server.Handler = runner.handlers.track(server.Handler)
@@ -384,11 +384,20 @@ func (a *App) listen(ctx context.Context, runner *serverRunner) (net.Listener, e
 		// at once, as there was nothing to drain, and left the rest here:
 		// the socket is closed before a connection is accepted on it.
 		Scoped(a.logger, ScopeServer).Info("Shutdown was requested during start-up; not serving")
-		return nil, errors.Join(listener.Close(), a.StopLifecycle(context.WithoutCancel(ctx)))
+		return nil, errors.Join(listener.Close(), a.stopAfterFailedStart(ctx))
 	}
 	runner.http, runner.listener = server, listener
 	runner.mu.Unlock()
 	return listener, nil
+}
+
+// stopAfterFailedStart releases the lifecycle components after a run that got
+// no further than starting them. Nothing else bounds this, since no shutdown
+// deadline is running, so it takes the one a start-up failure does.
+func (a *App) stopAfterFailedStart(ctx context.Context) error {
+	stop, cancel := a.lifecycle.failedStartContext(ctx)
+	defer cancel()
+	return a.StopLifecycle(stop)
 }
 
 // stopWasRequested reports whether Shutdown has been called on this runner.

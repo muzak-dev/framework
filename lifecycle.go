@@ -43,8 +43,16 @@ type Lifecycle interface {
 	// During [App.Shutdown] the context expires with what is left of
 	// [ServerOptions.ShutdownTimeout], or one second after Stop is called if
 	// that is later, and a Stop that honours it keeps the shutdown within
-	// its bound. See App.Shutdown for the one case in which a handler may
-	// still be running when Stop is called.
+	// its bound. A start-up that failed, or a run whose socket could not be
+	// opened, stops the components that did start with a context that
+	// expires after the whole of [ServerOptions.ShutdownTimeout], and never
+	// sooner than one second. See App.Shutdown for the one case in which a
+	// handler may still be running when Stop is called.
+	//
+	// Every component is stopped at once, in no particular order, so Stop
+	// must not rely on another component still being open: a consumer that
+	// flushes into a database pool should own the pool, or be one component
+	// with it, rather than expect it to outlive its own Stop.
 	Stop(ctx context.Context) error
 }
 
@@ -165,15 +173,36 @@ type lifecycleManager struct {
 	components []Lifecycle
 	logger     *slog.Logger
 
+	// stopTimeout bounds the release of the components after a start-up that
+	// failed, which no caller's deadline covers: it is [ServerOptions.ShutdownTimeout]
+	// when that is set, and zero, no bound, when it was disabled on purpose.
+	stopTimeout time.Duration
+
 	mu      sync.Mutex
 	started []Lifecycle
 	running bool
+	// attempt is the start in progress, so that a second Start waits for it
+	// rather than reporting success while the components are still coming up.
+	attempt *startAttempt
+	// generation counts the Stop calls, which is how a Start that a Stop
+	// overtook finds out that nothing is left to own what it started.
+	generation uint64
 	// cancel ends the context the components were started with. It is kept
 	// until Stop rather than released when Start returns, because a component
 	// that hands its context to a background worker would otherwise have that
 	// worker cancelled during boot.
 	cancel context.CancelFunc
 }
+
+// startAttempt is one pass of Start, shared with any Start that arrives
+// while it runs.
+type startAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+// errStoppedWhileStarting is what a Start returns when a Stop overtook it.
+var errStoppedWhileStarting = errors.New("lifecycle was stopped while its components were starting")
 
 // componentResult carries the outcome of one component's start.
 type componentResult struct {
@@ -191,6 +220,18 @@ type componentResult struct {
 // reported together rather than one per attempt.
 func (m *lifecycleManager) Start(ctx context.Context) error {
 	m.mu.Lock()
+	// A Start that arrives while another is still running waits for it and
+	// reports its outcome. Returning at once would tell a test harness that
+	// the components are ready while a database pool is still dialling.
+	if attempt := m.attempt; attempt != nil {
+		m.mu.Unlock()
+		select {
+		case <-attempt.done:
+			return attempt.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if m.running || len(m.components) == 0 {
 		m.mu.Unlock()
 		return nil
@@ -198,7 +239,24 @@ func (m *lifecycleManager) Start(ctx context.Context) error {
 	// Claiming the running flag up front makes a concurrent Start a no-op
 	// rather than a second pass over the same components.
 	m.running = true
+	attempt := &startAttempt{done: make(chan struct{})}
+	m.attempt = attempt
+	generation := m.generation
 	m.mu.Unlock()
+
+	err := m.start(ctx, generation)
+
+	m.mu.Lock()
+	m.attempt = nil
+	attempt.err = err
+	m.mu.Unlock()
+	close(attempt.done)
+	return err
+}
+
+// start is the body of Start, run by the one caller that claimed it.
+// generation is the Stop count when it was claimed.
+func (m *lifecycleManager) start(ctx context.Context, generation uint64) error {
 	names := make([]string, len(m.components))
 	for i, c := range m.components {
 		names[i] = c.Name()
@@ -242,6 +300,17 @@ func (m *lifecycleManager) Start(ctx context.Context) error {
 		m.logger.Info(fmt.Sprintf("Started %q (%s)", result.component.Name(), roundDuration(result.took)))
 	}
 	m.mu.Lock()
+	if m.generation != generation {
+		// A Stop ran while the components were starting. It found nothing
+		// recorded to release, so what came up since belongs to nobody but
+		// this call, which releases it rather than leaving it running behind
+		// a lifecycle that reports itself stopped.
+		m.mu.Unlock()
+		stopCtx, cancelStop := m.failedStartContext(ctx)
+		defer cancelStop()
+		joined := errors.Join(append(failures, errStoppedWhileStarting)...)
+		return errors.Join(joined, m.stopComponents(stopCtx, started))
+	}
 	m.started = started
 	m.mu.Unlock()
 
@@ -252,7 +321,9 @@ func (m *lifecycleManager) Start(ctx context.Context) error {
 		// Every component that came up is released before returning, so a
 		// failed start-up never leaves a pool or a consumer running behind a
 		// process that is about to exit.
-		if stopErr := m.Stop(context.WithoutCancel(ctx)); stopErr != nil {
+		stopCtx, cancelStop := m.failedStartContext(ctx)
+		defer cancelStop()
+		if stopErr := m.Stop(stopCtx); stopErr != nil {
 			joined = errors.Join(joined, stopErr)
 		}
 		return joined
@@ -262,7 +333,28 @@ func (m *lifecycleManager) Start(ctx context.Context) error {
 	return nil
 }
 
+// failedStartContext derives the context the components are released with
+// after a start-up that failed. It keeps ctx's values but not its
+// cancellation, because the components must be released even when the caller
+// gave up, and it ends after the configured shutdown timeout so that a Stop
+// that never returns cannot hold a failed start-up, and the process that would
+// otherwise exit, forever. As during a shutdown, it is never shorter than
+// [lifecycleStopFloor], and a shutdown timeout disabled on purpose leaves it
+// without a deadline.
+func (m *lifecycleManager) failedStartContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	stop := context.WithoutCancel(ctx)
+	if m.stopTimeout <= 0 {
+		return stop, func() {}
+	}
+	return context.WithTimeout(stop, max(m.stopTimeout, lifecycleStopFloor))
+}
+
 // Stop releases every component that was started, in parallel.
+//
+// The components are stopped concurrently, with no order between them, so a
+// component must not need another one to still be open in its Stop: a consumer
+// that flushes into a database pool, for one, should be a single component
+// that owns both, or should not share the pool with the other.
 //
 // It is called after the HTTP server has drained its in-flight requests, not
 // before: pulling a database connection out from under a request that is still
@@ -275,6 +367,7 @@ func (m *lifecycleManager) Stop(ctx context.Context) error {
 	components := m.started
 	m.started = nil
 	m.running = false
+	m.generation++
 	cancel := m.cancel
 	m.cancel = nil
 	m.mu.Unlock()
@@ -284,6 +377,11 @@ func (m *lifecycleManager) Stop(ctx context.Context) error {
 		defer cancel()
 	}
 
+	return m.stopComponents(ctx, components)
+}
+
+// stopComponents stops components in parallel and reports what failed.
+func (m *lifecycleManager) stopComponents(ctx context.Context, components []Lifecycle) error {
 	if len(components) == 0 {
 		return nil
 	}
@@ -372,7 +470,11 @@ func roundDuration(d time.Duration) time.Duration {
 // when it serves the app through httptest, and pair it with
 // [App.StopLifecycle].
 //
-// Starting twice is a no-op, so it is safe to call defensively.
+// Starting twice is a no-op, so it is safe to call defensively. A call made
+// while another is still starting the components waits for it and reports the
+// same outcome, so a return always means the components are ready. A
+// [App.StopLifecycle] that overtakes a start makes it release what it had
+// started and return an error.
 func (a *App) StartLifecycle(ctx context.Context) error {
 	if err := a.Build(); err != nil {
 		return err

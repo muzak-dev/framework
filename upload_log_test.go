@@ -21,7 +21,7 @@ func TestMalformedFormBodyIsNotLogged(t *testing.T) {
 		S string `form:"s" required:"false"`
 	}) (Empty, error) {
 		return Empty{}, nil
-	})
+	}, MaxBodySize(4<<20)) // over the megabyte header below, which must reach the parser
 	built := mustBuild(t, app)
 
 	for _, tc := range []struct {

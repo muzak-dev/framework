@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"sort"
@@ -618,10 +619,13 @@ func quality(parameters string) float64 {
 			continue
 		}
 		q, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		if err != nil {
+		if err != nil || math.IsNaN(q) {
 			return 1
 		}
-		return q
+		// ParseFloat also reads infinities and values past one. A quality is
+		// at most one, and one that claimed more would outrank every honest
+		// range in the header. A negative one is a refusal, as zero is.
+		return max(min(q, 1), 0)
 	}
 	return 1
 }

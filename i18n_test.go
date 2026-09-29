@@ -546,6 +546,16 @@ func TestQualityParsing(t *testing.T) {
 		"charset=utf-8": 1,
 		"q=nonsense":    1,
 		"level=1;q=0":   0,
+		// ParseFloat reads these, and none is a quality: NaN cannot be
+		// ordered, and an infinity or an over-large value would outrank every
+		// honest one. Beyond one is one; unreadable is one, as before.
+		"q=NaN":  1,
+		"q=Inf":  1,
+		"q=+Inf": 1,
+		"q=1e9":  1,
+		"q=7":    1,
+		"q=-Inf": 0,
+		"q=-1":   0,
 	}
 	for parameters, want := range cases {
 		if got := quality(parameters); got != want {

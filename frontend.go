@@ -658,16 +658,26 @@ func (f *frontend) write(c *Context, files fs.FS, name string, status int) {
 	}
 
 	content, ok := file.(io.ReadSeeker)
+	// stream is set instead of content for a file that cannot seek and is too
+	// large to hold, which is sent as it is read.
+	var stream io.Reader
+	var buffered int
 	if !ok {
-		// A filesystem whose files cannot seek still has to answer, so the
-		// file is read into memory to give ServeContent something to work
-		// with. Frontend assets are small enough for that to be reasonable.
-		buffered, err := io.ReadAll(file)
+		// A filesystem whose files cannot seek still has to answer, so a file
+		// is read into memory to give ServeContent something to work with, up
+		// to a bound. Past it the file is streamed, which loses range and
+		// conditional requests but not the response: reading a whole file of
+		// any size into memory for every request is a way to exhaust it.
+		head, err := io.ReadAll(io.LimitReader(file, maxBufferedFrontendFile+1))
 		if err != nil {
 			http.Error(c.w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
-		content = bytes.NewReader(buffered)
+		if len(head) <= maxBufferedFrontendFile {
+			content = bytes.NewReader(head)
+		} else {
+			stream, buffered = io.MultiReader(bytes.NewReader(head), file), len(head)
+		}
 	}
 
 	header := c.w.Header()
@@ -684,6 +694,10 @@ func (f *frontend) write(c *Context, files fs.FS, name string, status int) {
 		header.Add("Content-Security-Policy", "sandbox")
 	}
 
+	if stream != nil {
+		f.writeStream(c, stream, info, buffered, status)
+		return
+	}
 	if status != http.StatusOK {
 		// ServeContent always writes 200, and it sets its headers as it does,
 		// so writing the status first would send the body with none of them.
@@ -698,6 +712,35 @@ func (f *frontend) write(c *Context, files fs.FS, name string, status int) {
 	// ServeContent answers a range request, and turns If-Modified-Since into a
 	// 304 where the filesystem records a modification time.
 	http.ServeContent(c.w, c.r, name, info.ModTime(), content)
+}
+
+// maxBufferedFrontendFile is the largest file, from a filesystem whose files
+// cannot seek, that is read into memory to be served; a larger one is streamed.
+const maxBufferedFrontendFile = 8 << 20
+
+// writeStream sends a file that cannot seek and was too large to buffer.
+// buffered is how much of it has already been read, which is what tells
+// whether the size the filesystem reported can be trusted as a Content-Length.
+func (f *frontend) writeStream(c *Context, stream io.Reader, info fs.FileInfo, buffered, status int) {
+	header := c.w.Header()
+	sized := info.Size() > int64(buffered)
+	if sized {
+		header.Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	}
+	if modified := info.ModTime(); !modified.IsZero() && status == http.StatusOK {
+		header.Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
+	}
+	c.w.WriteHeader(status)
+	if c.r.Method == http.MethodHead {
+		return
+	}
+	if _, err := io.Copy(c.w, stream); err != nil && !sized {
+		// Without a Content-Length a body that stops early looks complete to
+		// the client, so the connection is ended instead.
+		c.logger.ErrorContext(c.Context(), "muzak: a frontend file could not be read to the end",
+			slog.String("error", err.Error()))
+		abortStartedResponse(c.w)
+	}
 }
 
 // contentTypeFor names the media type of a file from its extension, and never

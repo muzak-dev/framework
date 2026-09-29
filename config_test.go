@@ -198,6 +198,42 @@ func TestParseEnv(t *testing.T) {
 	}
 }
 
+func TestParseEnvQuotedValueWithTrailingComment(t *testing.T) {
+	t.Parallel()
+	input := strings.Join([]string{
+		`DOUBLE="v" # note`,
+		`SINGLE='v' # note`,
+		"TABBED=\"v\"\t# note",
+		`HASH="a # b" # c`,
+		`ESC="say \"hi\" # x" # c`,
+		`LITERAL='a \n b' # c`,
+		`EMPTY="" # c`,
+		`STRAY="a" "b"`,
+	}, "\n")
+	got, err := parseEnv(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("parseEnv = %v", err)
+	}
+	want := map[string]string{
+		"DOUBLE": "v", "SINGLE": "v", "TABBED": "v", "HASH": "a # b",
+		"ESC": `say "hi" # x`, "LITERAL": `a \n b`, "EMPTY": "",
+		// Read as before: up to the last quote.
+		"STRAY": `a" "b`,
+	}
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Errorf("%s = %q, want %q", key, got[key], wantValue)
+		}
+	}
+	// A comment needs whitespace before it, and text after the closing quote
+	// that is not a comment is still an unclosed value.
+	for _, bad := range []string{`K="v"# c`, `K="v" x`, `K='v' x`} {
+		if _, err := parseEnv(strings.NewReader(bad + "\n")); err == nil {
+			t.Errorf("parseEnv(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
 func TestParseEnvErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

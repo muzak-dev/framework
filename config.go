@@ -486,15 +486,16 @@ func envKeyShown(key string) bool {
 }
 
 // parseEnvValue unwraps a quoted value and strips a trailing comment from an
-// unquoted one.
+// unquoted one. A quoted value may be followed by a comment as well, after
+// whitespace, which is how every dotenv loader reads `KEY="value" # note`.
 func parseEnvValue(raw string) (string, error) {
 	if len(raw) >= 2 {
 		quote := raw[0]
 		if quote == '"' || quote == '\'' {
-			if raw[len(raw)-1] != quote {
+			inner, ok := quotedValue(raw, quote)
+			if !ok {
 				return "", errors.New("the value opens with a quote that is never closed")
 			}
-			inner := raw[1 : len(raw)-1]
 			if quote == '\'' {
 				// Single quotes are literal, as in a POSIX shell.
 				return inner, nil
@@ -506,4 +507,30 @@ func parseEnvValue(raw string) (string, error) {
 		raw = strings.TrimSpace(raw[:i])
 	}
 	return raw, nil
+}
+
+// quotedValue returns what lies between the opening quote of raw and the quote
+// that closes it, and whether there was one. The closing quote is the first
+// that is not escaped, when only whitespace and a comment follow it. A value
+// that ends in the quote it opened with is read as it always was, up to that
+// last quote, so that a stray quote inside it is kept rather than refused.
+func quotedValue(raw string, quote byte) (string, bool) {
+	for i := 1; i < len(raw); i++ {
+		if raw[i] == '\\' && quote == '"' {
+			i++
+			continue
+		}
+		if raw[i] != quote {
+			continue
+		}
+		rest := raw[i+1:]
+		if trimmed := strings.TrimLeft(rest, " \t"); trimmed == "" || (trimmed != rest && trimmed[0] == '#') {
+			return raw[1:i], true
+		}
+		break
+	}
+	if raw[len(raw)-1] == quote {
+		return raw[1 : len(raw)-1], true
+	}
+	return "", false
 }

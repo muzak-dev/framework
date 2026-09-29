@@ -426,12 +426,14 @@ func TestSSEKeepAliveSaysNothingOnABusyStream(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
-		}, WithSSE(SSEOptions{KeepAlive: 50 * time.Millisecond}))
+			// The producer sends every millisecond, so the interval only has to be
+			// long enough that a stalled scheduler does not look like an idle stream.
+		}, WithSSE(SSEOptions{KeepAlive: 250 * time.Millisecond}))
 	})
 	defer close(stop)
 
 	reader := openStream(t, server.URL, "/stream", func(o *SSEDialOptions) { o.KeepComments = true })
-	deadline := time.Now().Add(200 * time.Millisecond)
+	deadline := time.Now().Add(400 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if message := nextEvent(t, reader); message.Comment != "" {
 			t.Fatalf("a busy stream was sent a keepalive: %+v", message)

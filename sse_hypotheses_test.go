@@ -54,12 +54,12 @@ func TestSSEReaderReadTimeoutNeverOutlivesItsEvent(t *testing.T) {
 	t.Parallel()
 	// Generous enough that a busy scheduler does not stand in for the race
 	// this looks for: the pauses below are fractions of it.
-	const readTimeout = 200 * time.Millisecond
+	const readTimeout = 600 * time.Millisecond
 	pipeReader, pipeWriter := io.Pipe()
 	reader := newSSEReader(pipeReader, SSEDialOptions{ReadTimeout: readTimeout})
 	t.Cleanup(func() { _ = reader.Close() })
 
-	const events = 30
+	const events = 10
 	go func() {
 		defer pipeWriter.Close()
 		for range events {

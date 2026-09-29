@@ -131,6 +131,14 @@ func wsClientConn(response *http.Response, key string, opts WSDialOptions) (*WSC
 	if response.Header.Get("Sec-WebSocket-Accept") != expected {
 		return nil, fmt.Errorf("muzak: the server's Sec-WebSocket-Accept header does not match the key that was sent")
 	}
+	if extensions := response.Header.Values("Sec-WebSocket-Extensions"); len(extensions) > 0 {
+		// RFC 6455 section 4.1: a server may answer with an extension only if
+		// the client asked for it, and this one never does. An extension
+		// changes what a frame's bits mean, and a client that read on as if it
+		// had not would be reading a conversation it does not understand.
+		return nil, fmt.Errorf("muzak: the server negotiated the extension %q, which was not offered",
+			wsShorten(strings.Join(extensions, ", ")))
+	}
 	subprotocol := response.Header.Get("Sec-WebSocket-Protocol")
 	if subprotocol != "" && !slices.Contains(opts.Subprotocols, subprotocol) {
 		// A server may only choose from what the client offered. Accepting

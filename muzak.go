@@ -242,6 +242,9 @@ type App struct {
 	logger      *slog.Logger
 	renderError ErrorRenderer
 	middleware  []Middleware
+	// userMiddleware is what [App.Use] installed, kept apart from the
+	// built-in chain because the CORS policy sits between the two.
+	userMiddleware []Middleware
 
 	tree    *radix.Tree[*pathEntry]
 	entries map[string]*pathEntry
@@ -400,7 +403,11 @@ func (a *App) installDefaultMiddleware() {
 // documentation UI and the OpenAPI document.
 //
 // Middleware installed here runs inside the built-in chain, so it already has
-// a request identifier available and is already covered by panic recovery.
+// a request identifier available and is already covered by panic recovery. It
+// also runs inside the CORS policy when one is configured: a preflight is
+// answered by the policy without reaching it, so an authenticating middleware
+// need not let OPTIONS through, and a response it writes itself, a 401 or a
+// 429, carries the Access-Control-Allow-Origin a browser needs to read it.
 // Use must be called before the application is built, whether explicitly by
 // [App.Build] or implicitly by [App.ServeHTTP], [App.Document] or a run
 // method, because the chain is assembled once. A call made afterwards panics
@@ -408,7 +415,7 @@ func (a *App) installDefaultMiddleware() {
 // uninstalled.
 func (a *App) Use(middleware ...Middleware) {
 	a.mustBeOpen("App.Use")
-	a.middleware = append(a.middleware, middleware...)
+	a.userMiddleware = append(a.userMiddleware, middleware...)
 }
 
 // Logger returns the application's logger. Derive a scoped child from it for
@@ -674,11 +681,16 @@ func anyAnswersHead(routes []*Route) bool {
 }
 
 // buildHandler wraps the router in the middleware chain and the documentation
-// routes, with cors as the innermost layer when a policy was configured.
+// routes. The built-in chain is outermost, then the CORS policy when one was
+// configured, then the middleware [App.Use] installed, so that a response one
+// of those writes itself still carries the policy's headers.
 func (a *App) buildHandler(cors Middleware) http.Handler {
 	var handler http.Handler = http.HandlerFunc(a.dispatch)
 	if !a.opts.DisableDocs {
 		handler = a.withDocs(handler)
+	}
+	for i := len(a.userMiddleware) - 1; i >= 0; i-- {
+		handler = a.userMiddleware[i](handler)
 	}
 	if cors != nil {
 		handler = cors(handler)

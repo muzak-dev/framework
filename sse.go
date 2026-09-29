@@ -875,21 +875,29 @@ func (s *sseStream) acquireFinal() {
 // It runs only when [SSEOptions.KeepAlive] asks for it, and it stops as soon
 // as the stream does.
 func (s *sseStream) keepalive(interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	// The wait is measured from the last write and not from a fixed tick. A
+	// tick that finds the last write a hair under the interval old, which is
+	// what the keepalive's own write looks like to the tick after it, would
+	// otherwise skip and leave twice the interval of silence: a keepalive
+	// asked for every 15 seconds arrived at 15, 45 and 60.
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
-		if s.lastWrite.since() < interval {
+		if idle := s.lastWrite.since(); idle < interval {
 			// The stream is busy, which is all a keepalive is there to prove.
+			// The next look is when it will have been quiet for the interval.
+			timer.Reset(interval - idle)
 			continue
 		}
 		if err := s.send(sseFrame{comment: sseKeepAliveComment}); err != nil {
 			return
 		}
+		timer.Reset(interval)
 	}
 }
 

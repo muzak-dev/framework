@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"slices"
@@ -283,6 +284,13 @@ type WSConn struct {
 	spent      int
 	spentSince time.Time
 
+	// unread is how much of the frame being read has yet to be read, or -1 when
+	// a failure left the position in the stream unknown. It is what lets the
+	// closing wait after a refusal skip to the next frame and recognise the
+	// peer's answer, and is owned by the half of the connection that holds
+	// readSem.
+	unread int64
+
 	// messages bounds how fast the peer may send, and is nil unless
 	// [WSOptions.MessageLimits] asked for a bound. It is written once, before
 	// the handler can reach the connection, and only read afterwards.
@@ -366,7 +374,7 @@ func (c *WSConn) Read(ctx context.Context) (WSMessageType, []byte, error) {
 	// a peer sustains rather than refusing the one message that crossed the
 	// line. The message itself is dropped along with the connection.
 	if status, reason := c.messages.allow(ctx); status != 0 {
-		return 0, nil, c.abort(status, reason)
+		return 0, nil, c.abortReading(status, reason)
 	}
 	return typ, payload, nil
 }
@@ -505,7 +513,9 @@ func (c *WSConn) Close(status WSStatus, reason string) error {
 		return nil //nolint:nilerr // see above
 	}
 	err := c.sendClose(status, reason)
-	c.drain()
+	if err == nil {
+		c.drain()
+	}
 	_ = c.fail(&WSCloseError{Status: status, Reason: reason})
 	return err
 }
@@ -591,8 +601,30 @@ func (c *WSConn) fail(err error) error {
 
 // abort sends a close frame for a violation this end detected and then fails
 // the connection, returning the error every later call will report.
+//
+// The transport is not closed the moment the frame is out. A peer that was
+// still sending when it was refused has data on its way, and closing a socket
+// with unread data in its receive buffer makes the kernel answer with a reset
+// instead of an orderly close, which can destroy the close frame in flight
+// before the peer has read the status it was sent. So the frame is followed by
+// the same wait a close by the handler gets; see [WSConn.linger].
+//
+// It is for a caller that does not hold the read half, and waits only if
+// nothing else is reading. A reader that finds the violation itself uses
+// [WSConn.abortReading].
 func (c *WSConn) abort(status WSStatus, reason string) error {
-	_ = c.sendClose(status, reason)
+	if c.sendClose(status, reason) == nil {
+		c.drain()
+	}
+	return c.fail(&WSCloseError{Status: status, Reason: reason})
+}
+
+// abortReading is abort for the goroutine that holds the read half, which is
+// where nearly every violation is found, and which therefore may read on.
+func (c *WSConn) abortReading(status WSStatus, reason string) error {
+	if c.sendClose(status, reason) == nil {
+		c.linger()
+	}
 	return c.fail(&WSCloseError{Status: status, Reason: reason})
 }
 
@@ -648,15 +680,18 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 	started := false
 	for frames := 0; ; frames++ {
 		if frames == wsMaxFramesPerMessage {
-			return 0, nil, c.abort(WSStatusPolicyViolation,
+			return 0, nil, c.abortReading(WSStatusPolicyViolation,
 				"too many frames arrived before a message was complete")
 		}
+		// A header cut short or refused leaves the stream somewhere inside it.
+		c.unread = -1
 		header, err := wsframe.ReadHeader(c.br)
 		if err != nil {
 			return 0, nil, c.readFailed(ctx, err)
 		}
+		c.unread = header.Length
 		if header.Masked == c.client {
-			return 0, nil, c.abort(WSStatusProtocolError, c.maskingRule())
+			return 0, nil, c.abortReading(WSStatusProtocolError, c.maskingRule())
 		}
 		if header.Opcode.IsControl() {
 			if header.Opcode != wsframe.Close {
@@ -679,11 +714,11 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 		}
 		if header.Opcode == wsframe.Continuation {
 			if !started {
-				return 0, nil, c.abort(WSStatusProtocolError, "a continuation frame arrived with no message to continue")
+				return 0, nil, c.abortReading(WSStatusProtocolError, "a continuation frame arrived with no message to continue")
 			}
 		} else {
 			if started {
-				return 0, nil, c.abort(WSStatusProtocolError, "a new message began before the previous one finished")
+				return 0, nil, c.abortReading(WSStatusProtocolError, "a new message began before the previous one finished")
 			}
 			started = true
 			typ = WSMessageType(header.Opcode)
@@ -701,7 +736,7 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 		// has arrived never exceeds the limit, so the room left is never
 		// negative and subtracting it is always exact.
 		if header.Length > c.readLimit-int64(len(message)) {
-			return 0, nil, c.abort(WSStatusMessageTooBig,
+			return 0, nil, c.abortReading(WSStatusMessageTooBig,
 				"the message exceeds the "+strconv.FormatInt(c.readLimit, 10)+" byte limit for this connection")
 		}
 		if message, err = c.readPayload(ctx, header, message); err != nil {
@@ -712,7 +747,7 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 		}
 	}
 	if typ == WSText && !utf8.Valid(message) {
-		return 0, nil, c.abort(WSStatusInvalidFramePayload, "the text message is not valid UTF-8")
+		return 0, nil, c.abortReading(WSStatusInvalidFramePayload, "the text message is not valid UTF-8")
 	}
 	return typ, message, nil
 }
@@ -727,7 +762,7 @@ func (c *WSConn) chargeFrame() error {
 	}
 	c.spent++
 	if c.spent > wsMaxIdleFrames {
-		return c.abort(WSStatusPolicyViolation, "too many frames arrived that carried no message")
+		return c.abortReading(WSStatusPolicyViolation, "too many frames arrived that carried no message")
 	}
 	return nil
 }
@@ -745,12 +780,14 @@ func (c *WSConn) readPayload(ctx context.Context, header wsframe.Header, message
 		start := len(message)
 		message = slices.Grow(message, chunk)[:start+chunk]
 		if _, err := io.ReadFull(c.br, message[start:]); err != nil {
+			c.unread = -1
 			return nil, c.readFailed(ctx, err)
 		}
 		if header.Masked {
 			position = wsframe.Mask(header.Mask, position, message[start:])
 		}
 		remaining -= int64(chunk)
+		c.unread = remaining
 	}
 	return message, nil
 }
@@ -812,8 +849,10 @@ func (c *WSConn) maskingRule() string {
 func (c *WSConn) handleControl(ctx context.Context, header wsframe.Header) error {
 	payload := c.control[:header.Length]
 	if _, err := io.ReadFull(c.br, payload); err != nil {
+		c.unread = -1
 		return c.readFailed(ctx, err)
 	}
+	c.unread = 0
 	if header.Masked {
 		wsframe.Mask(header.Mask, 0, payload)
 	}
@@ -852,7 +891,7 @@ func (c *WSConn) handleControl(ctx context.Context, header wsframe.Header) error
 func (c *WSConn) readFailed(ctx context.Context, err error) error {
 	var protocol *wsframe.Error
 	if errors.As(err, &protocol) {
-		return c.abort(WSStatus(protocol.Status), protocol.Reason)
+		return c.abortReading(WSStatus(protocol.Status), protocol.Reason)
 	}
 	if ctxErr := wsContextFailure(ctx, err); ctxErr != nil {
 		return c.fail(fmt.Errorf("muzak: reading a websocket message: %w", ctxErr))
@@ -861,7 +900,7 @@ func (c *WSConn) readFailed(ctx context.Context, err error) error {
 		// The caller's deadline was ruled out above, so the only one left is
 		// the time a message is given once it has begun. A peer that has not
 		// finished sending one by now is not going to.
-		return c.abort(WSStatusPolicyViolation, wsReadTimeoutReason)
+		return c.abortReading(WSStatusPolicyViolation, wsReadTimeoutReason)
 	}
 	// The connection ended without a close frame, which is what a dropped
 	// network or a peer that simply stopped looks like.
@@ -1300,31 +1339,116 @@ func (c *WSConn) stopWatching() {
 	}
 }
 
-// drain reads what the peer has left to say after a close frame was sent, so
-// that the transport is closed on an empty receive buffer and the peer sees
-// the close rather than a reset connection.
-//
-// It gives up immediately when another goroutine is reading, because closing
-// the transport will wake that goroutine anyway, and it never waits longer
-// than the close grace period.
+// wsCloseDrainLimit bounds how much a closing connection reads from a peer that
+// has not stopped sending, which is what keeps a hostile peer from making a
+// refusal cost more than a megabyte of reading, on top of the grace period
+// that bounds how long it may take.
+const wsCloseDrainLimit = 1 << 20
+
+// drain is [WSConn.linger] for a caller that does not hold the read half. It
+// gives up immediately when another goroutine is reading, because closing the
+// transport will wake that goroutine anyway.
 func (c *WSConn) drain() {
-	if c.closeGrace <= 0 || c.nc == nil {
-		return
-	}
 	select {
 	case c.readSem <- struct{}{}:
 		defer c.release(c.readSem)
 	default:
 		return
 	}
+	c.linger()
+}
+
+// linger is what a connection does between sending its close frame and closing
+// the transport. The read half must be held.
+//
+// The transport cannot simply be closed. A peer that was sending when it was
+// refused has bytes in flight, and a socket closed with unread data in its
+// receive buffer sends a reset, which the peer's kernel may act on before the
+// application has read the close frame that came ahead of it. So this end stops
+// sending, which the peer sees as the end of the stream and can answer, and
+// reads what arrives until the peer's own close frame, its end of the stream,
+// or a bound is reached, dropping every byte as it comes so that none of it is
+// held.
+//
+// Two bounds apply and neither can be extended by the peer: the read deadline
+// is set once, to the close grace period, and no more than
+// [wsCloseDrainLimit] bytes are read. A peer that answers promptly is not
+// held up by either, because its close frame ends the wait.
+func (c *WSConn) linger() {
+	if c.closeGrace <= 0 || c.nc == nil {
+		return
+	}
+	// Both the plain and the TLS connection can shut down their write side, the
+	// latter by sending its close_notify alert. A transport that cannot is left
+	// as it is: the wait below still keeps the receive buffer empty.
+	if half, ok := c.nc.(interface{ CloseWrite() error }); ok {
+		_ = c.nc.SetWriteDeadline(time.Now().Add(c.closeTimeout()))
+		_ = half.CloseWrite()
+	}
 	_ = c.nc.SetReadDeadline(time.Now().Add(c.closeGrace))
-	for {
-		header, err := wsframe.ReadHeader(c.br)
-		if err != nil || header.Opcode == wsframe.Close {
+	c.discardInbound()
+}
+
+// wsHeaderSize is how many bytes a frame's header took on the wire, which a
+// header that was read is exact about because the length must be written in
+// its shortest form.
+func wsHeaderSize(header wsframe.Header) int64 {
+	size := int64(2)
+	switch {
+	case header.Length > math.MaxUint16:
+		size += 8
+	case header.Length >= 126:
+		size += 2
+	}
+	if header.Masked {
+		size += 4
+	}
+	return size
+}
+
+// discardInbound reads and drops what the peer sends until its close frame, the
+// end of its stream, a deadline or [wsCloseDrainLimit] bytes.
+//
+// It follows the frames for as long as it can, which is how the peer's answer is
+// recognised, starting from wherever the failure left the stream. A stream that
+// stops making sense, or whose position is not known, is dropped as raw bytes
+// instead, which costs only the ability to spot a close frame.
+func (c *WSConn) discardInbound() {
+	budget := int64(wsCloseDrainLimit)
+	skip := c.unread
+	for budget > 0 {
+		switch {
+		case skip < 0:
+			_, _ = io.CopyN(io.Discard, c.br, budget)
 			return
-		}
-		if _, err := io.CopyN(io.Discard, c.br, header.Length); err != nil {
-			return
+		case skip > 0:
+			n, err := io.CopyN(io.Discard, c.br, min(skip, budget))
+			budget -= n
+			skip -= n
+			if err != nil {
+				return
+			}
+		default:
+			header, err := wsframe.ReadHeader(c.br)
+			var protocol *wsframe.Error
+			if errors.As(err, &protocol) {
+				// How much of it was read is not known, and the rest is
+				// charged in bulk below.
+				budget -= wsframe.MaxHeaderSize
+				skip = -1
+				continue
+			}
+			if err != nil {
+				return
+			}
+			budget -= wsHeaderSize(header)
+			if header.Opcode == wsframe.Close {
+				// Its payload is read too, so that not even the peer's goodbye
+				// is left unread when the transport is closed.
+				_, _ = io.CopyN(io.Discard, c.br, header.Length)
+				return
+			}
+			skip = header.Length
 		}
 	}
 }

@@ -172,8 +172,10 @@ type WSOptions struct {
 	// CloseGracePeriod is how long a closing connection waits for the peer's
 	// close frame before the transport is torn down, defaulting to
 	// [DefaultWSCloseGracePeriod]. Waiting briefly is what lets the peer read
-	// the close frame instead of finding the connection reset. A negative
-	// value closes immediately.
+	// the close frame instead of finding the connection reset: the server
+	// stops sending, and reads and drops what the peer is still sending, at
+	// most 1 MiB of it, until the peer's close frame, the end of its stream or
+	// this period, whichever comes first. A negative value closes immediately.
 	CloseGracePeriod time.Duration
 
 	// PingInterval is how often the server pings a connection, defaulting to
@@ -682,7 +684,8 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 		// unaccounted for; there is no response left to refuse it with by now.
 		// It is not waited on for a close frame of its own, because nothing
 		// counts it while it lingers.
-		_ = conn.abort(WSStatusGoingAway, "the server is shutting down")
+		_ = conn.sendClose(WSStatusGoingAway, "the server is shutting down")
+		_ = conn.fail(&WSCloseError{Status: WSStatusGoingAway, Reason: "the server is shutting down"})
 		return nil, errWSShuttingDown
 	}
 	if cfg.messages != nil {

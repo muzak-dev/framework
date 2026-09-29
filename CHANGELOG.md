@@ -1190,6 +1190,24 @@ regression test. Several fixes tighten a default; each one is listed under
   still drains first: it is refused if it carries a body, and nothing may be
   left to be taken for frames.
 
+- **A peer still sending when a WebSocket connection is refused reads the
+  close status instead of a reset.** A message over the read limit is answered
+  with a close frame `1009`, but a client that kept sending, a message still
+  streaming in, often saw the connection reset (`1006`) and never read it: the
+  server closed the socket with unread data in its receive buffer, which makes
+  the kernel send a reset and drop the close frame in flight. Seen on Cloud
+  Run. It was the same after every close the server started on finding a
+  fault, not only `1009`: `1002`, `1003`, `1007` and `1008` too. Once the close
+  frame is out, the server now stops sending (a half-close, or the `close_notify`
+  alert on TLS), keeps reading and dropping what arrives until the peer's close
+  frame, the end of its stream, `CloseGracePeriod` or 1 MiB, whichever is
+  first, and only then closes the transport. Nothing read is kept, a peer that
+  answers the close frame promptly is not made to wait, and one that never
+  stops is cut off at the grace period as before. A close the handler starts
+  with `Close` gets the same half-close. In a test that sends a message over
+  the limit and keeps sending, the `1009` reached the client in 0 of 50 runs
+  before and 50 of 50 after.
+
 ### Documentation
 
 - **The symbolic-link guarantee holds for `Dir` and for the `FS` of an

@@ -599,7 +599,7 @@
 //
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs
 // are derived from the registrations themselves: path templates, tags,
-// summaries, the schemas of the In and Out types, declared statuses and the
+// categories, titles, summaries, the schemas of the In and Out types, declared statuses and the
 // entries added by [WithResponseDoc] and [WithResponseModel]. The return type
 // describes the response a route succeeds with; every other status code it
 // answers is described by one of those two, either as the standard error
@@ -668,6 +668,26 @@
 // only protected by the guard it also has. An application that declares none
 // emits none, and a scheme, a scope or a requirement that cannot be described is
 // reported when the application is built.
+//
+// With a hundred routers a list of tags is too long to read, so a router can be
+// filed under a category as well, and a route can be given a human title to be
+// listed by in place of its path:
+//
+//	billing := muzak.NewRouter(muzak.WithCategory("Billing"))
+//	billing.Get("/users/{id}", profile, muzak.Title("Fetch User Profile"))
+//	billing.Get("/reports", reports, muzak.WithCategory("Reports"))
+//
+// A category is not a tag, and tags group operations exactly as before. A
+// router has one category, which every route beneath it inherits; several
+// routers may share one; and a router included into another, or a route itself,
+// replaces the category it would have inherited, where tags would add up. Both
+// are emitted as vendor extensions on the operation, "x-category" and
+// "x-title", and only where one was set, so an application that sets neither
+// publishes the same document as before. There is no list of categories in the
+// document: a tool orders them as it first meets them among the operations,
+// which the document lists in sorted path order rather than the order they were
+// registered in. A category of at most 64 characters and a title of at most 120
+// must be one line of text, which is checked when the application is built.
 //
 // [AppOptions.DocsPath] and [AppOptions.OpenAPIPath] decide where the two are
 // served, and [AppOptions.DisableDocs] turns both off for a deployment that

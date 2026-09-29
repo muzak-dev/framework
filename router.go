@@ -298,9 +298,10 @@ func Title(title string) RouteOption {
 //
 // The category is written into the OpenAPI document as the operation's
 // "x-category" extension, and nothing else in the document mentions it: there
-// is no list of categories, so the order a documentation tool shows them in is
-// the order they are first met among the operations, which is the order the
-// routes were registered. It is checked when the application is built: after
+// is no list of categories, so a tool orders them as it meets them among the
+// operations. The document lists its paths in sorted order, so that is the
+// order a category is first met in, and not the order the routers or routes
+// were registered in. It is checked when the application is built: after
 // surrounding whitespace is trimmed it must not be empty, must be valid UTF-8
 // of at most 64 characters, and must hold no control character, line break or
 // bidirectional control. Two spellings that differ in case are two categories.
@@ -597,7 +598,7 @@ func (r *Router) mustBeOpen(call string) {
 
 // NewRouter returns a router configured by the given options.
 //
-// Options that apply to a whole subtree, namely [WithTags],
+// Options that apply to a whole subtree, namely [WithTags], [WithCategory],
 // [WithDependencies], [Needs], [WithResponseDoc] and [WithResponseModel], take
 // effect for every route registered on this router and on any router included
 // into it.

@@ -71,6 +71,32 @@ regression test. Several fixes tighten a default; each one is listed under
   protected against rebinding by it, and an application that wants every
   request held to its own names checks `Host` in a middleware.
 
+- **File a router under a category, and give a route a title, so a large API
+  stays readable in the documentation.** With a hundred routers the tag tree in
+  a docs sidebar is unreadable, and a tag is the wrong tool: it names what an
+  operation is about, and several add up. `muzak.WithCategory("Billing")` files
+  a router, or a single route, under one heading. It is a `SharedOption`, so it
+  works at both levels: every route beneath a router inherits its category, many
+  routers may share one, and a router included into another, or a route itself,
+  replaces the category it would have inherited, since a category is a single
+  value and never a list. `muzak.Title("Fetch User Profile")` is a `RouteOption`
+  next to `Summary` giving a route a human name, for a documentation tool to
+  list in place of the endpoint's path. Both reach the OpenAPI document as
+  vendor extensions on the operation, `"x-category"` and `"x-title"`, emitted
+  only where one was set, and are exposed as `Route.Category` and `Route.Title`;
+  generic, WebSocket and event stream routes carry them alike. A category is not
+  a tag, and tags behave exactly as before. **The document says only that.** It
+  has no list of categories, so a tool orders them as it first meets them among
+  the operations, which the document lists in sorted path order, not in the
+  order routers were registered. Nothing changes for an application that sets
+  neither: the document carries neither key. Both are checked when the
+  application is built, and the error names the route or the router (by its
+  mount prefix): after trimming surrounding whitespace the value must not be
+  empty, must be valid UTF-8 of at most 64 characters for a category and 120 for
+  a title, and must hold no control character, line break or bidirectional
+  control. Titles need not be unique. The `example/` application now files its
+  routers under categories and titles some routes.
+
 ### Changed
 
 - **A JSON body sent without a `Content-Type` is refused with 415.** Accepting

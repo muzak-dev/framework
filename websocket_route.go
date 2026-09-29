@@ -243,12 +243,36 @@ type WSOptions struct {
 	// handshake with more than one Origin header is refused as malformed. An
 	// entry of this list is compared with the value exactly as it arrived.
 	//
+	// The server's own origin is any whose host is the request's Host, which is
+	// whatever the client wrote there. That is enough for a browser that
+	// reached the server by its name, and it is not for one that was pointed at
+	// it by somebody else's: in a DNS-rebinding attack a page served from the
+	// attacker's name, made to resolve to this server, sends that name as both
+	// Origin and Host, and reads as same-origin. A server that answers to a
+	// known set of names, or that listens on a loopback or private address
+	// where such a page is a real threat, lists them in AllowedHosts.
+	//
 	// The check exists because a WebSocket handshake is not subject to the
 	// same-origin policy and is not preflighted: without it, any page on the
 	// internet could open an authenticated connection to this server from a
 	// visitor's browser, cookies and all. Note that [AppOptions.CORS] has no
 	// bearing on it, for exactly that reason.
 	AllowedOrigins []string
+
+	// AllowedHosts lists the Host header values this route answers to, such as
+	// "app.example.com" or "app.example.com:8443", compared without regard to
+	// case and with any port written as the client wrote it. It is unset by
+	// default, which leaves the server's own origin to be any whose host is the
+	// request's own Host, as described on [WSOptions.AllowedOrigins].
+	//
+	// When it is set, a handshake counts as same-origin only if its Host is
+	// listed, so an Origin that merely repeats a Host the server was never
+	// meant to serve, which is how DNS rebinding presents itself, is refused
+	// with 403 unless AllowedOrigins or AllowOriginFunc names it. A handshake
+	// with no Origin header is not affected, since only a browser sends one.
+	// This bounds the WebSocket handshake only: an application that wants every
+	// request held to its own names checks Host in a middleware as well.
+	AllowedHosts []string
 
 	// AllowOriginFunc decides dynamically whether an origin may connect. It is
 	// consulted only for an origin that AllowedOrigins and the same-origin rule
@@ -295,6 +319,9 @@ func (o WSOptions) overlay(over WSOptions) WSOptions {
 	}
 	if over.MessageLimits != nil {
 		o.MessageLimits = over.MessageLimits
+	}
+	if over.AllowedHosts != nil {
+		o.AllowedHosts = over.AllowedHosts
 	}
 	if over.Subprotocols != nil {
 		o.Subprotocols = over.Subprotocols
@@ -517,10 +544,13 @@ func (rt *Route) resolveWebSocket(in inherited) error {
 //
 // Only the host is compared for the same-origin case, not the scheme, because
 // a server behind a proxy that terminates TLS sees a plain request and cannot
-// tell which scheme the browser used.
+// tell which scheme the browser used. The host is compared with the request's
+// Host, which the client chose, so a route that lists AllowedHosts trusts only
+// the ones it names.
 func wsOriginPolicy(opts WSOptions) func(*http.Request, string) bool {
 	allowAny := slices.Contains(opts.AllowedOrigins, "*")
 	allowed := opts.AllowedOrigins
+	hosts := opts.AllowedHosts
 	dynamic := opts.AllowOriginFunc
 	return func(r *http.Request, origin string) bool {
 		if allowAny {
@@ -531,7 +561,8 @@ func wsOriginPolicy(opts WSOptions) func(*http.Request, string) bool {
 				return true
 			}
 		}
-		if host, ok := wsOriginHost(origin); ok && strings.EqualFold(host, r.Host) {
+		if host, ok := wsOriginHost(origin); ok && strings.EqualFold(host, r.Host) &&
+			(len(hosts) == 0 || slices.ContainsFunc(hosts, func(h string) bool { return strings.EqualFold(h, r.Host) })) {
 			return true
 		}
 		return dynamic != nil && dynamic(r, origin)

@@ -148,6 +148,10 @@ var headersNotBound = map[string]bool{
 	"Trailer":           true,
 	"Upgrade":           true,
 	"Cookie":            true,
+	// The transport asks for gzip unless one is set, and decompresses the
+	// answer only when it asked itself, so a value of the input's would
+	// either arrive when left out or hand the decoder compressed bytes.
+	"Accept-Encoding": true,
 }
 
 // compileParams compiles the path, query, header and cookie fields.
@@ -470,6 +474,12 @@ func (p *callPlan) encode(v reflect.Value, cfg *callConfig) (*encodedRequest, er
 		}
 	}
 	out.query = strings.Join(query, "&")
+	if _, set := out.header[userAgent]; p.headers[userAgent] && !set {
+		// net/http writes a User-Agent of its own unless the header is
+		// present and empty, which it then leaves out, so one the input left
+		// out arrives absent, as it was sent.
+		out.header[userAgent] = []string{""}
+	}
 	if len(cookies) > 0 {
 		out.header.Set("Cookie", strings.Join(cookies, "; "))
 	}
@@ -583,6 +593,9 @@ func headerValueProblem(text string) string {
 	return ""
 }
 
+// userAgent is the header net/http writes a value of its own into.
+const userAgent = "User-Agent"
+
 // headerValue writes the texts of a header field as the one line its binder
 // reads back.
 //
@@ -600,6 +613,9 @@ func (p *callPlan) headerValue(c *callParam, texts []string) (string, error) {
 			}
 			return "", refuse(p.method, p.path, "the header %s %s", c.name, why)
 		}
+	}
+	if c.name == userAgent && texts[0] == "" {
+		return "", refuse(p.method, p.path, "the header User-Agent is empty, and net/http leaves an empty one out, so it would arrive absent")
 	}
 	if !c.isSlice {
 		return texts[0], nil

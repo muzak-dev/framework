@@ -112,7 +112,10 @@ func ValidateFirst() CallOption {
 // the default one or problem details. A failure to reach the service is
 // returned as [Client.Do] returns it. The call is retried, redirected and
 // bounded as every request the client sends; a POST is retried only with an
-// Idempotency-Key, which [CallHeader] adds.
+// Idempotency-Key, which [CallHeader] adds. The headers
+// [ClientOptions.Propagate] adds are added after the input is written, so a
+// field bound to one of them, such as X-Request-Id, and left out receives
+// the propagated value.
 func (ep Endpoint[In, Out]) Call(ctx context.Context, c *Client, in In, opts ...CallOption) (Out, error) {
 	var zero Out
 	def := ep.def
@@ -182,7 +185,9 @@ func (p *callPlan) request(ctx context.Context, base *url.URL, encoded *encodedR
 	if encoded.contentType != "" {
 		req.Header.Set("Content-Type", encoded.contentType)
 	}
-	if req.Header.Get("Accept") == "" && p.output == outputEncoded && !p.html && !p.empty {
+	// Not when the input binds Accept itself: one it left out must arrive
+	// absent, as it was sent.
+	if !p.headers["Accept"] && req.Header.Get("Accept") == "" && p.output == outputEncoded && !p.html && !p.empty {
 		req.Header.Set("Accept", "application/json")
 	}
 	if p.output == outputRedirect {

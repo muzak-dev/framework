@@ -263,6 +263,56 @@ func TestEndpointReportsEveryReservedHeader(t *testing.T) {
 	}
 }
 
+func TestEndpointLeavesAnAcceptTheInputBindsAsItWasSent(t *testing.T) {
+	t.Parallel()
+	type in struct {
+		Accept *string `header:"Accept"`
+	}
+	type out struct {
+		Accept *string `json:"accept"`
+	}
+	ep := NewEndpoint[in, out](http.MethodGet, "/accept")
+	client := endpointServer(t, func(app *App) {
+		app.Implement(ep, func(_ *Context, v in) (out, error) { return out{Accept: v.Accept}, nil })
+	})
+	got, err := ep.Call(context.Background(), client, in{})
+	if err != nil || got.Accept != nil {
+		t.Fatalf("an Accept left out arrived as %v, %v", got.Accept, err)
+	}
+	text := "text/csv"
+	got, err = ep.Call(context.Background(), client, in{Accept: &text})
+	if err != nil || got.Accept == nil || *got.Accept != text {
+		t.Fatalf("got %v, %v", got.Accept, err)
+	}
+}
+
+func TestEndpointLeavesAUserAgentTheInputBindsAsItWasSent(t *testing.T) {
+	t.Parallel()
+	type in struct {
+		UA *string `header:"User-Agent"`
+	}
+	type out struct {
+		UA *string `json:"ua"`
+	}
+	ep := NewEndpoint[in, out](http.MethodGet, "/ua")
+	client := endpointServer(t, func(app *App) {
+		app.Implement(ep, func(_ *Context, v in) (out, error) { return out{UA: v.UA}, nil })
+	})
+	// Left out, it arrives absent, rather than as net/http's own.
+	got, err := ep.Call(context.Background(), client, in{})
+	if err != nil || got.UA != nil {
+		t.Fatalf("a User-Agent left out arrived as %v, %v", got.UA, err)
+	}
+	agent := "billing/1.2"
+	got, err = ep.Call(context.Background(), client, in{UA: &agent})
+	if err != nil || got.UA == nil || *got.UA != agent {
+		t.Fatalf("got %v, %v", got.UA, err)
+	}
+	empty := ""
+	_, err = ep.Call(context.Background(), client, in{UA: &empty})
+	assertRefused(t, err, "User-Agent is empty")
+}
+
 func TestEndpointMayBindContentTypeWithoutABody(t *testing.T) {
 	t.Parallel()
 	type in struct {

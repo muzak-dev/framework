@@ -203,6 +203,29 @@ func TestLargeSchemaReachedEverywhereStopsAtItsBudget(t *testing.T) {
 	}
 }
 
+// TestLongEnumReachedBesideRulesIsComparedInFull is the honest counterpart
+// of the test above: a named type with a few hundred values, used by hundreds
+// of fields that each add a rule of their own beside the reference, as Muzak
+// writes a field rule on a named type. Charging what the type holds must not
+// make such an application's comparison stop at its bound.
+func TestLongEnumReachedBesideRulesIsComparedInFull(t *testing.T) {
+	t.Parallel()
+	doc := func(limit int) *Document {
+		status := &Schema{Type: "string"}
+		for i := range 300 {
+			status.Enum = append(status.Enum, "state"+strconv.Itoa(i))
+		}
+		body := &Schema{Type: "object", Properties: map[string]*Schema{}}
+		for i := range 400 {
+			body.Properties["f"+strconv.Itoa(i)] = &Schema{Ref: componentPrefix + "Status", MaxLength: compatPtr(10)}
+		}
+		body.Properties["f0"].MaxLength = compatPtr(limit)
+		return compatReadDoc(body, map[string]*Schema{"Status": status})
+	}
+	assertAPIChanges(t, CompareDocuments(doc(10), doc(9)),
+		wantChange{Breaking, "request-max-length-tightened", requestBodyAt + "/properties/f0/maxLength"})
+}
+
 // TestLongLocationsAreChargedAndTheReportIsBounded covers the text a
 // comparison builds rather than reads: every change inside an object is
 // located under the name of the member holding it, and every parameter under

@@ -75,10 +75,10 @@ type schemaFacts struct {
 
 // facts returns the facts of a schema, working them out the first time.
 //
-// Reading a schema costs a step, one more for each value, member, required
-// name and alternative it lists, and one for every compareBytesPerStep bytes
-// of the text in them, which is what reading it again at another position
-// takes. A comparison charges that every time it reads the schema, and a
+// Reading a schema costs a step, one more for every compareEntriesPerStep
+// values, members, required names and alternatives it lists, and one for
+// every compareBytesPerStep bytes of the text in them, which is what reading
+// it again at another position takes. A comparison charges that every time it reads the schema, and a
 // document's budget is the sum of it over its schemas, so that a schema many
 // positions reach through allOf, or beside a rule of their own, costs its size
 // each time rather than one step, and a large one reached everywhere ends the
@@ -106,7 +106,8 @@ func (c *docComparer) facts(s *Schema) *schemaFacts {
 	for name := range s.Properties {
 		text += len(name)
 	}
-	f.cost = 1 + len(s.Enum) + len(s.Required) + len(s.Properties) + len(s.AnyOf) + len(s.AllOf) + text/compareBytesPerStep
+	entries := len(s.Enum) + len(s.Required) + len(s.Properties) + len(s.AnyOf) + len(s.AllOf)
+	f.cost = 1 + entries/compareEntriesPerStep + text/compareBytesPerStep
 	c.schemaFacts[s] = f
 	return f
 }

@@ -279,6 +279,13 @@ const (
 	// comparisons hardly notice it; a schema holding megabytes is charged
 	// for them each time it is read. See [docComparer.facts].
 	compareBytesPerStep = 256
+	// compareEntriesPerStep is how many entries of a list a schema holds,
+	// such as the values of an enum or its required names, one step pays for
+	// reading. Each entry costs a few map operations, so sixteen of them are
+	// about what a step costs elsewhere, and a type of a few hundred values
+	// that hundreds of fields name beside a rule of their own stays well
+	// within the budget, which weighs the type the same way.
+	compareEntriesPerStep = 16
 	// compareMaxDepth bounds how deeply schemas written inline are walked into
 	// at one position. A document read by [ReadDocument] cannot nest deeper
 	// than this; a Document built in Go with a cycle of pointers can.

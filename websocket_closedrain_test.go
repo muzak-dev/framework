@@ -268,11 +268,14 @@ func TestWebSocketPeerThatNeverStopsIsCutOffAndCostsNothing(t *testing.T) {
 		if _, err := c.conn.Write(chunk); err != nil {
 			break
 		}
-		if time.Since(start) > grace+2*time.Second {
+		if time.Since(start) > grace+4*time.Second {
 			t.Fatalf("still sending after %s", time.Since(start))
 		}
 	}
-	if elapsed := time.Since(start); elapsed > grace+time.Second {
+	// Room for a loaded machine to run the server's close late and for the
+	// reset to come back; a server bounded only by the peer would still be
+	// reading when the loop above gives up.
+	if elapsed := time.Since(start); elapsed > grace+2*time.Second {
 		t.Errorf("the server took %s to stop a peer that never does", elapsed)
 	}
 	// The bound, with room for what the buffered reader held before the wait

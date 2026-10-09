@@ -40,6 +40,9 @@ type config struct {
 	timeout   time.Duration
 	noCookies bool
 	noRedirect
+	// overrides register dependency overrides on the application before it is
+	// served; see [Override].
+	overrides []func(*muzak.App)
 }
 
 // noRedirect is a named bool so that the option that sets it reads clearly at
@@ -93,6 +96,9 @@ func New(tb testing.TB, app *muzak.App, opts ...Option) *Client {
 	cfg := config{headers: http.Header{}, timeout: 10 * time.Second}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	for _, override := range cfg.overrides {
+		override(app)
 	}
 	// The framework builds the application, starts its components and opens
 	// the socket in one step, as Run does, and reports whichever failed.

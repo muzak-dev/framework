@@ -3,12 +3,14 @@ package otlp
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"reflect"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -325,6 +327,75 @@ func TestFlushRacingStop(t *testing.T) {
 	if err := busy.requestFlush(ctx); err != context.DeadlineExceeded { //nolint:errorlint // the context's own error
 		t.Errorf("requestFlush on a busy run = %v", err)
 	}
+}
+
+// TestStopRacingStopDoesNotHang checks a second Stop made while the first
+// one's final flush is under way, which is what two applications sharing one
+// exporter as their Tracer do when they shut down together: the second finds
+// the exporter stopped and discards what is still queued, and the flush that
+// had counted those spans must not wait for them for ever, and Stop with it.
+func TestStopRacingStopDoesNotHang(t *testing.T) {
+	t.Parallel()
+	var e *Exporter
+	c := newCollector(t, func(n int, w http.ResponseWriter, _ *http.Request) {
+		if n == 0 {
+			// The first batch of the final flush is in flight.
+			_ = e.Stop(context.Background())
+		}
+		_, _ = io.WriteString(w, "{}")
+	})
+	opts, _ := testOptions(c.server.URL)
+	opts.BatchSize = 2
+	var err error
+	if e, err = New(opts); err != nil {
+		t.Fatal(err)
+	}
+	endSpans(e, 10)
+	r := &run{stopping: make(chan struct{}), flush: make(chan chan struct{}), done: make(chan struct{})}
+	r.ctx, r.cancel = context.WithCancel(context.Background())
+	defer r.cancel()
+	drained := make(chan []*span, 1)
+	go func() { drained <- e.drain(r, nil) }()
+	select {
+	case rest := <-drained:
+		if len(rest) != 0 || len(c.all()) != 1 {
+			t.Errorf("drain left %d spans after %d requests, want the one batch sent and nothing left", len(rest), len(c.all()))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the final flush waited for spans another Stop had discarded")
+	}
+}
+
+// TestStartRacingStop checks that an exporter started again while the run
+// before it is still finishing has nothing two workers both write to without
+// a lock; run with -race. It is not parallel, since it counts the exporter
+// goroutines left running.
+func TestStartRacingStop(t *testing.T) {
+	c := newCollector(t, nil)
+	opts, _ := testOptions(c.server.URL)
+	opts.QueueSize = 1
+	opts.BatchSize = 1
+	opts.BatchInterval = time.Millisecond
+	e, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 20 {
+		if err := e.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		endSpans(e, 5)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = e.Stop(context.Background())
+		}()
+		time.Sleep(time.Millisecond)
+	}
+	wg.Wait()
+	_ = e.Stop(context.Background())
+	assertNoExporterGoroutines(t)
 }
 
 // TestStopCancelledDuringARetryWait checks a Stop with no deadline whose

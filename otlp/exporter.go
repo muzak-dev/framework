@@ -70,9 +70,10 @@ type Exporter struct {
 	dropped  atomic.Uint64
 	failed   atomic.Uint64
 
-	// reportedDrops is the drop count last logged. Only the worker touches
-	// it, and one worker runs at a time.
-	reportedDrops uint64
+	// reportedDrops is the drop count last logged. Only workers touch it,
+	// but the worker of a run that is finishing can still be running when
+	// Start begins the next, so it is atomic.
+	reportedDrops atomic.Uint64
 }
 
 // run is one stretch of the exporter running, from Start to Stop.
@@ -336,9 +337,20 @@ func (e *Exporter) work(r *run) {
 // returns the last, partial one. It takes only as many spans as were queued
 // when it began, so that spans arriving as fast as they are sent cannot keep a
 // flush from finishing.
+//
+// It never waits for a span: one counted at the start may have been taken
+// since by a second Stop, which discards what an exporter already stopped
+// still holds, or by the worker of a run started while this one finishes,
+// and waiting for it would hold Stop until a span that cannot come.
 func (e *Exporter) drain(r *run, batch []*span) []*span {
 	for range len(e.queue) {
-		batch = append(batch, <-e.queue)
+		var s *span
+		select {
+		case s = <-e.queue:
+		default:
+			return batch
+		}
+		batch = append(batch, s)
 		if len(batch) == e.cfg.batchSize {
 			e.export(r, batch)
 			clear(batch)
@@ -366,12 +378,13 @@ func (e *Exporter) discardQueued() uint64 {
 // most once per batch interval however many are.
 func (e *Exporter) reportDrops() {
 	dropped := e.dropped.Load()
-	if dropped == e.reportedDrops {
+	reported := e.reportedDrops.Load()
+	if dropped <= reported || !e.reportedDrops.CompareAndSwap(reported, dropped) {
+		// Nothing new, or the other worker reported it first.
 		return
 	}
 	e.cfg.logger.Warn("otlp: spans were dropped because the export queue was full or the exporter had stopped",
-		slog.Uint64("dropped", dropped-e.reportedDrops),
+		slog.Uint64("dropped", dropped-reported),
 		slog.Uint64("dropped_total", dropped),
 		slog.Int("queue_size", e.cfg.queueSize))
-	e.reportedDrops = dropped
 }

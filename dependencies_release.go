@@ -159,6 +159,13 @@ func (c *Context) runReleases(failure error) error {
 				slog.String("error", err.Error()))
 		}
 	}
+	if failure != nil {
+		// What the request did was released as a failure, a transaction rolled
+		// back say, so the work the handler registered to follow it with
+		// [Context.AfterResponse] has nothing to follow: a welcome email for
+		// a sign-up that was never committed must not be sent.
+		c.handled = false
+	}
 	return failure
 }
 

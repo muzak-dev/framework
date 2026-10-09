@@ -165,6 +165,25 @@ func TestSessionOptionsAreValidated(t *testing.T) {
 	}
 }
 
+// TestSessionMaxSizeWithinACookie shows a bound smaller than a cookie's is
+// the one enforced.
+func TestSessionMaxSizeWithinACookie(t *testing.T) {
+	t.Parallel()
+	app, _, _ := sessionTestApp(t, func(o *AppOptions) {
+		o.Sessions = &SessionOptions{Secrets: []string{testSessionSecret}, MaxSize: 100}
+	}, nil)
+	if app.sessions.maxSize != 100 {
+		t.Fatalf("the bound is %d, want 100", app.sessions.maxSize)
+	}
+	s := &Session{m: app.sessions, c: &Context{}, data: map[string]sessionValue{}, isNew: true}
+	if err := s.Set("v", strings.Repeat("a", 92)); err != nil {
+		t.Fatalf("a session of exactly 100 bytes was refused: %v", err)
+	}
+	if err := s.Set("w", 1); !errors.Is(err, ErrSessionTooLarge) {
+		t.Fatalf("a session past 100 bytes = %v", err)
+	}
+}
+
 // TestSessionServerStoreNeedsNoSecret shows the secrets are the cookie
 // store's alone, and that a store's own bound applies.
 func TestSessionServerStoreNeedsNoSecret(t *testing.T) {

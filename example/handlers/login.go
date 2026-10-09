@@ -35,7 +35,7 @@ func Login(ctx *muzak.Context, in schemas.LoginIn) (schemas.LoginOut, error) {
 	session := ctx.Session()
 	// Regenerating comes first, before anything that says who the user is.
 	// The browser may arrive carrying a session someone else chose for it,
-	// planted through a sibling subdomain or a link; signing in on top of
+	// planted through a sibling subdomain or a scripting bug; signing in on top of
 	// that session would hand whoever planted it a signed-in one. A new
 	// session makes whatever they hold worthless at the moment it would have
 	// become valuable.

@@ -330,7 +330,7 @@ func defaultSessionCookieName(secure bool, domain, path string) string {
 // so.
 func (m *sessionManager) checkCookie() []error {
 	var errs []error
-	probe := &http.Cookie{Name: m.name, Value: "x", Path: m.path, Domain: m.domain}
+	probe := &http.Cookie{Name: m.name, Value: "x", Path: m.path, Domain: m.domain} //nolint:gosec // only validated, never sent
 	if err := probe.Valid(); err != nil {
 		errs = append(errs, fmt.Errorf("muzak: the session cookie is not one a browser accepts (name %q, path %q, domain %q): %w",
 			m.name, m.path, m.domain, err))
@@ -376,7 +376,7 @@ func (m *sessionManager) cookie(value string, ttl time.Duration) *http.Cookie {
 		// rather than keep it.
 		maxAge = max(int(ttl/time.Second), 1)
 	}
-	return &http.Cookie{
+	return &http.Cookie{ //nolint:gosec // Secure unless AllowInsecure, HttpOnly always, SameSite validated at build
 		Name:     m.name,
 		Value:    value,
 		Path:     m.path,
@@ -635,6 +635,12 @@ const (
 // decodeRecord fills s from a record, reporting false for one that is
 // malformed, larger than the session may be, or expired. It is linear in the
 // record's length, which the cookie's own bound or MaxSize limits.
+//
+// A record whose object is larger than the bound, one written under a larger
+// MaxSize than this one say, is refused here, since any write to it would
+// fail. Nothing it decodes to can be larger than the object it was read from:
+// each key is re-encoded in its shortest form and each value kept verbatim, so
+// the session's running size never exceeds what was checked.
 func (m *sessionManager) decodeRecord(s *Session, record []byte) bool {
 	if len(record) < recordHeaderSize+2 || record[0] != recordVersion || len(record)-recordHeaderSize > m.maxSize {
 		return false
@@ -661,13 +667,6 @@ func (m *sessionManager) decodeRecord(s *Session, record []byte) bool {
 		entry := sessionValue{raw: raw, size: len(scratch) + 1 + len(raw)}
 		s.data[key] = entry
 		s.entries += entry.size
-	}
-	if s.encodedSize() > m.maxSize {
-		// Written under a larger bound than this one; any write would fail,
-		// so it is read as no session rather than as one stuck that way.
-		clear(s.data)
-		s.entries = 0
-		return false
 	}
 	s.created, s.issued = created, issued
 	return true
@@ -831,13 +830,16 @@ func (s *Session) Clear() {
 // Call it whenever the privilege a session carries changes, and above all
 // when a user signs in, before setting anything that says who they are.
 // Without it a session fixation attack works: an attacker who planted their
-// own session identifier in the victim's browser, through a subdomain, a
-// plain HTTP page on the same host or a link, waits for the victim to sign
-// in, and is then signed in as the victim with the identifier they already
-// hold. Regenerating makes the identifier the attacker knows worthless at the
-// moment it would have become valuable.
+// own session in the victim's browser, through a sibling subdomain when the
+// cookie names a Domain, through a plain HTTP page on the same host when it
+// is not Secure, or through a cross-site scripting bug, waits for the victim
+// to sign in, and is then signed in as the victim with the session they
+// already hold. Regenerating makes the session the attacker knows worthless at
+// the moment it would have become valuable. The default "__Host-" cookie
+// closes the first two routes; regenerating closes all of them.
 //
-// It fails only when the session could not be read; see [Session.Err].
+// It fails only when the session could not be read, see [Session.Err], or
+// its request has ended.
 func (s *Session) Regenerate() error {
 	if err := s.usable(); err != nil {
 		return err
@@ -929,6 +931,7 @@ func (s *Session) write() error {
 	if m.store == nil {
 		sealed, err := m.sealer.seal(record)
 		if err != nil {
+			// coverage: sealing fails only if AES or HKDF refuse sizes fixed at build.
 			return err
 		}
 		value = sealed
@@ -940,6 +943,7 @@ func (s *Session) write() error {
 		}
 	}
 	if err := s.setCookie(m.cookie(value, ttl)); err != nil {
+		// coverage: setCookie refuses only a cookie the build already proved fits.
 		return err
 	}
 	s.created, s.issued = created, now
@@ -996,6 +1000,7 @@ func (s *Session) persist(record []byte, ttl time.Duration, fresh bool) (string,
 func (s *Session) end() error {
 	if s.hadCookie || s.header != "" {
 		if err := s.setCookie(s.m.cookie("", -1)); err != nil {
+			// coverage: a removal carries no value, so it always fits.
 			return err
 		}
 	}
@@ -1063,7 +1068,10 @@ func keepsPrivate(values []string) bool {
 // have run, and returns what the request ends with. See [Context.settle].
 func (c *Context) commitSession(failure error) error {
 	s := c.session
-	if c.w != nil && c.w.commitHook == commitHook(c) {
+	// Every request that read its session ends here, before its Context goes
+	// back to the pool, so this is where the writer stops calling back into
+	// it.
+	if c.w.commitHook == commitHook(c) {
 		c.w.commitHook = nil
 	}
 	if s.settled {
@@ -1113,11 +1121,12 @@ type commitHook interface {
 // itself, as the status goes out; see [Session]. A write that fails cannot
 // change a status already chosen, so its error is held for the request to
 // end with, which aborts a response that has started.
+//
+// The hook is installed only once a session has been read and is removed
+// whenever the session is settled, so the session is always there and not
+// yet settled when it is called.
 func (c *Context) beforeCommit(status int) {
 	s := c.session
-	if s == nil || s.settled {
-		return
-	}
 	s.settled = true
 	if status >= http.StatusBadRequest || (s.err != nil && !s.destroyed) {
 		return
@@ -1129,12 +1138,9 @@ func (c *Context) beforeCommit(status int) {
 
 // resetSession detaches the request's session as its Context goes back to
 // the pool, so that a session a handler kept hold of cannot write to the
-// next request's response, and the writer no longer calls back into a
-// Context that is reused.
+// next request's response. The writer's hook is already gone: the release
+// that precedes this settles every session, and settling removes it.
 func (c *Context) resetSession() {
-	if c.w != nil && c.w.commitHook == commitHook(c) {
-		c.w.commitHook = nil
-	}
 	if c.session != nil {
 		c.session.c = nil
 		c.session = nil

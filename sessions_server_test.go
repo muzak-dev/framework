@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -88,7 +89,11 @@ func TestServerSessionIgnoresMalformedIdentifiers(t *testing.T) {
 	t.Parallel()
 	app, store, _, _ := serverSessionApp(t, nil)
 	valid, _ := newSessionID()
-	for _, value := range []string{"short", valid + "A", valid[:42], strings.Repeat("A", 4000), valid[:20] + "+" + valid[21:]} {
+	// The last character of an identifier carries two bits nothing uses,
+	// which must be zero; one that sets them spells the same bytes another
+	// way.
+	trailing := strings.Repeat("A", 42) + "B"
+	for _, value := range []string{"short", valid + "A", valid[:42], strings.Repeat("A", 4000), valid[:20] + "+" + valid[21:], trailing} {
 		before := store.loadCount()
 		rec := sessionRequest(t, app, "GET", "/read", &http.Cookie{Name: "__Host-session", Value: value})
 		if out := decodeSessionOut(t, rec); out.Found {
@@ -231,6 +236,9 @@ func TestServerSessionLoadFailure(t *testing.T) {
 			if err := s.Save(); !errors.Is(err, ErrSessionUnavailable) {
 				t.Errorf("Save on an unreadable session = %v", err)
 			}
+			if !errors.Is(s.Err(), ErrSessionUnavailable) {
+				t.Errorf("Err on an unreadable session = %v", s.Err())
+			}
 			s.Delete("v")
 			s.Clear()
 			return readSession(s), nil
@@ -282,6 +290,69 @@ func TestServerSessionDeleteFailure(t *testing.T) {
 	rec = sessionRequest(t, app, "POST", "/write?value=y", cookie)
 	assertStatus(t, rec, http.StatusInternalServerError)
 	assertNoSessionCookie(t, rec)
+	// So does a regeneration whose old entry cannot be deleted: a new
+	// session must not be issued while the old one may still be valid.
+	rec = sessionRequest(t, app, "POST", "/regenerate", cookie)
+	assertStatus(t, rec, http.StatusInternalServerError)
+	assertNoSessionCookie(t, rec)
+}
+
+// TestServerSessionStreamedWriteFailure covers a store that fails the write
+// made as a streamed response starts: the status is already chosen, so the
+// failure ends the request the way a late failure does, by aborting the
+// response rather than letting it pass for complete, and no cookie names a
+// session the store does not hold.
+func TestServerSessionStreamedWriteFailure(t *testing.T) {
+	t.Parallel()
+	app, store, _, logs := serverSessionApp(t, func(app *App) {
+		app.Get("/stream", func(ctx *Context, _ Empty) (Empty, error) {
+			_ = ctx.Session().Set("v", "streamed")
+			_, _ = ctx.ResponseWriter().Write([]byte("first chunk"))
+			_ = http.NewResponseController(ctx.ResponseWriter()).Flush()
+			return Empty{}, nil
+		})
+	})
+	store.mu.Lock()
+	store.failWrite = errors.New("store down")
+	store.mu.Unlock()
+	server := httptest.NewServer(app)
+	t.Cleanup(server.Close)
+	res, err := http.Get(server.URL + "/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if _, err := io.ReadAll(res.Body); err == nil {
+		t.Error("a response whose session could not be saved was completed")
+	}
+	if len(res.Cookies()) != 0 {
+		t.Errorf("the response sets %v", res.Cookies())
+	}
+	waitFor(t, func() bool { return strings.Contains(logs.String(), "the session could not be saved") }, "the failure to be logged")
+}
+
+// TestServerSessionStreamedAfterLoadFailure covers a streamed response from
+// a request whose session could not be read: nothing is written for it, and
+// the response is served.
+func TestServerSessionStreamedAfterLoadFailure(t *testing.T) {
+	t.Parallel()
+	app, store, _, _ := serverSessionApp(t, func(app *App) {
+		app.Get("/stream", func(ctx *Context, _ Empty) (Empty, error) {
+			_ = ctx.Session()
+			_, _ = ctx.ResponseWriter().Write([]byte("served"))
+			return Empty{}, nil
+		})
+	})
+	cookie := mustSessionCookie(t, sessionRequest(t, app, "POST", "/write?value=x"))
+	store.mu.Lock()
+	store.failLoad = errors.New("store down")
+	store.mu.Unlock()
+	rec := sessionRequest(t, app, "GET", "/stream", cookie)
+	assertStatus(t, rec, http.StatusOK)
+	assertNoSessionCookie(t, rec)
+	if rec.Body.String() != "served" {
+		t.Errorf("the body is %q", rec.Body.String())
+	}
 }
 
 // TestServerSessionExpiredEntryIsReplaced covers an entry the store still

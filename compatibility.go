@@ -193,8 +193,8 @@ func WriteChanges(w io.Writer, changes []APIChange) error {
 // changed type breaks it, a new member does not, because a response is left
 // open, and a response enum with a new value is possibly breaking, for a
 // client that switches over it exhaustively. Operations, parameters, request
-// bodies, statuses, media types and security requirements are judged the same
-// way. Prose (summaries, descriptions, titles, contact details) is not
+// bodies, statuses, media types, response headers and security requirements
+// are judged the same way. Prose (summaries, descriptions, titles, contact details) is not
 // compared, since no client can observe it.
 //
 // A reference into components is followed, so a component renamed without
@@ -591,6 +591,12 @@ func (c *docComparer) countNodes(d *Document) int {
 				if response != nil {
 					for _, media := range response.Content {
 						push(media.Schema)
+					}
+					for _, header := range response.Headers {
+						count++
+						if header != nil {
+							push(header.Schema)
+						}
 					}
 				}
 			}
@@ -1174,12 +1180,14 @@ func (c *docComparer) compareResponse(location, status string, old, cur *Respons
 		return
 	}
 	var oldContent, curContent map[string]MediaType
+	var oldHeaders, curHeaders map[string]*ResponseHeader
 	if old != nil {
-		oldContent = old.Content
+		oldContent, oldHeaders = old.Content, old.Headers
 	}
 	if cur != nil {
-		curContent = cur.Content
+		curContent, curHeaders = cur.Content, cur.Headers
 	}
+	c.compareResponseHeaders(location+"/headers", status, oldHeaders, curHeaders)
 	for _, media := range slices.Sorted(maps.Keys(oldContent)) {
 		if !c.step(location) {
 			return
@@ -1199,6 +1207,74 @@ func (c *docComparer) compareResponse(location, status string, old, cur *Respons
 				fmt.Sprintf("The %s response may now carry a body of type %q.", status, media))
 		}
 	}
+}
+
+// headersByName indexes the headers of a response by their name in lower
+// case, as HTTP matches it, keeping the first in order of any two that differ
+// only in case and leaving out a nil entry, which only a Document built in Go
+// holds. It returns the name each is written with, and the keys in a fixed
+// order.
+func headersByName(headers map[string]*ResponseHeader) (map[string]string, []string) {
+	names := map[string]string{}
+	var keys []string
+	for _, name := range slices.Sorted(maps.Keys(headers)) {
+		key := strings.ToLower(name)
+		if _, seen := names[key]; seen || headers[name] == nil {
+			continue
+		}
+		names[key] = name
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return names, keys
+}
+
+// compareResponseHeaders compares the headers one outcome documents. A client
+// reads a header as it reads a member of the body: one that is gone, or may
+// now be absent, breaks a client that relied on it being there, as the
+// Location of a redirect is relied on, and its value, which travels as text,
+// may only narrow.
+func (c *docComparer) compareResponseHeaders(location, status string, old, cur map[string]*ResponseHeader) {
+	oldNames, oldKeys := headersByName(old)
+	curNames, curKeys := headersByName(cur)
+	for _, key := range oldKeys {
+		if !c.step(location) {
+			return
+		}
+		name := oldNames[key]
+		at := location + "/" + pointerToken(name)
+		next, kept := curNames[key]
+		switch {
+		case !kept && old[name].Required:
+			c.add(Breaking, "response-header-removed", at,
+				fmt.Sprintf("The %s response no longer carries the header %q, though clients could rely on it.", status, name))
+		case !kept:
+			c.add(PossiblyBreaking, "response-header-removed", at, fmt.Sprintf("The %s response no longer carries the header %q.", status, name))
+		default:
+			c.compareResponseHeader(at, status, name, old[name], cur[next])
+		}
+	}
+	for _, key := range curKeys {
+		if _, existed := oldNames[key]; existed || !c.step(location) {
+			continue
+		}
+		name := curNames[key]
+		c.add(Compatible, "response-header-added", location+"/"+pointerToken(name),
+			fmt.Sprintf("The %s response now carries the header %q.", status, name))
+	}
+}
+
+// compareResponseHeader compares one header present in both outcomes.
+func (c *docComparer) compareResponseHeader(location, status, name string, old, cur *ResponseHeader) {
+	switch {
+	case old.Required && !cur.Required:
+		c.add(Breaking, "response-header-became-optional", location,
+			fmt.Sprintf("The header %q of the %s response may now be absent.", name, status))
+	case !old.Required && cur.Required:
+		c.add(Compatible, "response-header-became-required", location,
+			fmt.Sprintf("The header %q of the %s response is now always sent.", name, status))
+	}
+	c.compareParts(location+"/schema", oneSchema(old.Schema), oneSchema(cur.Schema), towardClient, true)
 }
 
 // quotedList renders names for a message, quoted; see [shortList].

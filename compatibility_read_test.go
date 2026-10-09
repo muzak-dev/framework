@@ -107,6 +107,8 @@ func TestReadDocumentRefusesMalformedInput(t *testing.T) {
 		{"status that is a word", documentWithOperation(`{"operationId":"x","responses":{"ok":{"description":""}}}`), `keyed "ok"`},
 		{"status range half written", documentWithOperation(`{"operationId":"x","responses":{"2X0":{"description":""}}}`), `keyed "2X0"`},
 		{"null response", documentWithOperation(`{"operationId":"x","responses":{"200":null}}`), "null response at /paths/~1items/get/responses/200"},
+		{"null response header", documentWithOperation(`{"operationId":"x","responses":{"302":{"description":"","headers":{"Location":null}}}}`), "null header at /paths/~1items/get/responses/302/headers/Location"},
+		{"response header schema refers nowhere", documentWithOperation(`{"operationId":"x","responses":{"302":{"description":"","headers":{"Location":{"schema":{"$ref":"#/x"}}}}}}`), "/paths/~1items/get/responses/302/headers/Location/schema"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -31,9 +31,9 @@ const (
 // understood: a document that is not OpenAPI 3.1, a member [Document] has no
 // field for (an extension or a keyword such as oneOf that Muzak never writes),
 // a duplicate member, invalid UTF-8, a type JSON Schema does not define, a
-// schema that is null where one is needed, and a reference to anything but a
-// schema in the document's own components, which is all a comparison can
-// follow.
+// schema, response or header that is null where one is needed, and a
+// reference to anything but a schema in the document's own components, which
+// is all a comparison can follow.
 //
 // The document is untrusted input as far as reading it goes: it may be at
 // most 16 MiB, and nest at most 128 levels, and anything larger or deeper is
@@ -185,7 +185,8 @@ func (w *wireAdditional) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 }
 
 // checkDocument checks what decoding cannot: the version, and that every
-// schema, path, operation and response is where the document says one is.
+// schema, path, operation, response and header is where the document says one
+// is.
 // The first problem, in a fixed order, is reported.
 func checkDocument(d *Document) error {
 	if !strings.HasPrefix(d.OpenAPI, "3.1.") {
@@ -256,6 +257,16 @@ func (d documentCheck) operation(location string, op *Operation) error {
 		}
 		if err := d.content(at+"/content", op.Responses[status].Content); err != nil {
 			return err
+		}
+		headers := op.Responses[status].Headers
+		for _, name := range slices.Sorted(maps.Keys(headers)) {
+			header := at + "/headers/" + pointerToken(name)
+			if headers[name] == nil {
+				return fmt.Errorf("muzak: the OpenAPI document has a null header at %s", printableReport(header))
+			}
+			if err := d.optionalSchema(header+"/schema", headers[name].Schema); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

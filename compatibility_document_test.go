@@ -321,6 +321,56 @@ func TestResponses(t *testing.T) {
 	}
 }
 
+// TestResponseHeaders covers the headers a response documents, such as the
+// Location of a redirect, which a client reads as it reads a member of the
+// body: one that is gone, or may now be absent, breaks a client that relied
+// on it, and its value, which travels as text, may only narrow.
+func TestResponseHeaders(t *testing.T) {
+	t.Parallel()
+	at := "/paths/~1items/get/responses/302/headers/"
+	redirect := func(headers map[string]*ResponseHeader) map[string]*Response {
+		return map[string]*Response{"302": {Description: "Found", Headers: headers}}
+	}
+	header := func(required bool, schema *Schema) *ResponseHeader {
+		return &ResponseHeader{Required: required, Schema: schema}
+	}
+	tests := []struct {
+		name     string
+		old, cur map[string]*ResponseHeader
+		want     []wantChange
+	}{
+		{"required header removed", map[string]*ResponseHeader{"Location": header(true, compatStr())}, nil, []wantChange{
+			{Breaking, "response-header-removed", at + "Location"},
+		}},
+		{"optional header removed", map[string]*ResponseHeader{"Retry-After": header(false, compatStr())}, map[string]*ResponseHeader{}, []wantChange{
+			{PossiblyBreaking, "response-header-removed", at + "Retry-After"},
+		}},
+		{"header added", nil, map[string]*ResponseHeader{"Location": header(true, compatStr())}, []wantChange{
+			{Compatible, "response-header-added", at + "Location"},
+		}},
+		{"header may now be absent", map[string]*ResponseHeader{"Location": header(true, compatStr())}, map[string]*ResponseHeader{"Location": header(false, compatStr())}, []wantChange{
+			{Breaking, "response-header-became-optional", at + "Location"},
+		}},
+		{"header now always sent", map[string]*ResponseHeader{"Location": header(false, compatStr())}, map[string]*ResponseHeader{"Location": header(true, compatStr())}, []wantChange{
+			{Compatible, "response-header-became-required", at + "Location"},
+		}},
+		{"name matched without regard to case", map[string]*ResponseHeader{"Location": header(true, compatStr())}, map[string]*ResponseHeader{"location": header(true, compatStr())}, nil},
+		{"value widened", map[string]*ResponseHeader{"X-Count": header(true, &Schema{Type: "integer"})}, map[string]*ResponseHeader{"X-Count": header(true, compatStr())}, []wantChange{
+			{Breaking, "response-type-widened", at + "X-Count/schema/type"},
+		}},
+		{"value narrowed", map[string]*ResponseHeader{"X-Count": header(true, compatStr())}, map[string]*ResponseHeader{"X-Count": header(true, &Schema{Type: "integer"})}, []wantChange{
+			{Compatible, "response-type-narrowed", at + "X-Count/schema/type"},
+		}},
+		{"nil entry is no header", map[string]*ResponseHeader{"X-Gone": nil}, map[string]*ResponseHeader{}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assertAPIChanges(t, CompareDocuments(compatResponseDoc(redirect(tt.old)), compatResponseDoc(redirect(tt.cur))), tt.want...)
+		})
+	}
+}
+
 func compatSecurityDoc(schemes map[string]SecurityScheme, requirements []SecurityRequirement) *Document {
 	o := compatOp("read")
 	o.Security = requirements

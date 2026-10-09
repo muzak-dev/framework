@@ -339,8 +339,11 @@ func kitchenSink() (*Document, *Document) {
 		o.Parameters = []Parameter{{Name: "q", In: "query", Schema: pick(compatStr(), &Schema{Type: "integer"})}, {Name: "h", In: "header", Schema: compatStr()}}
 		o.RequestBody = &RequestBody{Content: map[string]MediaType{"application/json": {Schema: &Schema{Ref: componentPrefix + "Item"}}}}
 		o.Responses = map[string]*Response{"200": {Content: map[string]MediaType{"application/json": {Schema: &Schema{Ref: componentPrefix + "Item"}}}}}
+		o.Responses["200"].Headers = map[string]*ResponseHeader{"X-Kept": {Required: true, Schema: compatStr()}, "X-Gone": {Schema: compatStr()}}
 		o.Security = []SecurityRequirement{Require("bearer")}
 		if variant {
+			o.Responses["200"].Headers = map[string]*ResponseHeader{"x-kept": {Schema: &Schema{Type: "integer"}}, "X-New": {Schema: compatStr()}}
+			o.Responses["404"] = &Response{Description: "Not Found"}
 			o.Security = []SecurityRequirement{Require("key")}
 			o.Parameters = o.Parameters[:1]
 		}
@@ -397,6 +400,7 @@ func TestKitchenSinkChanges(t *testing.T) {
 	a, b := kitchenSink()
 	item := "/components/schemas/Item/properties/"
 	parameters := "/paths/~1a/post/parameters/"
+	headers := "/paths/~1a/post/responses/200/headers/"
 	assertAPIChanges(t, CompareDocuments(a, b),
 		wantChange{Breaking, "parameter-removed", parameters + "header/h"},
 		wantChange{Breaking, "request-type-narrowed", parameters + "query/q/schema/type"},
@@ -426,5 +430,10 @@ func TestKitchenSinkChanges(t *testing.T) {
 		wantChange{Compatible, "response-property-added", item + "new"},
 		wantChange{Breaking, "request-pattern-added", "/components/schemas/Leaf/pattern"},
 		wantChange{Compatible, "response-pattern-added", "/components/schemas/Leaf/pattern"},
+		wantChange{Compatible, "response-status-added", "/paths/~1a/post/responses/404"},
+		wantChange{PossiblyBreaking, "response-header-removed", headers + "X-Gone"},
+		wantChange{Compatible, "response-header-added", headers + "X-New"},
+		wantChange{Breaking, "response-header-became-optional", headers + "X-Kept"},
+		wantChange{Compatible, "response-type-narrowed", headers + "X-Kept/schema/type"},
 	)
 }

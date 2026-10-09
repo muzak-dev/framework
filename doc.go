@@ -1138,6 +1138,31 @@
 // served is sent along in X-Request-Id, which is what lets two services' logs
 // be joined; see [ClientOptions.Propagate].
 //
+// # Typed endpoints
+//
+// An operation two Go programs share is declared once, with [NewEndpoint], in
+// a package both import. The service implements it with [Router.Implement]
+// and its callers call it with [Endpoint.Call], so the method, the path and
+// both types are written in one place and a mismatch on either side is a
+// compile error:
+//
+//	var GetUser = muzak.NewEndpoint[GetUserIn, User](http.MethodGet, "/users/{id}")
+//
+//	r.Implement(userapi.GetUser, handlers.GetUser)
+//
+//	users := muzak.NewClient(muzak.ClientOptions{AllowPrivateNetworks: true, BaseURL: "http://users:8080"})
+//	user, err := userapi.GetUser.Call(ctx.Context(), users, userapi.GetUserIn{ID: "42"})
+//
+// A call writes its input as the request the binder reads back into an equal
+// value, field by field from the tags it is bound by, and refuses, with an
+// error wrapping [ErrCallRefused] and before anything is sent, a value no
+// request carries unchanged: a path parameter that would name another route,
+// a header with a line break in it, a cookie outside the characters cookies
+// may hold. An answer that is not a success is a [*RemoteError] carrying the
+// code, message, details and request identifier of the service's error
+// envelope. The TypeScript side of the same API is generated from the
+// document by the tsgen package, muzak.dev/framework/tsgen.
+//
 // # Defaults worth knowing
 //
 // Muzak starts from settings that are safe rather than permissive. Every

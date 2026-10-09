@@ -780,6 +780,31 @@
 // of the application's own routes already answers is a build error rather than
 // an address nobody can reach.
 //
+// # API compatibility
+//
+// A committed document is a promise to every client written against it, and
+// [CompareDocuments] says which changes keep it. It judges each change the way
+// a client meets it: what a client sends may only widen and what it reads may
+// only narrow, so a new required request member, a narrowed request type or a
+// response member that is gone or may now be null is [Breaking], a new value
+// in a response enum is [PossiblyBreaking], and a new optional member or a new
+// operation is [Compatible]. Each [APIChange] names its kind, where it is and
+// what it does to a client, and [WriteChanges] prints a list of them for a
+// person:
+//
+//	baseline, err := muzak.ReadDocument(file)
+//	...
+//	current, err := app.Document()
+//	...
+//	err = muzak.WriteChanges(os.Stdout, muzak.CompareDocuments(baseline, current))
+//
+// [ReadDocument] reads a stored document strictly and within fixed bounds,
+// since the file may have come from anywhere, and the comparison follows each
+// shared or recursive component once, so it costs what the documents weigh
+// rather than the number of paths through them. In a test,
+// testclient.AssertCompatible does all of it against a baseline kept in the
+// repository, and records a new baseline when MUZAK_UPDATE_OPENAPI=1 is set.
+//
 // # Errors
 //
 // Every failure renders as one envelope, carrying a machine-readable code, a

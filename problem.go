@@ -155,12 +155,12 @@ func ProblemDetails(opts ProblemOptions) ErrorRenderer {
 }
 
 // writeMinimalError writes the fixed 500 that stands in when no [Context] is
-// at hand, for a panic outside a route or a renderer whose body could not be
-// encoded, in the format the application renders its errors in: the
-// [ErrorResponse] envelope by default, and a [Problem] when
-// [AppOptions.ProblemDetails] is set, so that a client parsing problems is
-// never handed the envelope for the one error it did not expect. Like the
-// envelope it is fixed English, carrying nothing of the failure.
+// at hand, for a panic outside a route, a renderer whose body could not be
+// encoded or an application that did not build, in the format the application
+// renders its errors in: the [ErrorResponse] envelope by default, and a
+// [Problem] when [AppOptions.ProblemDetails] is set, so that a client parsing
+// problems is never handed the envelope for the one error it did not expect.
+// Like the envelope it is fixed English, carrying nothing of the failure.
 func (a *App) writeMinimalError(w http.ResponseWriter, requestID string) {
 	if a.opts.ProblemDetails == nil {
 		writeMinimalError(w, requestID)

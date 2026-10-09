@@ -467,6 +467,25 @@ func TestProblemDetailsAbortAStartedResponse(t *testing.T) {
 	}
 }
 
+// TestProblemDetailsForAnApplicationThatDidNotBuild is the regression test for
+// the 500 ServeHTTP answers every request with when the build failed, which was
+// written as the default envelope whatever the application asked for.
+func TestProblemDetailsForAnApplicationThatDidNotBuild(t *testing.T) {
+	t.Parallel()
+	options := quietOptions()
+	options.ProblemDetails = &ProblemOptions{}
+	app := New(options)
+	app.Get("no-leading-slash", func(*Context, Empty) (Empty, error) { return Empty{}, nil })
+	if app.Build() == nil {
+		t.Fatal("Build() = nil, want the route refused")
+	}
+	rec := do(t, app, http.MethodGet, "/x")
+	assertStatus(t, rec, http.StatusInternalServerError)
+	if p, _ := decodeProblem(t, rec); p.Code != CodeInternalError || p.Detail != internalMessage || p.RequestID != "" {
+		t.Errorf("the problem is %+v", p)
+	}
+}
+
 // TestProblemDetailsWithAnUnencodableMessage falls back to the fixed problem
 // when the renderer's body cannot be encoded, as the envelope falls back to
 // its fixed form.

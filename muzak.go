@@ -884,7 +884,8 @@ func (a *App) corsMiddleware() (Middleware, error) {
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := a.Build(); err != nil {
 		id, _ := RequestIDFromContext(r.Context())
-		writeMinimalError(w, id)
+		// In the application's error format, problem details included.
+		a.writeMinimalError(w, id)
 		return
 	}
 	a.handler.ServeHTTP(w, r)

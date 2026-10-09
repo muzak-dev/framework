@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -73,9 +75,14 @@ const maxRateLimitKey = 256
 //		{Name: "long", Window: time.Minute, Limit: 100},
 //	}
 //
-// Every quota in a policy is counted for every request, so a client that
+// Every quota in a policy is counted for every request it serves. They are
+// counted longest window first, whatever order they are declared in, and the
+// first to refuse a request ends the count: a request refused by the short
+// quota has already been counted against the long one, so a client that
 // overruns the short window still accrues against the long one and cannot
-// escape a sustained limit by pausing between bursts.
+// escape a sustained limit by pausing between bursts, while a request the long
+// quota refuses is not counted against the shorter ones, whose budget it
+// would only waste.
 //
 // A window is fixed, not sliding: a client's counter starts with its first
 // request and ends Window later, and the next request opens a new one. A
@@ -281,8 +288,9 @@ func IPPrefixTracker(ipv4Bits, ipv6Bits int) RateLimitTracker {
 // one route with [SkipRateLimit]. Layering works field by field, so a route
 // that replaces the quotas keeps the application's storage and tracker.
 type RateLimitOptions struct {
-	// Quotas are the limits enforced, all of them, for every request. An empty
-	// list turns rate limiting off, which is the default. A narrower scope
+	// Quotas are the limits enforced, all of them, for every request, counted
+	// longest window first until one refuses; see [Quota]. An empty list turns
+	// rate limiting off, which is the default. A narrower scope
 	// that declares quotas replaces the inherited list rather than adding to
 	// it, so a route states the whole policy it wants.
 	Quotas []Quota
@@ -328,10 +336,11 @@ type RateLimitOptions struct {
 
 	// FailOpen serves a request that the storage could not count.
 	//
-	// By default a storage that cannot answer refuses the request with 503,
-	// because a limiter that cannot count is a limiter that is not enforcing
-	// anything, and an attacker who can reach the storage can choose the
-	// moment it stops answering. Setting FailOpen trades that for
+	// By default a storage that cannot answer refuses the request with 503 and
+	// a Retry-After of five seconds, because a limiter that cannot count is a
+	// limiter that is not enforcing anything, and an attacker who can reach
+	// the storage can choose the moment it stops answering. Setting FailOpen
+	// trades that for
 	// availability: a storage outage lets traffic through unmetered instead of
 	// turning into an outage of its own. The failure is logged either way.
 	//
@@ -461,7 +470,10 @@ func SkipRateLimit() SharedOption {
 // rateLimitConfig is a route's resolved rate limiting, with everything that
 // can be worked out once already worked out.
 type rateLimitConfig struct {
-	quotas   []Quota
+	quotas []Quota
+	// order is quotas in the order a request is counted against them, the
+	// longest window first; see [rateLimitConfig.check].
+	order    []Quota
 	storage  RateLimitStorage
 	tracker  RateLimitTracker
 	resolver QuotaResolver
@@ -535,6 +547,7 @@ func newRateLimitConfig(opts RateLimitOptions, quotas []Quota) (*rateLimitConfig
 	}
 	return &rateLimitConfig{
 		quotas:            quotas,
+		order:             countingOrder(quotas, false),
 		storage:           opts.Storage,
 		tracker:           opts.Tracker,
 		resolver:          opts.Resolver,
@@ -655,8 +668,24 @@ func (cfg *rateLimitConfig) increment(ctx context.Context, quota Quota, key stri
 	return cfg.storage.Increment(ctx, quota.Name, key, quota.Window)
 }
 
-// check counts a request against every quota and reports whether it may
+// check counts a request against its quotas and reports whether it may
 // proceed, setting the RateLimit headers on the way.
+//
+// The quotas are counted longest window first, and the first that refuses the
+// request ends the count. A request refused by a short burst limit has by then
+// been counted against every longer quota, so a client that overruns the
+// burst still spends its sustained budget, and cannot keep a flood going by
+// pausing whenever the burst limit stops it. A request refused by a long
+// quota is not counted against the shorter ones after it: it would spend
+// budget it was never going to use, and, under a key the shorter quota had
+// not seen, create a counter for a client already being refused. What the
+// longer quotas counted before the refusal stands, because a refused request
+// is still a request the client made, and taking it back would need a second
+// call to a storage that may have failed in between.
+//
+// Counting the longest first is also what makes the Retry-After of a refusal
+// the wait of the longest quota that refused, rather than of whichever was
+// declared first.
 func (cfg *rateLimitConfig) check(c *Context) error {
 	quotas, policy, err := cfg.quotasFor(c)
 	if err != nil {
@@ -674,7 +703,6 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 	}
 	ctx := c.Context()
 
-	var worst outcome
 	var tightest outcome
 	counted := 0
 	for _, quota := range quotas {
@@ -690,42 +718,64 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 		}
 		counted++
 		current := outcome{quota: quota, count: count, reset: reset}
+		if current.exceeded() {
+			return cfg.refuse(c, current, policy)
+		}
 		if counted == 1 || current.remaining() < tightest.remaining() ||
 			(current.remaining() == tightest.remaining() && current.reset > tightest.reset) {
 			tightest = current
 		}
-		if current.exceeded() && (!worst.exceeded() || current.reset > worst.reset) {
-			worst = current
-		}
 	}
 
-	if worst.exceeded() {
-		cfg.setHeaders(c, worst, policy)
-		// Retry-After is set even where the RateLimit headers are turned off.
-		// Refusing a client without telling it when to come back is what
-		// produces a client that comes back immediately, forever.
-		retry := max(resetSeconds(worst.reset), 1)
-		c.w.Header().Set(canonicalRetryAfter, strconv.Itoa(retry))
-		return NewHTTPErrorf(http.StatusTooManyRequests,
-			"the %q rate limit of %d requests per %d seconds has been exceeded; retry in %d seconds",
-			worst.quota.Name, worst.quota.Limit, windowSeconds(worst.quota.Window), retry)
-	}
 	if counted > 0 {
 		cfg.setHeaders(c, tightest, policy)
 	}
 	return nil
 }
 
-// quotasFor works out which quotas this request is held to, and the
-// RateLimit-Policy value that describes them.
+// refuse answers a request one quota refused, with that quota's state in the
+// RateLimit headers and its wait in Retry-After.
+func (cfg *rateLimitConfig) refuse(c *Context, refused outcome, policy string) error {
+	cfg.setHeaders(c, refused, policy)
+	// Retry-After is set even where the RateLimit headers are turned off.
+	// Refusing a client without telling it when to come back is what
+	// produces a client that comes back immediately, forever.
+	retry := max(resetSeconds(refused.reset), 1)
+	c.w.Header().Set(canonicalRetryAfter, strconv.Itoa(retry))
+	return NewHTTPErrorf(http.StatusTooManyRequests,
+		"the %q rate limit of %d requests per %d seconds has been exceeded; retry in %d seconds",
+		refused.quota.Name, refused.quota.Limit, windowSeconds(refused.quota.Window), retry)
+}
+
+// countingOrder returns quotas in the order a request is counted against
+// them, the longest window first and quotas of equal window in the order they
+// were given; see [rateLimitConfig.check]. A list already in that order, which
+// is any list of one, is returned as it is. Otherwise it is sorted in place
+// when owned says the caller built it, and copied first when it belongs to
+// someone else, an application's declaration or a resolver's plan, whose
+// order is theirs.
+func countingOrder(quotas []Quota, owned bool) []Quota {
+	longestFirst := func(a, b Quota) int { return cmp.Compare(b.Window, a.Window) }
+	if slices.IsSortedFunc(quotas, longestFirst) {
+		return quotas
+	}
+	if !owned {
+		quotas = slices.Clone(quotas)
+	}
+	slices.SortStableFunc(quotas, longestFirst)
+	return quotas
+}
+
+// quotasFor works out which quotas this request is held to, in the order they
+// are counted, and the RateLimit-Policy value that describes them.
 //
 // With no resolver this is the precomputed pair and costs nothing. With one,
-// the resolved quotas are appended to the static ones, so a route can carry
+// the resolved quotas are added to the static ones, so a route can carry
 // both a floor everyone shares and a ceiling that varies, and the policy is
-// rendered for the union.
+// rendered for the union in the order the quotas were declared and resolved.
 func (cfg *rateLimitConfig) quotasFor(c *Context) ([]Quota, string, error) {
 	if cfg.resolver == nil {
-		return cfg.quotas, cfg.policy, nil
+		return cfg.order, cfg.policy, nil
 	}
 
 	resolved, err := cfg.resolver(c)
@@ -733,7 +783,7 @@ func (cfg *rateLimitConfig) quotasFor(c *Context) ([]Quota, string, error) {
 		return nil, "", err
 	}
 	if len(resolved) == 0 {
-		return cfg.quotas, cfg.policy, nil
+		return cfg.order, cfg.policy, nil
 	}
 
 	quotas := resolved
@@ -762,7 +812,11 @@ func (cfg *rateLimitConfig) quotasFor(c *Context) ([]Quota, string, error) {
 		}
 	}
 
-	return quotas, renderPolicy(quotas), nil
+	// The policy is rendered before the quotas are put in counting order, and
+	// the list is only sorted in place when it was built here rather than
+	// handed over by the resolver.
+	policy := renderPolicy(quotas)
+	return countingOrder(quotas, len(cfg.quotas) > 0), policy, nil
 }
 
 // renderPolicy builds the RateLimit-Policy header value for a set of quotas.
@@ -779,6 +833,16 @@ func renderPolicy(quotas []Quota) string {
 	return policy.String()
 }
 
+// rateLimitStorageRetryAfter is the Retry-After, in seconds, sent with the 503
+// that refuses a request the storage could not count.
+//
+// Nothing here knows how long the storage will take to come back, so this is
+// a pause rather than a promise. It is the same five seconds the connection
+// caps send with their 503: long enough that a refused client does not retry
+// in a tight loop against a store that is struggling to recover, and short
+// enough not to hold it off for long once the store is answering again.
+const rateLimitStorageRetryAfter = "5"
+
 // storageFailed decides what to do about a storage that could not count, and
 // records why without recording the key, which carries client-supplied data.
 func (cfg *rateLimitConfig) storageFailed(c *Context, quota Quota, err error) error {
@@ -789,6 +853,11 @@ func (cfg *rateLimitConfig) storageFailed(c *Context, quota Quota, err error) er
 			slog.String("error", err.Error()))
 		return nil
 	}
+	// Set whether or not the RateLimit headers are, for the reason the 429's
+	// is: a refusal that does not say when to come back is answered by a
+	// client that comes back at once. Retry-After describes the exchange
+	// rather than the entity, so the reset an error response gets keeps it.
+	c.w.Header().Set(canonicalRetryAfter, rateLimitStorageRetryAfter)
 	// The cause is attached rather than described, so that it reaches the log
 	// through the error pipeline and never reaches the client.
 	return NewHTTPError(http.StatusServiceUnavailable,
@@ -843,9 +912,11 @@ type wsMessageLimiter struct {
 }
 
 // allow counts one message and returns the status the connection should be
-// closed with, or zero when the peer may carry on.
+// closed with, or zero when the peer may carry on. The quotas are counted in
+// the order a request's are, and for the same reasons; see
+// [rateLimitConfig.check].
 func (l *wsMessageLimiter) allow(ctx context.Context) (WSStatus, string) {
-	for _, quota := range l.cfg.quotas {
+	for _, quota := range l.cfg.order {
 		count, _, err := l.cfg.increment(ctx, quota, l.key)
 		if err != nil {
 			return l.storageFailed(ctx, quota, err)

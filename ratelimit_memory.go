@@ -26,14 +26,19 @@ const (
 type MemoryRateLimitOptions struct {
 	// MaxEntries is how many counters the storage holds at once, defaulting to
 	// [DefaultRateLimitMaxEntries]. Once it is full, admitting a counter
-	// discards one from the quota holding the most counters, and within that
-	// quota the one closest to expiring, which is the one whose loss costs
-	// least. Taking it from the largest quota is what keeps a client who can
-	// mint keys under one quota (an address per request from an IPv6 range,
-	// say) from pushing out another quota's counters, such as a per-account
-	// login limit, and so resetting them. A negative value removes the bound,
-	// which is only appropriate when the set of keys is known to be small and
-	// closed.
+	// discards one from the same quota, the one closest to expiring, which is
+	// the one whose loss costs least. Keeping the loss inside the quota being
+	// counted is what stops a client who can mint keys under one quota (an API
+	// key or a username counted before any guard, or an address per request
+	// from its own range) from pushing out another quota's counters, a
+	// per-account login limit or its own spent per-address budget among them,
+	// and so resetting them. Only a quota holding no counter at all takes the
+	// one it needs from the quota holding the most. A full table therefore
+	// leaves each quota the room it had when it filled, and a quota whose
+	// traffic grows after that gains room only as counters expire; size the
+	// table for the keys the application really sees. A negative value removes
+	// the bound, which is only appropriate when the set of keys is known to be
+	// small and closed.
 	MaxEntries int
 
 	// SweepInterval is how often expired counters are discarded, defaulting to
@@ -56,11 +61,12 @@ type MemoryRateLimitOptions struct {
 // client influences and an unbounded one would be a memory leak with a name.
 // Expired counters are swept periodically, and a table at
 // [MemoryRateLimitOptions.MaxEntries] makes room for a new counter by
-// discarding the one closest to expiring from whichever quota holds the most.
-// Flooding one quota with fresh keys therefore only ever displaces that
-// quota's own counters. Within a single quota it still can, which is why a
-// quota whose keys a client chooses freely (a username on a login form) is
-// best paired with one it cannot, such as its address.
+// discarding the one closest to expiring from the quota the new counter
+// belongs to. Flooding one quota with fresh keys therefore only ever displaces
+// that quota's own counters, beyond the single counter a quota holding none
+// takes from the largest to be counted at all. Within a single quota it still
+// can, which is why a quota whose keys a client chooses freely (a username on
+// a login form) is best paired with one it cannot, such as its address.
 //
 // It implements [Lifecycle], so an application that uses it starts and stops
 // it as part of its own start-up and shutdown. Stopping releases every counter
@@ -204,7 +210,7 @@ func (s *MemoryRateLimitStorage) Increment(_ context.Context, quota, key string,
 		return 1, window, nil
 	}
 
-	s.makeRoom(now)
+	s.makeRoom(now, quota)
 	counter := &memoryCounter{key: stored, quota: quota, count: 1, expiresAt: now.Add(window)}
 	s.entries[stored] = counter
 	partition := s.partitions[quota]
@@ -224,25 +230,49 @@ func memoryKey(quota, key string) string {
 	return quota + "\x00" + key
 }
 
-// makeRoom discards counters until there is space for another, taking the
-// expired ones first and then, if the table is still full, the one closest to
-// expiring in the quota that holds the most counters.
+// makeRoom discards counters until there is space for one more under quota,
+// taking the expired ones first and then, if the table is still full, the one
+// closest to expiring in quota's own partition. Only a quota that holds no
+// counter at all takes one from another, the quota that holds the most.
 //
 // Discarding a counter that has not expired means its client is counted from
 // zero again, which is a real loss of enforcement. It happens only when the
 // table is full, which takes more distinct keys than an application usually
 // sees, and the alternative is holding every key an attacker cares to invent.
-// Choosing the largest quota puts that loss on whoever filled the table: a
-// flood of fresh keys under one quota evicts its own, and a small quota whose
-// counters matter one by one, a per-account login limit, keeps them. The
-// quotas are few, so finding the largest is a short scan, and it only runs
-// once the table is full.
-func (s *MemoryRateLimitStorage) makeRoom(now time.Time) {
+// Taking it from the quota being counted puts that loss where the new key
+// came from, and that is the only placement a client cannot turn to its own
+// use. A client can usually mint keys under some quota, an API key or a
+// username counted before any guard has looked at it, and a new key that
+// discarded another quota's oldest counter would let it reset its own counter
+// there: spend an application-wide per-address quota early, so that its
+// counter is the oldest, then mint keys elsewhere until that counter goes.
+// Discarding from the largest quota, as this once did, did exactly that
+// whenever the quota being minted was not the largest.
+//
+// The cost is that a full table no longer lets a small quota grow at the
+// expense of a large one: each keeps the room it held when the table filled,
+// and gains more only as counters expire. A quota in steady use already holds
+// about as many counters as its traffic needs, so this matters only to one
+// whose traffic grows while the table stays full, which is a table too small
+// for the application or one being flooded, and in either case the counters a
+// quota already holds are never taken by another's keys.
+//
+// A quota with nothing to give up, one that is new or whose counters have all
+// expired, still has to be admitted, or its first client would never be
+// counted. It takes the one counter it needs from the largest quota, which is
+// the only way a key ever displaces another quota's counter, and which it can
+// do only once before it holds a counter of its own to give up instead. The
+// quotas are few, so finding the largest is a short scan.
+func (s *MemoryRateLimitStorage) makeRoom(now time.Time, quota string) {
 	if s.maxEntries <= 0 {
 		return
 	}
 	s.expireLocked(now)
 	for len(s.entries) >= s.maxEntries {
+		if s.partitions[quota].Len() > 0 {
+			s.discardFirst(quota)
+			continue
+		}
 		var largest string
 		for name, partition := range s.partitions {
 			// Ties go to the lexically first name, so which quota loses a

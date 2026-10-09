@@ -406,6 +406,10 @@ func MaxFileSize(bytes int64) SharedOption {
 // an immediate 422 instead of a silently dropped value. Opt out only where
 // forward compatibility with clients that send extra members matters more.
 // Duplicate object members and invalid UTF-8 remain rejected regardless.
+//
+// A member naming a path, query, header or cookie field is an unknown member
+// too, because a located field is never read from the body; under this option
+// it is ignored rather than refused.
 func AllowUnknownFields() SharedOption {
 	yes := true
 	return sharedOption{
@@ -727,6 +731,20 @@ func (r *Router) Routes() []*Route {
 // before using it as a file name, as [Router.Frontend] and [Router.Static] do
 // for the paths they serve.
 //
+// A wildcard also receives spellings of the routes beside it, because a path
+// is matched as it arrives and nothing normalises it first. With a guarded
+// "/admin/panel" and a public "/{rest...}", every one of "//admin/panel",
+// "/admin//panel", "/admin/panel/", "/ADMIN/panel", "/./admin/panel",
+// "/x/../admin/panel", "/%2e/admin/panel" and "/admin%2Fpanel" reaches the
+// public wildcard, the last with rest set to "admin/panel". The guarded route
+// itself is never reached without its guard, and net/http.ServeMux behaves
+// the same way; the danger is in what the wildcard's handler does with the
+// value. One that serves a file, looks up a record or calls another service
+// by it must check the caller is allowed what the value refers to, not rely
+// on the guards of a route the request did not match, and must not forward
+// the value to a backend that cleans, decodes or case-folds paths, which may
+// resolve it to the very resource the guard was protecting.
+//
 // Registration errors (an unbindable input type, a duplicate route,
 // or a path parameter no field binds) are collected and reported when the
 // application is built. Registering a route on a router whose application has
@@ -769,7 +787,9 @@ func (r *Router) Head[In, Out any](path string, h Handler[In, Out], opts ...Rout
 }
 
 // Handle registers a handler for an arbitrary HTTP method, for the methods the
-// named helpers do not cover. The method is upper-cased before use.
+// named helpers do not cover. The method is upper-cased before use. The path
+// template is the same as [Router.Get]'s, and a "{name...}" wildcard in it
+// receives the same unnormalised spellings of its neighbours; see there.
 //
 // It is also how an OPTIONS route is registered. There is no Router.Options
 // method, because [App.Options] applies configuration to an application and

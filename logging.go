@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -95,8 +98,18 @@ const (
 // "access_token", "X-CSRF-Token" and "github_token" alike, "password" catches
 // "db_password", and "api-key" catches "X-Api-Key". The list exists because
 // credentials reach logs by accident far more often than by design, most
-// often through an attribute carrying a whole header map or request struct,
-// and such keys are spelled every way there is.
+// often through an attribute carrying a whole header map, and such keys are
+// spelled every way there is.
+//
+// The keys inside such a map are matched too. When an attribute's value is an
+// [http.Header], a [url.Values], a map[string][]string or a map[string]string,
+// each entry whose key matches has its value replaced, so
+// slog.Any("headers", r.Header) is written with its Authorization and Cookie
+// values hidden and every other header intact; the map the caller passed is
+// left unchanged. Nothing else is looked inside: a struct, a pointer or a map
+// of another type is written as the handler renders it, with only the
+// attribute's own key checked, so log the fields that are needed rather than
+// a whole request or configuration value.
 //
 // Matching by containment errs towards hiding: a key such as "token_count" or
 // "session_count" is redacted too. That is the intended trade, since a count
@@ -429,7 +442,64 @@ func (r *redactor) replaceAttr(groups []string, a slog.Attr) slog.Attr {
 	if r.shouldRedact(a.Key) || r.anyRedacted(groups) {
 		return slog.String(a.Key, RedactedPlaceholder)
 	}
+	if a.Value.Kind() == slog.KindAny {
+		if redacted, ok := r.redactEntries(a.Value.Any()); ok {
+			return slog.Any(a.Key, redacted)
+		}
+	}
 	return a
+}
+
+// redactedValues stands in for the values of a multi-valued entry that is
+// redacted, so that the map keeps its type and its shape in the output. It is
+// shared by every copy that needs it and never written to.
+var redactedValues = []string{RedactedPlaceholder}
+
+// redactEntries returns a copy of v with the value of every entry whose key
+// carries a secret replaced, when v is one of the maps a request's credentials
+// travel in, and false when there is nothing to hide.
+//
+// Matching attribute keys alone, as this once did, left exactly the case the
+// key list was written for: slog.Any("headers", r.Header) is one attribute
+// whose key is "headers", and neither handler looks inside the value, so the
+// Authorization and Cookie headers were written in full in both formats. A
+// copy is made, and only when an entry matches, because the map is the
+// caller's and is usually still in use by the request it came from.
+func (r *redactor) redactEntries(v any) (any, bool) {
+	if len(r.terms) == 0 {
+		return nil, false
+	}
+	switch m := v.(type) {
+	case http.Header:
+		return redactMap(r, m, redactedValues)
+	case url.Values:
+		return redactMap(r, m, redactedValues)
+	case map[string][]string:
+		return redactMap(r, m, redactedValues)
+	case map[string]string:
+		return redactMap(r, m, RedactedPlaceholder)
+	}
+	return nil, false
+}
+
+// redactMap is [redactor.redactEntries] for one map type: a copy of m with
+// placeholder in place of every matching entry's value, or false when no key
+// matches.
+func redactMap[M ~map[string]V, V any](r *redactor, m M, placeholder V) (any, bool) {
+	var out M
+	for key := range m {
+		if !r.shouldRedact(key) {
+			continue
+		}
+		if out == nil {
+			out = maps.Clone(m)
+		}
+		out[key] = placeholder
+	}
+	if out == nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // discardHandler drops every record without formatting it.
@@ -745,6 +815,12 @@ func (h *consoleHandler) appendValue(buf []byte, key string, v slog.Value) []byt
 	case slog.KindTime:
 		return v.Time().AppendFormat(buf, time.RFC3339Nano)
 	default:
+		// A header map or a query is printed with fmt, which knows nothing of
+		// redaction, so its secret entries are replaced first; see
+		// [redactor.redactEntries].
+		if redacted, ok := h.redact.redactEntries(v.Any()); ok {
+			v = slog.AnyValue(redacted)
+		}
 		return appendMaybeQuoted(buf, v.String())
 	}
 }

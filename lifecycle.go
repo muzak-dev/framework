@@ -35,6 +35,12 @@ type Lifecycle interface {
 	// so a long-running dial should honour it and give up. On a successful
 	// start it stays live until the components are stopped, so a component
 	// may keep it for a background worker; it is cancelled after Stop has run.
+	//
+	// Under a run method it is also cancelled when the run is told to stop
+	// while the components are still starting, by [App.Shutdown] or by the
+	// context given to [App.RunContext], and not once they are up: from then
+	// on that context ending, or SIGTERM under [App.RunSignals], begins a
+	// drain, and the components are in use until it has finished.
 	Start(ctx context.Context) error
 	// Stop releases the resource. It is called once, after the HTTP server
 	// has finished draining in-flight requests, and is called even for a

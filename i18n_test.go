@@ -656,6 +656,7 @@ func TestBindingKey(t *testing.T) {
 		errNotInt:      "muzak.binding.integer",
 		errNotUint:     "muzak.binding.unsigned",
 		errNotNumber:   "muzak.binding.number",
+		errRepeated:    "muzak.binding.repeated",
 		// A failure from a setter of the caller's own has no message the
 		// framework could translate, so it keeps the words the setter chose.
 		errors.New("the transponder is misaligned"): "",

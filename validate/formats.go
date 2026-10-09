@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // This file holds the predicates behind the format rules. They are ordinary
@@ -20,9 +21,17 @@ import (
 // allocates nothing and the checks can be tested on their own.
 
 // isHTTPSURL reports whether a value is an absolute https URL with a host.
+//
+// Every URL rule asks for a hostname rather than a Host. url.Parse reads
+// "http://:8080/admin" as a Host of ":8080", a port and no name, and net/http
+// dials an empty name as the local machine: a value the rule approved as
+// somewhere else on the network reached a port on the server itself, which is
+// the request forgery a URL check is there to stop. Hostname is the Host with
+// the port and the brackets of an IPv6 literal removed, so it is empty exactly
+// when nothing names a machine.
 func isHTTPSURL(value string) bool {
 	parsed, err := url.Parse(value)
-	return err == nil && strings.EqualFold(parsed.Scheme, "https") && parsed.Host != "" && isSoundURL(value, parsed)
+	return err == nil && strings.EqualFold(parsed.Scheme, "https") && parsed.Hostname() != "" && isSoundURL(value, parsed)
 }
 
 // isSoundURL reports whether an absolute URL that parsed is one a person could
@@ -46,8 +55,10 @@ func isSoundURL(raw string, parsed *url.URL) bool {
 // isURLWithScheme reports whether a value is an absolute URL using one of the
 // permitted schemes.
 //
-// A scheme with an authority must carry a host, so "https://" alone is refused.
-// One without, such as mailto, must carry something after the colon instead.
+// A scheme with an authority must carry a hostname, so neither "https://" nor
+// "https://:443" is accepted. One without, such as mailto, must carry something
+// after the colon instead; url.Parse gives such a value an Opaque part and no
+// Host, so the two cases cannot be confused.
 func isURLWithScheme(value string, schemes []string) bool {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme == "" {
@@ -60,7 +71,7 @@ func isURLWithScheme(value string, schemes []string) bool {
 			break
 		}
 	}
-	return permitted && (parsed.Host != "" || parsed.Opaque != "") && isSoundURL(value, parsed)
+	return permitted && (parsed.Hostname() != "" || parsed.Opaque != "") && isSoundURL(value, parsed)
 }
 
 // isHostname reports whether a value is a valid DNS hostname.
@@ -82,6 +93,69 @@ func isHostname(value string) bool {
 	return true
 }
 
+// isMailDomain reports whether the domain of an email address, everything
+// after its last @, names somewhere mail can be delivered.
+//
+// net/mail reads the domain as an RFC 5322 dot-atom, which is the grammar of a
+// local part as much as of a domain: it admits a lone hyphen, an underscore and
+// punctuation such as "=", "/" and "{", none of which a resolver will look up.
+// So the domain is held to the hostname rules as well. A domain in another
+// script is held to the same shape, labels of letters, marks, digits and
+// hyphens with no hyphen at either end, measured in characters rather than in
+// the bytes of its ASCII form, which a validator has no business computing.
+//
+// A domain literal such as [127.0.0.1] is left as net/mail found it. The
+// parser only accepts one that is an IP address, and it is a real form an
+// address can take.
+func isMailDomain(domain string) bool {
+	if strings.HasPrefix(domain, "[") {
+		return true
+	}
+	if isASCII(domain) {
+		return isHostname(domain)
+	}
+	if utf8.RuneCountInString(domain) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(domain, ".") {
+		if !isMailLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// isMailLabel is [isHostLabel] for a label that may hold letters of any script.
+func isMailLabel(label string) bool {
+	if n := utf8.RuneCountInString(label); n == 0 || n > 63 {
+		return false
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	return everyRune(label, func(r rune) bool {
+		if r < utf8.RuneSelf {
+			return isHostChar(r)
+		}
+		return unicode.IsLetter(r) || unicode.IsMark(r) || unicode.IsDigit(r)
+	})
+}
+
+// isASCII reports whether a string holds nothing outside ASCII.
+func isASCII(value string) bool {
+	for i := range len(value) {
+		if value[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// isHostChar reports whether a character may appear in a hostname label.
+func isHostChar(c rune) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-'
+}
+
 // isHostLabel reports whether one dot-separated part of a hostname is legal.
 func isHostLabel(label string) bool {
 	if len(label) == 0 || len(label) > 63 {
@@ -91,10 +165,7 @@ func isHostLabel(label string) bool {
 		return false
 	}
 	for i := 0; i < len(label); i++ {
-		c := label[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-':
-		default:
+		if !isHostChar(rune(label[i])) {
 			return false
 		}
 	}

@@ -88,15 +88,23 @@ func TestDecodeIssueForAnUnclassifiedFailure(t *testing.T) {
 		t.Fatalf("JSONKind = %q, want the unclassified case", string(semantic.JSONKind))
 	}
 
-	field, issue := decodeIssue(err)
-	if field != "ch" {
-		t.Errorf("field = %q, want %q", field, "ch")
+	// A failure with no JSON kind is the type's, not the request's, and the
+	// binder answers it as a server error rather than as a detail.
+	if !typeFault(err) {
+		t.Error("typeFault = false for a channel field, want the type blamed")
 	}
-	if issue != "could not be decoded" {
-		t.Errorf("issue = %q", issue)
+	if typeFault(errors.New("jsontext: unexpected EOF")) {
+		t.Error("typeFault = true for a syntax error, want the request blamed")
 	}
-	if strings.Contains(issue, "chan") {
-		t.Errorf("the issue leaked a Go type: %q", issue)
+	if !typeFault(&json.SemanticError{GoType: reflect.TypeFor[**chan int]()}) {
+		t.Error("typeFault = false for a pointer to a channel, want the type blamed")
+	}
+	detail := decodeIssue(err, reflect.TypeFor[unsupported]())
+	if detail.Field != "ch" {
+		t.Errorf("field = %q, want %q", detail.Field, "ch")
+	}
+	if strings.Contains(detail.Issue, "chan") {
+		t.Errorf("the issue leaked a Go type: %q", detail.Issue)
 	}
 }
 

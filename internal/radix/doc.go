@@ -28,6 +28,16 @@
 // trailing slash produces a final empty segment that a parameter refuses to
 // match.
 //
+// Nothing is normalised before matching: no case folding, no collapsing of
+// "//", and no resolving of "." or "..", decoded or not. A path that only
+// resembles a static route under one of those, "//admin/panel" or
+// "/x/../admin/panel" beside "/admin/panel", falls through to a wildcard that
+// can take it, with the text captured as it came. "/admin%2Fpanel" is one
+// segment, so it misses "/admin/panel" too, and the wildcard captures
+// "admin%2Fpanel", which the router decodes to "admin/panel". The router's
+// documentation warns its callers about what that means for a wildcard's
+// handler.
+//
 // # Precedence
 //
 // At every node the tree tries static children first, then the parameter

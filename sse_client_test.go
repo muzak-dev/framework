@@ -157,6 +157,29 @@ func TestSSEReaderDeliversCommentsWhenAsked(t *testing.T) {
 	}
 }
 
+// TestSSEReaderDeliversNothingAfterClose is the regression test for a reader
+// that went on handing out events already in its buffer after it was closed,
+// which made a test asserting that a closed stream ends fail whenever a
+// keepalive had arrived in the same read as the event before it.
+func TestSSEReaderDeliversNothingAfterClose(t *testing.T) {
+	t.Parallel()
+	body := io.NopCloser(strings.NewReader("data: first\n\n: keepalive\ndata: second\n\n"))
+	reader := newSSEReader(body, SSEDialOptions{KeepComments: true})
+
+	message, err := reader.Next(t.Context())
+	if err != nil || message.Data != "first" {
+		t.Fatalf("Next() = %+v, %v, want the first event", message, err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+	for range 3 {
+		if message, err := reader.Next(t.Context()); !errors.Is(err, ErrSSEStreamEnded) {
+			t.Fatalf("Next() after Close = %+v, %v, want ErrSSEStreamEnded", message, err)
+		}
+	}
+}
+
 func TestSSEReaderReportsWhatTheStreamAsksFor(t *testing.T) {
 	t.Parallel()
 	server, _ := serveRaw(t, "retry: 2500\nid: 7\ndata: hello\n\nretry: nonsense\ndata: again\n\n")

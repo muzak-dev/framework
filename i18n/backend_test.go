@@ -1,9 +1,14 @@
 package i18n
 
 import (
+	"fmt"
 	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
+
+	"muzak.dev/framework/internal/yaml"
 )
 
 // fixed is a backend of the kind someone else would write: it answers from a
@@ -353,5 +358,166 @@ func TestStoreRefusesATreeThatNestsTooDeep(t *testing.T) {
 	// One inside the bound loads, and a locale nests nothing like it.
 	if err := store.LoadFile("ok.json", []byte(nest(maxTreeDepth-1))); err != nil {
 		t.Errorf("LoadFile of a file nested %d levels = %v, want it loaded", maxTreeDepth-1, err)
+	}
+}
+
+// aliasedUnderLongKeys writes a YAML locale that keeps well inside the parser's
+// alias budget and still flattens to hundreds of megabytes: a 4 KB key above
+// copies of an anchored tree, so that every value beneath it is stored under a
+// dotted path that spells the long key out again.
+func aliasedUnderLongKeys(locale string, copies int) string {
+	var b strings.Builder
+	key := strings.Repeat("k", 4096)
+	b.WriteString(locale + ":\n")
+	b.WriteString("  l0: &l0 {a: x, b: x, c: x, d: x, e: x, f: x, g: x, h: x, i: x, j: x}\n")
+	b.WriteString("  l1: &l1 {a: *l0, b: *l0, c: *l0, d: *l0, e: *l0, f: *l0, g: *l0, h: *l0, i: *l0, j: *l0}\n")
+	b.WriteString("  l2: &l2 {a: *l1, b: *l1, c: *l1, d: *l1, e: *l1, f: *l1, g: *l1, h: *l1, i: *l1, j: *l1}\n")
+	b.WriteString("  l3: &l3 {a: *l2, b: *l2, c: *l2, d: *l2, e: *l2, f: *l2, g: *l2, h: *l2, i: *l2, j: *l2}\n")
+	b.WriteString("  " + key + ":\n")
+	for i := range copies {
+		fmt.Fprintf(&b, "    k%d: *l3\n", i)
+	}
+	return b.String()
+}
+
+// TestStoreRefusesALongKeyAboveManyValues is the regression test for the YAML
+// alias budget being bypassed by flattening. The parser bounds how many values
+// aliases copy, but flattening then spelled the full dotted path out once per
+// value, so a 4.5 KB file holding a 4 KB key above 78,000 aliased values was
+// retained as about 394 MB, growing with the length of the key.
+func TestStoreRefusesALongKeyAboveManyValues(t *testing.T) {
+	// Not parallel: it measures what the load allocates, which a test running
+	// beside it would add to.
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(aliasedUnderLongKeys("en", 7))
+	if len(data) > 5000 {
+		t.Fatalf("the file is %d bytes, want it to stay the size of the original report", len(data))
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	err = store.LoadFile("big.yml", data)
+	runtime.ReadMemStats(&after)
+
+	if err == nil {
+		t.Fatal("LoadFile accepted a file that flattens to hundreds of megabytes, want it refused")
+	}
+	for _, mention := range []string{"big.yml", "MiB"} {
+		if !strings.Contains(err.Error(), mention) {
+			t.Errorf("the error does not mention %s: %v", mention, err)
+		}
+	}
+	// It is refused before the paths are built, so the load costs what the
+	// parse does rather than what the flattened locale would have.
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > maxFlattenedBytes/4 {
+		t.Errorf("the refused load allocated %d MB, want it refused before the paths were built", allocated>>20)
+	}
+	if store.Exists("en", "l0.a") {
+		t.Error("a refused file left some of its translations behind")
+	}
+
+	// The same tree under a short key is an ordinary use of aliases, and loads.
+	if err := store.LoadFile("small.yml", []byte(aliasedUnderLongKeys("en", 0))); err != nil {
+		t.Errorf("LoadFile of the anchors alone = %v, want them loaded", err)
+	}
+}
+
+// TestStoreRefusesAJSONKeyAboveManyValues covers the same multiplication
+// without aliases. JSON has none, but a long key above many short values costs
+// the key once in the file and once per value in the store, which is quadratic
+// in the size of the file: a megabyte of JSON could ask for gigabytes.
+func TestStoreRefusesAJSONKeyAboveManyValues(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	b.WriteString(`{"en": {"` + strings.Repeat("k", 8192) + `": {`)
+	for i := range 20_000 {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `"v%d": "x"`, i)
+	}
+	b.WriteString("}}}")
+
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadFile("wide.json", []byte(b.String())); err == nil || !strings.Contains(err.Error(), "MiB") {
+		t.Fatalf("LoadFile = %v, want a refusal of a file that flattens to over %d MiB", err, maxFlattenedBytes>>20)
+	}
+}
+
+// TestStoreTranslationsRefusesAnAmplifiedTreeAndKeepsTheLocale covers the
+// bound where it is enforced for every source, which is the backend: a tree
+// handed over from Go is held to it as a file is, and refusing it leaves the
+// locale as it was.
+func TestStoreTranslationsRefusesAnAmplifiedTreeAndKeepsTheLocale(t *testing.T) {
+	t.Parallel()
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreTranslations("en", map[string]any{"keep": "kept"}); err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]any, 20_000)
+	for i := range 20_000 {
+		values[fmt.Sprintf("v%d", i)] = "x"
+	}
+	err = store.StoreTranslations("en", map[string]any{strings.Repeat("k", 8192): values})
+	if err == nil || !strings.Contains(err.Error(), `"en"`) {
+		t.Fatalf("StoreTranslations = %v, want a refusal naming the locale", err)
+	}
+	if got := store.T("en", "keep"); got != "kept" {
+		t.Errorf("keep = %q after a refused tree, want the translation already stored", got)
+	}
+}
+
+// TestLoadFileBoundsItsLocalesTogether covers a file that spreads the same
+// multiplication across several locales, each inside the bound on its own.
+// Anchors are shared by the whole document, so one set of them can be aliased
+// under a long key in as many locales as the alias budget pays for.
+func TestLoadFileBoundsItsLocalesTogether(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	key := strings.Repeat("k", 4096)
+	b.WriteString("xa:\n")
+	b.WriteString("  l0: &l0 {a: x, b: x, c: x, d: x, e: x, f: x, g: x, h: x, i: x, j: x}\n")
+	b.WriteString("  l1: &l1 {a: *l0, b: *l0, c: *l0, d: *l0, e: *l0, f: *l0, g: *l0, h: *l0, i: *l0, j: *l0}\n")
+	b.WriteString("  l2: &l2 {a: *l1, b: *l1, c: *l1, d: *l1, e: *l1, f: *l1, g: *l1, h: *l1, i: *l1, j: *l1}\n")
+	for _, locale := range []string{"xb", "xc", "xd"} {
+		b.WriteString(locale + ":\n  " + key + ":\n")
+		for i := range 5 {
+			fmt.Fprintf(&b, "    k%d: *l2\n", i)
+		}
+	}
+
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each locale alone is inside the bound, which is what makes this the
+	// case to cover.
+	tree, err := yaml.Parse([]byte(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, locale := range []string{"xb", "xc", "xd"} {
+		if size := flatSize(0, tree[locale].(map[string]any), 0, maxFlattenedBytes); size > maxFlattenedBytes {
+			t.Fatalf("%s alone flattens to %d MB, want each locale inside the bound", locale, size>>20)
+		}
+	}
+
+	if err := store.LoadFile("spread.yml", []byte(b.String())); err == nil || !strings.Contains(err.Error(), "spread.yml") {
+		t.Fatalf("LoadFile = %v, want a refusal naming the file", err)
+	}
+	for _, locale := range []string{"xa", "xb", "xc", "xd"} {
+		if store.Exists(locale, "l0.a") || slices.Contains(store.Backend().Locales(), locale) {
+			t.Errorf("a refused file left %s behind", locale)
+		}
 	}
 }

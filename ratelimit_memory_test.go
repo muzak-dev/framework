@@ -327,7 +327,9 @@ func TestMemoryExpiryHeapClearsDiscardedSlots(t *testing.T) {
 // quota it belonged to. A client able to mint keys under one quota (an address
 // per request from its IPv6 range) could fill the table and push out another
 // quota's counter, resetting a per-account login limit mid-window. The flood
-// now only ever displaces counters of the quota it is flooding.
+// now only ever displaces counters of the quota it is flooding. The first fix
+// took the counter from the largest quota, which held only while the flooded
+// quota was the largest; the second case below floods one that is not.
 func TestMemoryStorageEvictsFromTheQuotaThatFilledIt(t *testing.T) {
 	t.Parallel()
 	storage, _ := newTestStorage(t, MemoryRateLimitOptions{MaxEntries: 8})
@@ -350,6 +352,30 @@ func TestMemoryStorageEvictsFromTheQuotaThatFilledIt(t *testing.T) {
 		t.Errorf("the partitions hold %d counters and the table %d; they must agree", held, storage.Len())
 	}
 
+	// The flooded quota need not be the largest. Here most of the table
+	// belongs to a quota nobody is flooding, and taking the counter to
+	// discard from the largest quota would have handed the flood its
+	// counters, one per fresh key, starting with the one closest to expiring.
+	crowded, _ := newTestStorage(t, MemoryRateLimitOptions{MaxEntries: 10})
+	for i := range 6 {
+		increment(t, crowded, "api", "ip:"+strconv.Itoa(i), time.Minute)
+	}
+	for range 3 {
+		increment(t, crowded, "login", "user:alice", time.Hour)
+	}
+	for i := range 100 {
+		increment(t, crowded, "flood", "user:minted-"+strconv.Itoa(i), time.Hour)
+	}
+	if got := crowded.partitions["api"].Len(); got != 6 {
+		t.Errorf("the api quota holds %d counters after another quota was flooded, want all 6 of its own", got)
+	}
+	if count, _ := increment(t, crowded, "login", "user:alice", time.Hour); count != 4 {
+		t.Errorf("alice's login count = %d after the flood, want 4", count)
+	}
+	if count, _ := increment(t, crowded, "api", "ip:0", time.Minute); count != 2 {
+		t.Errorf("the api counter closest to expiring was discarded by another quota's flood (count %d, want 2)", count)
+	}
+
 	// With two quotas equally large, the tie is settled by name rather than by
 	// map order, so the outcome is the same on every run.
 	tied, _ := newTestStorage(t, MemoryRateLimitOptions{MaxEntries: 4})
@@ -361,6 +387,46 @@ func TestMemoryStorageEvictsFromTheQuotaThatFilledIt(t *testing.T) {
 	if tied.partitions["a"].Len() != 1 || tied.partitions["b"].Len() != 2 {
 		t.Errorf("partitions a=%d b=%d, want the tie broken against a",
 			tied.partitions["a"].Len(), tied.partitions["b"].Len())
+	}
+}
+
+// TestMemoryStorageMintingKeysCannotResetAnotherQuota is the regression test
+// for eviction that crossed quotas. A full table made room by discarding the
+// counter closest to expiring from whichever quota held the most, which need
+// not be the quota being counted. A client that had spent an application-wide
+// per-address quota early, so that its counter was the oldest there, could
+// then mint fresh keys under a quota keyed on something it chooses, a
+// username or an API key, and each one discarded the oldest counter of the
+// larger quota: its own. Thirty-one minted keys took its count from 11 back to
+// 1 against a limit of 10. A quota that holds counters now makes room from its
+// own.
+func TestMemoryStorageMintingKeysCannotResetAnotherQuota(t *testing.T) {
+	t.Parallel()
+	storage, clock := newTestStorage(t, MemoryRateLimitOptions{MaxEntries: 100})
+
+	const limit = 10
+	for range limit + 1 {
+		increment(t, storage, "api", "ip:198.51.100.7", time.Hour)
+	}
+	// Other clients arrive later in the window, so the attacker's counter is
+	// the one closest to expiring.
+	for i := range 70 {
+		clock.advance(time.Second)
+		increment(t, storage, "api", "ip:10.0.0."+strconv.Itoa(i), time.Hour)
+	}
+	for i := range 31 {
+		increment(t, storage, "login-user", "user:x"+strconv.Itoa(i), time.Minute)
+	}
+
+	if count, _ := increment(t, storage, "api", "ip:198.51.100.7", time.Hour); count <= limit {
+		t.Errorf("the attacker's api count = %d after minting keys under another quota, want it still over the limit of %d",
+			count, limit)
+	}
+	if got := storage.partitions["api"].Len(); got != 71 {
+		t.Errorf("the api quota holds %d counters, want all 71 it was given", got)
+	}
+	if storage.Len() > 100 {
+		t.Errorf("Len() = %d, want the table held at its bound", storage.Len())
 	}
 }
 

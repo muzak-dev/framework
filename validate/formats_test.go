@@ -479,3 +479,70 @@ func TestEmailRefusesHiddenCharacters(t *testing.T) {
 		}
 	}
 }
+
+// TestURLRulesRefuseAnEmptyHostname pins the SSRF check the URL rules exist to
+// make. "http://:8080/admin" parses with a Host of ":8080" and no hostname at
+// all, and net/http dials an empty hostname as the local machine, so a value
+// the rule blessed as a remote address reached the server's own port.
+func TestURLRulesRefuseAnEmptyHostname(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"http://:80/", "http://:8080/admin", "https://:443", "http://user@:80/", "https://user:pw@:443/x",
+	} {
+		if err := String().URL().Check(value); err == nil {
+			t.Errorf("URL().Check(%q) passed, want it refused", value)
+		}
+		if err := String().HTTPS().Check(value); err == nil {
+			t.Errorf("HTTPS().Check(%q) passed, want it refused", value)
+		}
+		if err := String().URLWithSchemes("http", "https").Check(value); err == nil {
+			t.Errorf("URLWithSchemes(http, https).Check(%q) passed, want it refused", value)
+		}
+	}
+	for _, value := range []string{"s3://:1/key", "redis://user@:6379"} {
+		if err := String().URLWithSchemes("s3", "redis").Check(value); err == nil {
+			t.Errorf("URLWithSchemes.Check(%q) passed, want it refused", value)
+		}
+	}
+	// A hostname is still all it takes, an IP literal included, and a scheme
+	// with no authority still passes on what follows its colon.
+	for _, value := range []string{"http://muzak.dev:8080/", "https://[::1]:443/", "http://user@127.0.0.1/"} {
+		if err := String().URL().Check(value); err != nil {
+			t.Errorf("URL().Check(%q) = %v, want it accepted", value, err)
+		}
+	}
+	for _, value := range []string{"mailto:ada@muzak.dev", "urn:isbn:0451450523", "redis://:secret@cache:6379"} {
+		if err := String().URLWithSchemes("mailto", "urn", "redis").Check(value); err != nil {
+			t.Errorf("URLWithSchemes.Check(%q) = %v, want it accepted", value, err)
+		}
+	}
+}
+
+// TestEmailDomainMustBeAHostname pins the domain half of an address to the
+// hostname rules. net/mail reads the domain as an RFC 5322 dot-atom, which
+// admits a lone hyphen, an underscore and most punctuation, so "a@-" and
+// "a@b=c" passed as addresses although no mail can be delivered to either.
+func TestEmailDomainMustBeAHostname(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"a@-", "a@-b.com", "a@b-.com", "a@foo_bar.com", "a@b!c.com", "a@x+y", "a@b=c",
+		"a@b.c/d", "a@b.c{d}", "a@" + repeat("b", 64) + ".com", "a@" + repeat("b.", 127) + "com",
+		"a@-" + runes(0x4f8b, 0x5b50) + ".com", "a@" + runes(0x4f8b) + "-.com",
+		"a@" + runes(0x4f8b) + "_" + runes(0x5b50) + ".com",
+		"a@" + repeat(runes(0x4f8b), 64) + ".com", "a@" + repeat(runes(0x4f8b)+".", 127) + "com",
+	} {
+		if err := String().Email().Check(value); err == nil {
+			t.Errorf("Email().Check(%q) passed, want it refused", value)
+		}
+	}
+	for _, value := range []string{
+		"a@b", "a@localhost", "a@a-b.example", "a@1.2.3.4", "a@xn--bcher-kva.example",
+		"a@" + repeat("b", 63) + ".com",
+		"a@[127.0.0.1]", "a@[IPv6:::1]", // a domain literal net/mail has checked as an address
+		"a@" + runes(0x4f8b, 0x5b50) + "-" + runes(0x5e7f) + ".com",
+	} {
+		if err := String().Email().Check(value); err != nil {
+			t.Errorf("Email().Check(%q) = %v, want it accepted", value, err)
+		}
+	}
+}

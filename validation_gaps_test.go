@@ -127,7 +127,7 @@ func TestEveryConstraintKeywordReachesTheSchema(t *testing.T) {
 // constraint for a property the document does not describe from panicking.
 func TestApplyConstraintsIgnoresAMissingSchema(t *testing.T) {
 	t.Parallel()
-	applyConstraints(nil, validate.Constraints{Required: true})
+	applyConstraints(nil, fieldConstraints{{Required: true}})
 }
 
 // TestSetRequiredAddsAndRemoves covers both directions of the reconciliation
@@ -169,11 +169,10 @@ func TestApplyBodyConstraintsWithNothingToDo(t *testing.T) {
 	builder := newSchemaBuilder()
 	builder.applyBodyConstraints(&Schema{}, nil, nil, "body")
 	builder.applyBodyConstraints(&Schema{Type: "string"},
-		map[fieldKey]validate.Constraints{{"body", "a"}: {Required: true}}, nil, "body")
+		map[fieldKey]fieldConstraints{{"body", "a"}: {{Required: true}}}, nil, "body")
 	// A reference that names nothing resolves to nothing rather than panicking.
 	builder.applyBodyConstraints(&Schema{Ref: componentPrefix + "absent"},
-		map[fieldKey]validate.Constraints{{"body", "a"}: {Required: true}}, nil, "body")
-	builder.requireOnlyWhatIsEnforced(&Schema{Ref: componentPrefix + "absent"}, nil, nil, true)
+		map[fieldKey]fieldConstraints{{"body", "a"}: {{Required: true}}}, nil, "body")
 }
 
 // TestValidationWithoutAModel covers the paths a plan takes when the input type
@@ -303,8 +302,8 @@ func TestCollectOriginsWalksEmbeddedStructsAndSkipsWhatItShould(t *testing.T) {
 		hidden  string //nolint:unused // present to prove unexported fields are skipped
 	}
 
-	fields := map[uintptr]fieldOrigin{}
-	collectOrigins(reflect.TypeFor[outer](), 0, fields)
+	fields := map[originKey]fieldOrigin{}
+	collectOrigins(reflect.TypeFor[outer](), 0, "", fields)
 
 	names := map[string]bool{}
 	for _, origin := range fields {
@@ -323,8 +322,8 @@ func TestCollectOriginsWalksEmbeddedStructsAndSkipsWhatItShould(t *testing.T) {
 	}
 
 	// A non-struct type records nothing rather than panicking.
-	empty := map[uintptr]fieldOrigin{}
-	collectOrigins(reflect.TypeFor[string](), 0, empty)
+	empty := map[originKey]fieldOrigin{}
+	collectOrigins(reflect.TypeFor[string](), 0, "", empty)
 	if len(empty) != 0 {
 		t.Errorf("collectOrigins on a non-struct recorded %v", empty)
 	}

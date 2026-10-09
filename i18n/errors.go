@@ -91,8 +91,10 @@ func (e *InvalidLocaleError) Unwrap() error { return ErrInvalidLocale }
 type InvalidPluralizationDataError struct {
 	// Locale and Key name the entry.
 	Locale, Key string
-	// Count is the number that was being pluralized.
-	Count int
+	// Count is the number that was being pluralized, as the call gave it: an
+	// int when it came from [Lookup.Count], and whichever integer or
+	// floating-point type was passed to [Store.Translate] otherwise.
+	Count any
 	// Category is the form the locale's rule selected.
 	Category PluralCategory
 	// Have lists the forms the entry actually defines.
@@ -102,14 +104,14 @@ type InvalidPluralizationDataError struct {
 // Error renders the failure with the form that was wanted and the ones present.
 func (e *InvalidPluralizationDataError) Error() string {
 	if len(e.Have) == 0 {
-		return fmt.Sprintf("i18n: %q in %s is one string rather than a set of plural forms, so a count of %d cannot choose between them",
+		return fmt.Sprintf("i18n: %q in %s is one string rather than a set of plural forms, so a count of %v cannot choose between them",
 			e.Key, e.Locale, e.Count)
 	}
 	have := make([]string, len(e.Have))
 	for i, category := range e.Have {
 		have[i] = string(category)
 	}
-	return fmt.Sprintf("i18n: %q in %s has no %q form for a count of %d; it defines %s",
+	return fmt.Sprintf("i18n: %q in %s has no %q form for a count of %v; it defines %s",
 		e.Key, e.Locale, e.Category, e.Count, strings.Join(have, ", "))
 }
 
@@ -181,15 +183,20 @@ func (e *UnknownFileTypeError) Unwrap() error { return ErrUnknownFileType }
 type ArgumentError struct {
 	// Key names the translation the arguments were given to.
 	Key string
-	// Index is the position in the argument list the problem was found at.
+	// Index is the position in the argument list the problem was found at, or
+	// -1 when the problem is the value given as the count.
 	Index int
 	// Value is what was found where a name was expected, or nil when the list
-	// simply ran out.
+	// simply ran out. When Index is -1 it is the count that was refused.
 	Value any
 }
 
 // Error renders the failure with the position that is wrong.
 func (e *ArgumentError) Error() string {
+	if e.Index < 0 {
+		return fmt.Sprintf("i18n: the count given to %q is %v, which is not a number a plural form can be chosen by; "+
+			"give an integer or a finite float below 2^63 in magnitude", e.Key, e.Value)
+	}
 	if e.Value == nil {
 		return fmt.Sprintf("i18n: the arguments to %q end with a name that has no value", e.Key)
 	}

@@ -6,8 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
+	"strconv"
 	"strings"
+
+	"muzak.dev/framework/validate"
 )
 
 // ErrorDetail describes one specific thing that was wrong with a request.
@@ -544,54 +548,227 @@ func clampStatus(code int) int {
 	return code
 }
 
-// decodeIssue turns a decoder error into a field name and an issue phrase safe
-// to return to the client.
+// decodeIssue turns a decoder error into the detail a client is sent about its
+// body. root is the type the body was decoded into.
 //
 // encoding/json/v2 reports a JSON pointer to the offending member, which gives
-// the detail its field name. The accompanying Go type is deliberately dropped,
-// because naming server-side types in a response tells a client more about the
+// the detail its field name, written the way a validation failure names the
+// same member: "addr.zip" for a member of an object, "items[1].zip" for one
+// inside an element of an array. Reading the pointer's last token alone named
+// both of those "zip". The root type is what tells an array index from an
+// object member whose name is a number, which the pointer itself does not.
+//
+// The issue is chosen from what went wrong rather than from the JSON kind
+// alone. A value of a kind the field cannot hold at all, a string for an
+// integer, is "has the wrong type"; one of the right kind that does not fit,
+// 300 for an int8 or "yesterday" for a time, is described the way a path,
+// query or header parameter of the same type would be, with the same message
+// and the same translation key. The Go type involved is never named, because
+// naming server-side types in a response tells a client more about the
 // implementation than it needs to know.
-func decodeIssue(err error) (field, issue string) {
+func decodeIssue(err error, root reflect.Type) ErrorDetail {
 	var se *json.SemanticError
-	if errors.As(err, &se) {
-		field = se.JSONPointer.LastToken()
-		switch {
-		case errors.Is(se.Err, json.ErrUnknownName):
-			return field, "is not a field this endpoint accepts"
-		case se.JSONKind != 0:
-			return field, fmt.Sprintf("has the wrong type, %s is not accepted here", describeJSONKind(se.JSONKind))
-		default:
-			return field, "could not be decoded"
+	if !errors.As(err, &se) {
+		reason := syntaxReason(err)
+		return ErrorDetail{
+			Location: "body", Issue: "is not valid JSON: " + reason,
+			Key: "muzak.binding.invalid_json", Args: []any{"reason", reason},
 		}
 	}
-	return "", sanitizeSyntaxError(err)
+	detail := ErrorDetail{Field: bodyPath(root, se.JSONPointer), Location: "body"}
+	switch {
+	case errors.Is(se.Err, json.ErrUnknownName):
+		detail.Issue, detail.Key = "is not a field this endpoint accepts", "muzak.binding.unknown_field"
+	case se.Err == nil:
+		// The decoder found a value of a kind the Go type cannot take at all,
+		// and says nothing more, because there is nothing more to say.
+		phrase, name := describeJSONKind(se.JSONKind)
+		detail.Issue = "has the wrong type, " + phrase + " is not accepted here"
+		detail.Key = "muzak.binding.wrong_" + name
+	default:
+		detail.Issue, detail.Kind, detail.Key, detail.Args = valueIssue(se)
+	}
+	return detail
 }
 
-// describeJSONKind names a JSON kind in words a client will recognise.
-func describeJSONKind(k jsontext.Kind) string {
+// typeFault reports whether a decode failure is the input type's fault rather
+// than the request's, which makes it a server error to log rather than a
+// detail to send.
+//
+// encoding/json/v2 marks the difference itself. A failure in what the request
+// sent carries the JSON kind of the value at fault; one where the Go value
+// cannot be decoded into at all carries none, as for a channel, an interface
+// it cannot fill, an embedded pointer to an unexported struct or a `string`
+// option on a string. A kindless failure from the binder's own reading of a
+// duration, or from a type that decodes itself, is still the request's, since
+// either judged the value it was given. time.Time is the exception to the
+// second: it has the methods, but the decoder reads it natively, and reports
+// a kindless failure only for a tag option it cannot honour.
+func typeFault(err error) bool {
+	var se *json.SemanticError
+	if !errors.As(err, &se) || se.JSONKind != 0 || bindingKeyFor(se.Err) != "" {
+		return false
+	}
+	target := se.GoType
+	for target != nil && target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	return target == nil || target == timeType || !decodesItself(target)
+}
+
+// valueIssue describes a value of the kind a field takes that still could not
+// be read into it, choosing the words from the type it was meant for.
+func valueIssue(se *json.SemanticError) (issue, kind, key string, args []any) {
+	target := se.GoType
+	for target != nil && target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	switch {
+	case bindingKeyFor(se.Err) != "":
+		// A failure from the binder's own reading of a type, such as a
+		// duration, is already worded for a client.
+		issue, key, args = paramIssue(se.Err)
+		return issue, "", key, args
+	case target == nil || decodesItself(target):
+		// A type that reads itself, time.Time and uuid.UUID among them, words
+		// its failures for a programmer. paramIssue keeps only a message
+		// written for the client, which is what a parameter of the same type
+		// reports.
+		issue, key, args = paramIssue(se.Err)
+		return issue, "", key, args
+	}
+	switch target.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if errors.Is(se.Err, strconv.ErrRange) {
+			issue, key, args = paramIssue(integerRange(target))
+			return issue, "", key, args
+		}
+		if target.Kind() >= reflect.Uint {
+			issue, key, args = paramIssue(errNotUint)
+		} else {
+			issue, key, args = paramIssue(errNotInt)
+		}
+		return issue, "", key, args
+	case reflect.Float32, reflect.Float64:
+		issue, key, args = paramIssue(errNotNumber)
+		return issue, "", key, args
+	case reflect.Array:
+		// The decoder refuses an array only for holding more elements than
+		// the Go array has room for; one with fewer is zero-filled. That is
+		// what MaxItems says of a slice, so it is said in the same words, and
+		// translated by the same rule.
+		n := target.Len()
+		return fmt.Sprintf("must have at most %d %s", n, pluralItems(n)), string(validate.KindTooManyItems), "", []any{"count", n}
+	}
+	issue, key, args = paramIssue(errNotText)
+	return issue, "", key, args
+}
+
+// pluralItems is "item" or "items", as the count asks.
+func pluralItems(n int) string {
+	if n == 1 {
+		return "item"
+	}
+	return "items"
+}
+
+// bodyPath renders a JSON pointer into a body of the given type the way a
+// validation failure names a member: object members joined with dots, array
+// elements by their position in brackets.
+//
+// The pointer itself does not say which of its tokens are array positions,
+// since "0" is a fine name for an object member, so the type is walked
+// alongside it. Where the type gives out, at an interface or a member the
+// type does not have, the remaining tokens are written as members.
+func bodyPath(root reflect.Type, pointer jsontext.Pointer) string {
+	var b strings.Builder
+	t := root
+	for token := range pointer.Tokens() {
+		for t != nil && t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
+			b.WriteString("[" + token + "]")
+			t = t.Elem()
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(token)
+		t = memberType(t, token)
+	}
+	return b.String()
+}
+
+// memberType returns the type of the named member of a JSON object decoded
+// into t, or nil when t has no such member or is not an object at all.
+func memberType(t reflect.Type, name string) reflect.Type {
+	if t == nil {
+		return nil
+	}
+	switch t.Kind() {
+	case reflect.Map:
+		return t.Elem()
+	case reflect.Struct:
+		for i := range t.NumField() {
+			f := t.Field(i)
+			if !f.IsExported() && !f.Anonymous {
+				continue
+			}
+			member, options, _ := strings.Cut(f.Tag.Get(tagJSON), ",")
+			if member == "-" && options == "" {
+				continue
+			}
+			if member == "" && (f.Anonymous || strings.Contains(options, "embed") || strings.Contains(options, "inline")) {
+				// An embedded struct's members are members of this object.
+				inner := f.Type
+				if inner.Kind() == reflect.Pointer {
+					inner = inner.Elem()
+				}
+				if found := memberType(inner, name); found != nil {
+					return found
+				}
+				continue
+			}
+			if member == "" {
+				member = f.Name
+			}
+			if member == name {
+				return f.Type
+			}
+		}
+	}
+	return nil
+}
+
+// describeJSONKind names a JSON kind in words a client will recognise, and in
+// one word for the translation key the words are kept under.
+func describeJSONKind(k jsontext.Kind) (phrase, name string) {
 	switch k {
 	case 'n':
-		return "null"
+		return "null", "null"
 	case 'f', 't':
-		return "a boolean"
+		return "a boolean", "boolean"
 	case '"':
-		return "a string"
+		return "a string", "string"
 	case '0':
-		return "a number"
+		return "a number", "number"
 	case '{':
-		return "an object"
+		return "an object", "object"
 	case '[':
-		return "an array"
+		return "an array", "array"
 	default:
-		return "that value"
+		return "that value", "value"
 	}
 }
 
-// sanitizeSyntaxError reduces a syntactic decoding failure to a short phrase.
-// The decoder's own messages describe the offending JSON rather than server
-// internals, but they carry package prefixes and byte offsets that are noise
-// to a client.
-func sanitizeSyntaxError(err error) string {
+// syntaxReason is the decoder's own account of a syntax error, which is what
+// a translation interpolates. The decoder's messages describe the offending
+// JSON rather than server internals, but they carry package prefixes and byte
+// offsets that are noise to a client.
+func syntaxReason(err error) string {
 	msg := err.Error()
 	for _, cut := range []string{" within ", " after offset ", " at offset "} {
 		if i := strings.Index(msg, cut); i >= 0 {
@@ -599,6 +776,5 @@ func sanitizeSyntaxError(err error) string {
 		}
 	}
 	msg = strings.TrimPrefix(msg, "jsontext: ")
-	msg = strings.TrimPrefix(msg, "json: ")
-	return "is not valid JSON: " + msg
+	return strings.TrimPrefix(msg, "json: ")
 }

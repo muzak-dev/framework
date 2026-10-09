@@ -198,6 +198,12 @@ func (r *StringRules) Len(n int) *StringRules {
 // library will accept. It deliberately does not try to prove the mailbox
 // exists, which only sending to it can establish.
 //
+// The domain must also be a hostname, which net/mail does not ask of it: labels
+// of letters, digits and hyphens, none beginning or ending with a hyphen, as
+// [StringRules.Host] checks, with letters from any script allowed. So "a@-"
+// and "a@foo_bar.com" are refused. A bracketed IP address, such as
+// "a@[192.0.2.1]", is a form an address can take and is accepted.
+//
 // Characters nobody can see are refused before the parser is consulted:
 // control characters, including the C1 set such as U+0085, format characters
 // such as the bidirectional override U+202E and the zero-width space U+200B,
@@ -222,6 +228,15 @@ func (r *StringRules) Email() *StringRules {
 // perfectly valid absolute URLs, and a value this check approves is exactly
 // the kind of thing that ends up in a redirect, a fetch or an href with the
 // validator's blessing.
+//
+// The host must name a machine. "http://:8080/admin" has a port and no
+// hostname, and an HTTP client dials that as the local machine, so it is
+// refused like a URL with no host at all.
+//
+// The rule checks the form of the URL and not where it leads: an address on a
+// private network, a loopback literal such as "http://127.0.0.1/" and a name
+// that resolves to one all pass. A server that fetches what a client gives it
+// still has to decide where it is willing to connect.
 func (r *StringRules) URL() *StringRules {
 	return r.add(step[string]{kind: kindURL})
 }
@@ -352,8 +367,9 @@ func (r *StringRules) HTTPS() *StringRules {
 //	v.String(&in.Source).URLWithSchemes("s3", "gs")
 //
 // Schemes are matched without regard to case. A scheme that carries an
-// authority must have a host, and one that does not, such as mailto, must have
-// something after the colon, so neither "https://" nor "mailto:" alone passes.
+// authority must have a hostname, and one that does not, such as mailto, must
+// have something after the colon, so neither "https://", "https://:443" nor
+// "mailto:" alone passes.
 func (r *StringRules) URLWithSchemes(schemes ...string) *StringRules {
 	return r.add(step[string]{kind: kindURLScheme, list: schemes})
 }
@@ -735,9 +751,14 @@ func applyStringStep(s *step[string], value *string) error {
 		if err != nil || address.Address != *value {
 			return errors.New("must be a valid email address")
 		}
+		// The address parsed and round-tripped, so it holds an @ and the
+		// domain is everything after the last one.
+		if !isMailDomain((*value)[strings.LastIndexByte(*value, '@')+1:]) {
+			return errors.New("must be a valid email address")
+		}
 	case kindURL:
 		parsed, err := url.Parse(*value)
-		if err != nil || parsed.Host == "" || !isHTTPScheme(parsed.Scheme) || !isSoundURL(*value, parsed) {
+		if err != nil || parsed.Hostname() == "" || !isHTTPScheme(parsed.Scheme) || !isSoundURL(*value, parsed) {
 			return errors.New("must be a valid absolute http or https URL")
 		}
 	case kindUUID:

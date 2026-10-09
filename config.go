@@ -74,7 +74,11 @@ func (m mapSource) Lookup(key string) (string, bool) {
 // The file holds one KEY=VALUE pair per line. Blank lines and lines beginning
 // with '#' are ignored, an optional leading "export " is stripped, and a value
 // may be wrapped in single or double quotes to preserve surrounding spaces or
-// a '#'. Escape sequences are interpreted only inside double quotes.
+// a '#'. Escape sequences are interpreted only inside double quotes. In an
+// unquoted value, a '#' after a space or a tab starts a comment, so
+// "API_KEY= # fill me in" sets API_KEY to the empty string, which a required
+// setting refuses; a '#' with no whitespace before it, as in "COLOR=#336699",
+// is part of the value.
 //
 // The real environment takes precedence over the file, so a value exported by
 // a container runtime overrides the one checked into a development .env. A
@@ -494,7 +498,7 @@ func parseEnv(r io.Reader) (map[string]string, error) {
 		if key == "" {
 			return nil, fmt.Errorf("line %d has an empty key", line)
 		}
-		value, err := parseEnvValue(strings.TrimSpace(raw))
+		value, err := parseEnvValue(raw)
 		if err != nil {
 			if envKeyShown(key) {
 				return nil, fmt.Errorf("line %d (%s): %w", line, key, err)
@@ -530,11 +534,14 @@ func envKeyShown(key string) bool {
 // parseEnvValue unwraps a quoted value and strips a trailing comment from an
 // unquoted one. A quoted value may be followed by a comment as well, after
 // whitespace, which is how every dotenv loader reads `KEY="value" # note`.
+//
+// raw is everything after the '=', untrimmed, because whether a '#' starts a
+// comment depends on what precedes it; see [stripEnvComment].
 func parseEnvValue(raw string) (string, error) {
-	if len(raw) >= 2 {
-		quote := raw[0]
+	if trimmed := strings.TrimSpace(raw); len(trimmed) >= 2 {
+		quote := trimmed[0]
 		if quote == '"' || quote == '\'' {
-			inner, ok := quotedValue(raw, quote)
+			inner, ok := quotedValue(trimmed, quote)
 			if !ok {
 				return "", errors.New("the value opens with a quote that is never closed")
 			}
@@ -545,10 +552,28 @@ func parseEnvValue(raw string) (string, error) {
 			return strings.NewReplacer(`\n`, "\n", `\r`, "\r", `\t`, "\t", `\"`, `"`, `\\`, `\`).Replace(inner), nil
 		}
 	}
-	if i := strings.Index(raw, " #"); i >= 0 {
-		raw = strings.TrimSpace(raw[:i])
+	return stripEnvComment(raw), nil
+}
+
+// stripEnvComment returns an unquoted value without its comment, which is
+// everything from the first '#' that follows a space or a tab.
+//
+// Only " #" used to count, and only once the value had been trimmed, so the
+// comment a template leaves after an empty value, "API_KEY= # fill me in",
+// became the value. That loaded the placeholder text as the key and satisfied
+// required:"true", which exists to refuse a key nobody supplied. Whitespace
+// before the '#' is now what starts a comment wherever it is, the whitespace
+// after the '=' included, and a tab counts as a space does, as it already did
+// after a quoted value. A '#' with no whitespace before it, as in
+// "COLOR=#336699" or "a#b", is part of the value, which is also how a POSIX
+// shell reads the same line.
+func stripEnvComment(raw string) string {
+	for i := 1; i < len(raw); i++ {
+		if raw[i] == '#' && (raw[i-1] == ' ' || raw[i-1] == '\t') {
+			return strings.TrimSpace(raw[:i])
+		}
 	}
-	return raw, nil
+	return strings.TrimSpace(raw)
 }
 
 // quotedValue returns what lies between the opening quote of raw and the quote

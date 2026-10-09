@@ -332,8 +332,15 @@ type SSEReader struct {
 	// call reading at the time, and there is only ever one.
 	begun func()
 
-	// lastEventID persists across events, exactly as it does in a browser: an
+	// idBuffer is the identifier an id field last set, and lastEventID is the
+	// one a reconnect resumes from, which is what idBuffer held when the last
+	// event was completed. They are the HTML specification's last event ID
+	// buffer and last event ID string, and are kept apart for the reason it
+	// keeps them apart: an event cut off after its id and before the blank
+	// line that completes it was never delivered, and resuming past it would
+	// lose it. Both persist across events, exactly as they do in a browser: an
 	// event without an id of its own carries the last one that arrived.
+	idBuffer    string
 	lastEventID string
 	retry       time.Duration
 
@@ -358,13 +365,21 @@ func newSSEReader(body io.ReadCloser, opts SSEDialOptions) *SSEReader {
 		readLimit:    limit,
 		readTimeout:  orDefaultDuration(opts.ReadTimeout, DefaultSSEReadTimeout),
 		keepComments: opts.KeepComments,
+		idBuffer:     opts.LastEventID,
 		lastEventID:  opts.LastEventID,
 	}
 }
 
-// LastEventID returns the identifier of the last event that carried one, which
-// is what a reconnecting reader passes to [SSEDialOptions.LastEventID] to
-// resume where this one left off.
+// LastEventID returns the identifier of the last complete event that carried
+// one, which is what a reconnecting reader passes to
+// [SSEDialOptions.LastEventID] to resume where this one left off.
+//
+// An event counts once the blank line that ends it has arrived, whether or
+// not it carried data, which is when a browser takes its identifier too. One
+// that the stream cut off part way, by dropping, by running past
+// [SSEDialOptions.ReadTimeout] or by exceeding [SSEDialOptions.ReadLimit],
+// leaves this where it was, so that resuming asks for that event again rather
+// than for the one after it.
 func (r *SSEReader) LastEventID() string { return r.lastEventID }
 
 // Retry returns the reconnection delay the server asked for, or zero when it
@@ -376,8 +391,18 @@ func (r *SSEReader) Retry() time.Duration { return r.retry }
 
 // Close ends the stream and releases the connection. It is safe to call more
 // than once and from more than one goroutine, and it releases a [SSEReader.Next]
-// that is waiting.
+// that is waiting. Once it has been called, Next reports [ErrSSEStreamEnded]
+// even for an event that had already arrived and was waiting in the buffer.
 func (r *SSEReader) Close() error {
+	r.mu.Lock()
+	if r.err == nil {
+		// Recorded before the body is closed rather than left to the read that
+		// fails, because a read is not what ends a closed stream: lines already
+		// buffered would still be handed out, and a caller that closed the
+		// reader would be given events after deciding it wanted no more.
+		r.err = ended("the reader was closed")
+	}
+	r.mu.Unlock()
 	var err error
 	r.closeOnce.Do(func() {
 		err = r.body.Close()
@@ -428,6 +453,12 @@ func (r *SSEReader) Next(ctx context.Context) (SSEMessage, error) {
 	}
 
 	for {
+		// A stream ended by Close, a cancelled read or a timeout delivers
+		// nothing more, even what is already buffered: the decision to end it
+		// is the reader's, and it stands whether or not the bytes had arrived.
+		if recorded := r.recorded(); recorded != nil {
+			return SSEMessage{}, recorded
+		}
 		line, err := r.readLine()
 		if err != nil {
 			return SSEMessage{}, r.failed(err)
@@ -455,11 +486,13 @@ func (r *SSEReader) Next(ctx context.Context) (SSEMessage, error) {
 // dispatch completes the event being assembled, reporting whether there was
 // one to deliver.
 //
-// An event with no data is not delivered, which is what the HTML specification
-// says a browser does with one: the buffers are cleared and the stream carries
-// on, with whatever identifier or reconnection delay it carried already
-// applied.
+// The identifier is taken first, for any event, which is the order the HTML
+// specification gives: an event with no data is not delivered, but the
+// identifier it carried is now the one to resume from. Its buffers are cleared
+// and the stream carries on, with whatever reconnection delay it carried
+// already applied.
 func (r *SSEReader) dispatch() (SSEMessage, bool) {
+	r.lastEventID = r.idBuffer
 	name, data, seen := r.name, r.data, r.dataSeen
 	r.name, r.data, r.dataSeen = "", r.data[:0], false
 	if !seen {
@@ -485,8 +518,9 @@ func (r *SSEReader) field(line []byte) {
 	case "id":
 		if !strings.ContainsRune(value, 0) {
 			// An identifier with a null byte in it is dropped rather than
-			// stored, which is the one rule the format states about it.
-			r.lastEventID = value
+			// stored, which is the one rule the format states about it. It is
+			// only buffered here; see [SSEReader.dispatch].
+			r.idBuffer = value
 		}
 	case "retry":
 		if delay, ok := sseParseRetry(value); ok {
@@ -535,13 +569,18 @@ func sseFieldValue(rest string) string {
 	return strings.TrimPrefix(rest, " ")
 }
 
+// recorded returns the reason this reader decided the stream has ended, or nil
+// while it has not.
+func (r *SSEReader) recorded() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
+}
+
 // failed turns a read failure into the error the caller sees, preferring the
 // reason this reader recorded over whatever the closed connection reported.
 func (r *SSEReader) failed(err error) error {
-	r.mu.Lock()
-	recorded := r.err
-	r.mu.Unlock()
-	if recorded != nil {
+	if recorded := r.recorded(); recorded != nil {
 		return recorded
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {

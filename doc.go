@@ -141,7 +141,10 @@
 // # Middleware
 //
 // The built-in chain assigns a request identifier, recovers panics, writes the
-// access log and sets the security headers before any route runs. [App.Use]
+// access log and sets the security headers before any route runs; see
+// [SecurityHeaders] for which, including the Strict-Transport-Security a
+// request that arrived over TLS is answered with, and for why no
+// Content-Security-Policy is among them. [App.Use]
 // installs more inside that chain, so anything added there already has an
 // identifier and is already covered by recovery:
 //
@@ -151,14 +154,24 @@
 // [AppOptions.CORS] installs it, and no policy at all means no CORS header is
 // ever emitted, so a browser refuses every cross-origin read until the policy
 // is written down. A wildcard origin combined with credentials is refused as a
-// configuration error rather than served.
+// configuration error rather than served, and so is an allowed origin that
+// could never match the Origin a browser sends, "https://app.example.com/" or
+// "*.example.com", or that any page can send, "null". A wildcard policy sends
+// "Access-Control-Allow-Origin: *" on every response, including one to a
+// request with no Origin, so that a copy a cache kept serves every origin
+// alike.
 //
 // [Compress] negotiates gzip or deflate from Accept-Encoding and leaves alone
 // what is not worth compressing: a body under [DefaultCompressionMinSize], a
 // media type that is already compressed, an event stream, a range, and
 // anything the handler encoded itself. Vary records the dependency on every
 // response either way, so a cache cannot hand a compressed body to a client
-// that cannot read it.
+// that cannot read it. A compressed response carries its strong ETag weakened,
+// as does a 304 to a client that negotiated an encoding, and no Accept-Ranges;
+// on the way in, an If-Match tag gets its strong form back so that conditional
+// writes still match, and a Range whose If-Range is a date rather than a strong
+// tag is answered with the whole content, since the date cannot say which
+// representation a resuming client holds.
 //
 // Anything else is an ordinary func(http.Handler) http.Handler, so writing one
 // takes no framework knowledge. One thing does differ from frameworks in other
@@ -187,6 +200,19 @@
 // itself a secret puts a guard or a limit in middleware installed with
 // [App.Use], where it covers these answers too.
 //
+// A route's guards do not cover a wildcard beside it either. Paths are matched
+// as they arrive and nothing normalises them, so with a guarded "/admin/panel"
+// and a public "/{rest...}", the requests "//admin/panel", "/admin//panel",
+// "/admin/panel/", "/ADMIN/panel", "/./admin/panel", "/x/../admin/panel",
+// "/%2e/admin/panel" and "/admin%2Fpanel" all reach the public wildcard, the
+// last with rest set to "admin/panel". The guarded route is never served
+// without its guard, which is also how net/http.ServeMux behaves. The risk is
+// a wildcard handler that acts on the captured value: one that serves files,
+// fetches records or proxies by it has to check authorization against what
+// the value refers to, and must never pass it to a backend that cleans,
+// decodes or case-folds paths, since that backend may turn it back into the
+// guarded resource.
+//
 // # Rate limiting
 //
 // Rate limiting is built in and off until a policy names a [Quota]. A policy is
@@ -205,9 +231,12 @@
 //		}),
 //	)
 //
-// Every quota is counted for every request, so a client that overruns the short
-// window still accrues against the long one and cannot launder a flood by
-// pausing between bursts. A refused request is answered with 429, a Retry-After
+// Every quota is counted for every request that is served. They are counted
+// longest window first and the first to refuse a request ends the count, so a
+// client that overruns the short window has still been counted against the
+// long one and cannot launder a flood by pausing between bursts, while a
+// request the long one refuses spends nothing of the shorter ones. A refused
+// request is answered with 429, a Retry-After for the quota that refused it
 // and the RateLimit headers describing the whole policy.
 //
 // Three decisions are the application's. [RateLimitStorage] says where the
@@ -233,8 +262,8 @@
 // request a guard rejects is still counted, which is the half that matters for
 // brute force. [RateLimitOptions.AfterDependencies] moves it after them, for a
 // tracker that keys on an identity a dependency produced, and gives up the
-// other half. A storage that cannot answer refuses the request with 503 unless
-// [RateLimitOptions.FailOpen] trades that for availability.
+// other half. A storage that cannot answer refuses the request with 503 and a
+// Retry-After unless [RateLimitOptions.FailOpen] trades that for availability.
 //
 // [WSOptions.MessageLimits] applies the same quotas, storage and tracker to the
 // messages a connected peer sends, which is the one thing the other WebSocket
@@ -379,6 +408,13 @@
 // close handshake, with every rule the specification lays down enforced and
 // every violation answered with the status it calls for.
 //
+// The context passed to a read or a write bounds it. A handler that wants to
+// limit how long its peer may stay silent gives each read a deadline, and when
+// one passes the peer is closed with [WSStatusPolicyViolation] and told why,
+// and the handler gets the context's error back. A cancelled read is closed
+// with [WSStatusGoingAway]. Returning either error from the handler is how
+// the conversation ends rather than a failure, and is not logged as one.
+//
 // # What a hostile peer cannot do
 //
 // A WebSocket is the longest-lived thing an unauthenticated stranger can ask a
@@ -406,7 +442,11 @@
 //   - A handshake from another origin is refused outright, because a WebSocket
 //     handshake is not subject to the same-origin policy and is never
 //     preflighted, which is what makes cross-site hijacking possible in the
-//     first place. [AppOptions.CORS] does not cover it and never could.
+//     first place. [AppOptions.CORS] does not cover it and never could. An
+//     application or router that turns the check off with
+//     [WSOptions.InsecureSkipOriginCheck] has not turned it off for good: a
+//     route beneath it that authenticates by cookie turns it back on with
+//     [WSOptions.EnforceOriginCheck].
 //   - A handshake carrying a body is refused, because whatever went unread
 //     would sit on the connection and be taken for frames the moment it was
 //     upgraded.
@@ -426,7 +466,9 @@
 // tested over a real connection rather than against a second implementation.
 // It checks what a server answers rather than trusting it, and never follows a
 // redirect, because following one would send the headers of the handshake to
-// whatever host the answer named. The test client wraps it as
+// whatever host the answer named. It closes as RFC 6455 asks a client to,
+// waiting for up to its CloseGracePeriod for the server to hang up first. The
+// test client wraps it as
 // [muzak.dev/framework/testclient.Client.WS].
 //
 // # Server-sent events
@@ -468,27 +510,41 @@
 // is not JSON, such as the "[DONE]" sentinel some protocols end with. A browser
 // sends the last identifier it saw back in the Last-Event-ID header when it
 // reconnects, which [SSEStream.LastEventID] reads, and that is what turns a
-// dropped connection into a stream that picks up where it left off.
+// dropped connection into a stream that picks up where it left off. A client
+// dispatches an event only when it has a data field, so one that carries only a
+// name or an identifier is applied but never delivered; [SSEEvent.EmptyData]
+// gives an event an empty one, which is also how a stream of text sends an
+// empty message.
 //
 // A stream is not tied to GET. [Router.SSEHandle] registers one for any method,
 // which is what a protocol that streams its answer to a posted document needs,
-// and there the input binds a request body like any other route.
+// and there the input binds a request body like any other route. An input that
+// binds none leaves the body to the handler, which reads it from the request
+// after the stream has opened, under [ServerOptions.ReadTimeout], over HTTP/1.1
+// as over HTTP/2.
 //
 // # What a stream bounds
 //
 // An event stream costs a connection and a goroutine for as long as a client
 // cares to hold it, so the same reasoning applies as to a WebSocket.
 //
-//   - A client that stops reading is given up on after
-//     [SSEOptions.WriteTimeout], rather than pinning a goroutine and a growing
-//     socket buffer for as long as it likes.
+//   - A client that stops reading a stream that keeps writing is given up on
+//     after [SSEOptions.WriteTimeout] once the socket buffers are full, rather
+//     than pinning a goroutine and a growing buffer for as long as it likes. A
+//     stream that writes too little to fill them, as one that only sends its
+//     keepalive does, is never ended by it.
 //   - The application serves at most [SSEOptions.MaxStreams] streams at once,
-//     and answers 503 with a Retry-After beyond that.
+//     and one client address holds at most [SSEOptions.MaxStreamsPerIP] of
+//     them, answering 503 with a Retry-After beyond either.
+//   - How long a stream lasts is bounded only by [SSEOptions.MaxLifetime],
+//     which is unset by default.
 //   - The listener's own timeouts are cleared for the stream and replaced with
 //     a deadline per event, because a stream is a response that does not end
 //     and would otherwise die at [ServerOptions.WriteTimeout] however healthy
-//     it was. The read deadline goes too: it would cancel the request, and with
-//     it the stream, at [ServerOptions.ReadTimeout] and blame the client.
+//     it was. The read deadline goes too, once the request body has been read:
+//     it would cancel the request, and with it the stream, at
+//     [ServerOptions.ReadTimeout] and blame the client. A body the input left
+//     for the handler is read under it, like any route's.
 //   - An event name or identifier carrying a line break is refused rather than
 //     repaired. An event stream is a sequence of lines, so a break in one of
 //     those fields would end it and let whatever followed be read as fields of
@@ -506,6 +562,19 @@
 //     which is what lets a client see the stream open immediately, so anything
 //     that decides whether to serve a stream at all belongs in a guard or a
 //     dependency, where there is still a response to say it in.
+//
+// The defaults do not stop a few clients from taking every stream. One that
+// reads nothing is never ended by the write timeout, and nothing else ends it
+// unless MaxLifetime is set, so MaxStreams / MaxStreamsPerIP client addresses
+// fill the application, 1024 / 64 = 16 with the defaults: sixteen IPv4
+// addresses, or one IPv6 /52, since an IPv6 client is counted by its /56. Every
+// other stream is refused until they let go. On a route that clients one does
+// not control can open, authenticate the client with a guard where possible,
+// raise MaxStreams and lower MaxStreamsPerIP so that their quotient exceeds
+// the addresses an abuser can be expected to have, count IPv6 clients by their
+// /48 ([ClientIPOptions.ConnectionIPv6Prefix]), and set MaxLifetime to minutes,
+// which costs a browser's EventSource a reconnection that resumes from the last
+// event identifier. [SSEOptions] says more.
 //
 // Compression leaves an event stream alone, because holding events in a
 // compressor's window until something forces them out is the one thing a stream
@@ -612,8 +681,18 @@
 // The document says of a request only what the server enforces. A member of a
 // JSON body is listed as required when a Required rule refuses a body without
 // it; the decoder accepts an absent member otherwise, so it is optional however
-// the Go field is declared. What a response always carries is described from
-// the shape of its type, as before.
+// the Go field is declared. The same goes for the members of every object the
+// body nests, which only the rules of a model nested with [Validation.Nested]
+// can require, or a rule the input declares on a member of a struct it holds,
+// as v.String(&in.Price.Currency).Required() is. Such a rule is written beside
+// the reference to the struct's component, for that member alone, so the other
+// uses of the type say nothing of it. What a response always carries is
+// described from the shape of its type, as before, so a type used both ways is
+// described twice: once for the responses and once, named with Input after it,
+// for the requests. The request's description also says additionalProperties:
+// false at every depth, because the decoder refuses a member it does not know
+// unless the route was registered with [AllowUnknownFields]; a response is left
+// open, so that adding a member to it later breaks no client.
 //
 // The document is what the framework publishes; rendering it is a separate
 // concern, and a separate module. [AppOptions.DocsUI] is nil by default, so a
@@ -755,7 +834,9 @@
 // listener timeout is non-zero, request bodies are capped at one mebibyte and
 // uploads at 32, WebSocket messages at one mebibyte, unknown JSON members are
 // rejected, duplicate members and invalid UTF-8 are refused by
-// encoding/json/v2, a JSON body without a JSON Content-Type is refused, CORS
+// encoding/json/v2, a query, header or form parameter that holds one value is
+// refused when it is sent more than once, rather than one of its values being
+// chosen, a JSON body without a JSON Content-Type is refused, CORS
 // denies every cross-origin request until it is
 // configured, a WebSocket handshake from another origin is refused until it is
 // allowed, the connections and the event streams one application holds are both
@@ -764,7 +845,10 @@
 // with the stack recorded only in the log, or, once the response has started,
 // an aborted connection that a client cannot mistake for a complete response.
 // Each of these can be relaxed deliberately; none of them is relaxed by
-// omission.
+// omission. The age of an event stream is not among them:
+// [SSEOptions.MaxLifetime] is unset by default, so the cap on streams is a
+// number of slots that sixteen addresses reading nothing can hold
+// indefinitely, as [SSEOptions] explains with the settings that change it.
 //
 // Rate limiting is the deliberate exception, and is off until a quota is
 // declared. There is no limit that is right for every application, and a
@@ -778,5 +862,8 @@
 // The muzak.dev/framework/testclient package serves an application in-process and issues
 // real requests against it, so a test exercises middleware, routing, binding,
 // dependencies and error rendering together rather than any one of them in
-// isolation.
+// isolation. The application is served by the same server, with the same
+// [ServerOptions], that [App.Run] serves it with, and is shut down the way
+// [App.Shutdown] shuts it down, so a header too large for production is too
+// large in a test as well.
 package muzak

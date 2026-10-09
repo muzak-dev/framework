@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
-	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"muzak.dev/framework"
+	"muzak.dev/framework/internal/inprocess"
 )
 
 // Client issues requests against an application served in-process.
@@ -24,8 +24,9 @@ import (
 // concurrent use, which lets a test fire parallel requests to check that
 // request-scoped state stays isolated.
 type Client struct {
-	tb      testing.TB
-	server  *httptest.Server
+	tb testing.TB
+	// base is the URL the application is served at, with no trailing slash.
+	base    string
 	http    *http.Client
 	headers http.Header
 }
@@ -70,50 +71,56 @@ func WithoutRedirects() Option {
 
 // New serves app in-process and returns a client for it.
 //
-// The application is built, its lifecycle components are started, and both the
-// server and those components are released through tb.Cleanup when the test
-// finishes. A build failure or a component that refuses to start fails the
-// test immediately, because every later assertion would be meaningless.
+// The application is served the way [muzak.App.Run] serves it, by the same
+// server with the same [muzak.ServerOptions]: its timeouts, its header size
+// limit and its HTTP/2 settings apply, so a request the application would
+// refuse in production is refused in the test too. Its lifecycle components
+// are started before the first request, and when the test finishes the
+// application is shut down as [muzak.App.Shutdown] describes, which ends its
+// event streams and WebSockets, waits for the requests still running and then
+// stops the components. A test may call App.Shutdown itself to check what a
+// shutdown does; the cleanup then has nothing left to do. A build failure or a
+// component that refuses to start fails the test immediately, because every
+// later assertion would be meaningless.
 //
-// Requests travel over an in-memory network rather than a real socket, so a
-// test needs no free port and cannot be disturbed by anything else on the
-// machine.
+// The application listens on a port of the loopback interface that the
+// operating system chooses, and speaks plain HTTP whatever TLS it is
+// configured with. An application is served by one client at a time, as it is
+// run by one run method at a time, so give each Client its own App; a Client
+// is safe for concurrent use, and parallel requests can share one.
 func New(tb testing.TB, app *muzak.App, opts ...Option) *Client {
 	tb.Helper()
 	cfg := config{headers: http.Header{}, timeout: 10 * time.Second}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if err := app.Build(); err != nil {
+	// The framework builds the application, starts its components and opens
+	// the socket in one step, as Run does, and reports whichever failed.
+	base, stop, err := inprocess.Serve(app, "127.0.0.1:0")
+	if err != nil {
 		// coverage: every path that reports through testing.TB aborts the test
-		// that runs it, and Go does not permit a fake TB, so these are verified
-		// by the framework's own build tests instead.
-		tb.Fatalf("testclient: the application could not be built: %v", err)
+		// that runs it, and Go does not permit a fake TB, so the failures
+		// behind this one, a build error, a component that would not start and
+		// a second run of one application, are verified by the framework's own
+		// tests of the same path instead.
+		tb.Fatalf("testclient: the application could not be served: %v", err)
 	}
-	if err := app.StartLifecycle(context.Background()); err != nil {
-		// coverage: aborts the running test; see the note above.
-		tb.Fatalf("testclient: the lifecycle components could not be started: %v", err)
-	}
+
+	transport := &http.Transport{}
 	tb.Cleanup(func() {
-		if err := app.StopLifecycle(context.Background()); err != nil {
+		err := stop(context.Background())
+		transport.CloseIdleConnections()
+		if err != nil {
 			// coverage: fails the running test; see the note above.
-			tb.Errorf("testclient: the lifecycle components could not be stopped: %v", err)
+			tb.Errorf("testclient: the application did not shut down cleanly: %v", err)
 		}
 	})
 
-	// The server runs on an in-memory network by default, so requests must go
-	// through the client it hands out rather than through one built here.
-	server := httptest.NewTestServer(tb, app)
-	server.Start()
-
-	httpClient := server.Client()
-	httpClient.Timeout = cfg.timeout
-
 	client := &Client{
 		tb:      tb,
-		server:  server,
+		base:    base,
 		headers: cfg.headers,
-		http:    httpClient,
+		http:    &http.Client{Transport: hostTransport{next: transport}, Timeout: cfg.timeout},
 	}
 	if !cfg.noCookies {
 		jar, err := cookiejar.New(nil)
@@ -132,9 +139,38 @@ func New(tb testing.TB, app *muzak.App, opts ...Option) *Client {
 	return client
 }
 
+// hostTransport sends a request for the host its Host header names.
+//
+// net/http writes the Host line from Request.Host and drops a Host header
+// without a word, so Header("Host", ...) used to do nothing, and a test of
+// host-based routing or of a WebSocket's allowed hosts tested the loopback
+// address instead. The header is moved here, as the request is sent, rather
+// than where it is built, because WebSocket and event stream requests are
+// built by the framework's dialers, which are handed headers and not a
+// request.
+type hostTransport struct{ next http.RoundTripper }
+
+// RoundTrip moves a Host header onto the request's Host and sends it. A
+// redirect the client follows keeps that host while it stays on the same
+// server, which is what net/http does for a Host set on the request, and is
+// sent for the host it names once it leaves.
+func (t hostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	host := req.Header.Get("Host")
+	if host == "" {
+		return t.next.RoundTrip(req)
+	}
+	// A RoundTripper must not change the request it is given.
+	req = req.Clone(req.Context())
+	req.Header.Del("Host")
+	if req.Response == nil || req.Response.Request.URL.Host == req.URL.Host {
+		req.Host = host
+	}
+	return t.next.RoundTrip(req)
+}
+
 // URL returns the base URL the application is served from, for the rare test
 // that needs to build a request by hand.
-func (c *Client) URL() string { return c.server.URL }
+func (c *Client) URL() string { return c.base }
 
 // HTTPClient returns the underlying *http.Client, whose cookie jar carries the
 // session established by earlier requests.
@@ -172,7 +208,7 @@ func (c *Client) build(method, path string, opts []RequestOption) (*request, str
 		// every call that passes JSON.
 		c.tb.Fatalf("testclient: %s %s: the request body could not be encoded: %v", method, path, req.err)
 	}
-	target := c.server.URL + path
+	target := c.base + path
 	if len(req.query) > 0 {
 		separator := "?"
 		if strings.Contains(path, "?") {
@@ -185,6 +221,11 @@ func (c *Client) build(method, path string, opts []RequestOption) (*request, str
 
 // Header sets a header on this request, replacing any client-level value of
 // the same name.
+//
+// Host is honoured as well, although net/http ignores it as a header: it sets
+// the host the request is sent for, which is how a test reaches host-based
+// routing or a WebSocket route's allowed hosts. [WithHeader] does the same for
+// every request.
 func Header(name, value string) RequestOption {
 	return func(r *request) { r.header.Set(name, value) }
 }
@@ -197,8 +238,26 @@ func Query(name, value string) RequestOption {
 
 // Cookie sends a cookie with this request, in addition to whatever the jar
 // already holds.
+//
+// Only the name and value are sent, as a browser sends them, so a cookie
+// taken from a response's [Response.Cookies] can be passed back as it is: its
+// Path, Domain and the rest say how a client should store it, and are not
+// part of a request. Every cookie goes into the one Cookie header a request
+// may carry.
 func Cookie(cookie *http.Cookie) RequestOption {
-	return func(r *request) { r.header.Add("Cookie", cookie.String()) }
+	return func(r *request) {
+		// cookie.String() is the Set-Cookie form, which sent "a=b; Path=/"
+		// and had the server read a second cookie named Path. AddCookie on a
+		// request standing in for this one writes the request form instead,
+		// and joins it to what is already there, rather than adding a second
+		// Cookie field that the jar's own AddCookie would later drop.
+		carrier := http.Request{Header: http.Header{}}
+		if existing := r.header.Values("Cookie"); len(existing) > 0 {
+			carrier.Header.Set("Cookie", strings.Join(existing, "; "))
+		}
+		carrier.AddCookie(cookie)
+		r.header.Set("Cookie", carrier.Header.Get("Cookie"))
+	}
 }
 
 // JSON sends value as a JSON request body and sets the Content-Type header.

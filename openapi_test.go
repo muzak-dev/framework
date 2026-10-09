@@ -2,10 +2,12 @@ package muzak
 
 import (
 	"encoding/json/v2"
+	htmltemplate "html/template"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
+	texttemplate "text/template"
 	"time"
 	"uuid"
 )
@@ -346,6 +348,99 @@ func TestSchemaNameCollisions(t *testing.T) {
 	// muzak.dev/framework is disambiguated as "framework.Contact".
 	if !strings.Contains(second, "framework") {
 		t.Errorf("the qualified name %q does not carry the package", second)
+	}
+}
+
+// registerLocalResponseA, B and C each answer with a type of their own called
+// response, which is what three handlers written as closures look like.
+func registerLocalResponseA(app *App) {
+	type response struct {
+		A int `json:"a"`
+	}
+	app.Get("/a", func(ctx *Context, _ Empty) (response, error) { return response{}, nil })
+}
+
+func registerLocalResponseB(app *App) {
+	type response struct {
+		B string `json:"b"`
+	}
+	app.Get("/b", func(ctx *Context, _ Empty) (response, error) { return response{}, nil })
+}
+
+func registerLocalResponseC(app *App) {
+	type response struct {
+		C bool `json:"c"`
+	}
+	app.Get("/c", func(ctx *Context, _ Empty) (response, error) { return response{}, nil })
+}
+
+// TestSchemaNamesStayUniqueForAThirdTypeOfTheSameName holds every reference to
+// the type it was made for. The fallback name of a second type was given to a
+// third without checking it was free, so /b pointed at a component describing
+// /c's response.
+func TestSchemaNamesStayUniqueForAThirdTypeOfTheSameName(t *testing.T) {
+	t.Parallel()
+	build := func() *Document {
+		app := New(quietOptions())
+		registerLocalResponseA(app)
+		registerLocalResponseB(app)
+		registerLocalResponseC(app)
+		doc, err := app.Document()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	doc := build()
+	seen := map[string]string{}
+	for path, member := range map[string]string{"/a": "a", "/b": "b", "/c": "c"} {
+		ref := doc.Paths[path].Get.Responses["200"].Content["application/json"].Schema.Ref
+		name := strings.TrimPrefix(ref, componentPrefix)
+		if other, taken := seen[name]; taken {
+			t.Errorf("%s and %s both point at %q", other, path, name)
+		}
+		seen[name] = path
+		schema := doc.Components.Schemas[name]
+		if schema == nil || len(schema.Properties) != 1 || schema.Properties[member] == nil {
+			t.Errorf("%s points at %q, which describes %+v, want the member %q", path, name, schema, member)
+		}
+	}
+
+	// The names follow from the order the types were met in, so a second
+	// build names them the same.
+	again := build()
+	for _, path := range []string{"/a", "/b", "/c"} {
+		first := doc.Paths[path].Get.Responses["200"].Content["application/json"].Schema.Ref
+		second := again.Paths[path].Get.Responses["200"].Content["application/json"].Schema.Ref
+		if first != second {
+			t.Errorf("%s is %q in one build and %q in the next", path, first, second)
+		}
+	}
+}
+
+// TestSchemaNamesQualifyByAsMuchOfThePathAsTheyNeed covers types of one name
+// in packages whose import paths end alike, as v1/models and v2/models do.
+func TestSchemaNamesQualifyByAsMuchOfThePathAsTheyNeed(t *testing.T) {
+	t.Parallel()
+	builder := newSchemaBuilder()
+	text := reflect.TypeFor[texttemplate.Template]()
+	html := reflect.TypeFor[htmltemplate.Template]()
+	if got := builder.nameFor(text); got != "Template" {
+		t.Fatalf("the first Template is %q", got)
+	}
+	// A type from a third package already holds the name the last element of
+	// the path gives, so the next element is taken as well.
+	builder.names["template.Template"] = reflect.TypeFor[Contact]()
+	if got := builder.nameFor(html); got != "html.template.Template" {
+		t.Errorf("html/template.Template is %q, want html.template.Template", got)
+	}
+	if got := builder.nameFor(html); got != "html.template.Template" {
+		t.Errorf("asking again gave %q, want the name it was already given", got)
+	}
+	for name, holder := range builder.names {
+		if name != "template.Template" && holder != text && holder != html {
+			t.Errorf("%q is held by %v", name, holder)
+		}
 	}
 }
 

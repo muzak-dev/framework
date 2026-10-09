@@ -107,7 +107,7 @@ func TestSetterErrors(t *testing.T) {
 	}{
 		{"bool", reflect.TypeFor[bool](), []string{"maybe"}, "must be true or false"},
 		{"int", reflect.TypeFor[int](), []string{"x"}, "must be a valid integer"},
-		{"int8 overflow", reflect.TypeFor[int8](), []string{"999"}, "must be a valid integer"},
+		{"int8 overflow", reflect.TypeFor[int8](), []string{"999"}, "must be between -128 and 127"},
 		{"uint", reflect.TypeFor[uint](), []string{"-1"}, "must be a valid non-negative integer"},
 		{"float", reflect.TypeFor[float64](), []string{"x"}, "must be a valid number"},
 		{"duration", reflect.TypeFor[time.Duration](), []string{"soon"}, "must be a valid duration"},

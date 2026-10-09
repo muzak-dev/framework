@@ -138,8 +138,19 @@ en:
       unsigned: "must be a valid non-negative integer"
       number: "must be a valid number"
       format: "is not in the expected format"
+      range: "must be between %{min} and %{max}"
+      repeated: "must be given only once"
       unknown_field: "is not a field this endpoint accepts"
       invalid_json: "is not valid JSON: %{reason}"
+      # A JSON body member of a kind its field cannot hold at all, one key per
+      # kind that was sent.
+      wrong_null: "has the wrong type, null is not accepted here"
+      wrong_boolean: "has the wrong type, a boolean is not accepted here"
+      wrong_string: "has the wrong type, a string is not accepted here"
+      wrong_number: "has the wrong type, a number is not accepted here"
+      wrong_object: "has the wrong type, an object is not accepted here"
+      wrong_array: "has the wrong type, an array is not accepted here"
+      wrong_value: "has the wrong type, that value is not accepted here"
 
     # The sentence behind each HTTP status, keyed by the status itself. These
     # are the keys that make a locale file's keys stay strings: read as numbers

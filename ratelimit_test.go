@@ -198,7 +198,7 @@ func TestRateLimitDescribesTheWholePolicy(t *testing.T) {
 	}
 }
 
-func TestRateLimitCountsEveryQuotaForEveryRequest(t *testing.T) {
+func TestRateLimitCountsEveryQuotaForAServedRequest(t *testing.T) {
 	t.Parallel()
 	counters, clock := newTestStorage(t, MemoryRateLimitOptions{})
 	storage := newRecordingStorage()
@@ -225,15 +225,118 @@ func TestRateLimitCountsEveryQuotaForEveryRequest(t *testing.T) {
 	if !strings.Contains(decodeError(t, rec).Error.Message, `"sustained"`) {
 		t.Error("the sustained quota should be the one refusing, since the burst quota's window has restarted")
 	}
-	// A refused request still counts, so pausing does not launder a flood.
 	if got := rec.Header().Get(HeaderRetryAfter); got == "" {
 		t.Errorf("%s is missing from a refusal", HeaderRetryAfter)
 	}
-	// Four requests, both quotas each time, in the order they were declared.
-	want := []string{"burst", "sustained", "burst", "sustained", "burst", "sustained", "burst", "sustained"}
+	// Each served request is counted by both quotas, the longer window first
+	// whatever order they were declared in. The refused one stops at the
+	// quota that refused it, which is the first one counted.
+	want := []string{"sustained", "burst", "sustained", "burst", "sustained", "burst", "sustained"}
 	if got := storage.seenQuotas(); !slices.Equal(got, want) {
 		t.Errorf("quotas consulted = %q, want %q", got, want)
 	}
+}
+
+// TestRateLimitStopsCountingAtTheQuotaThatRefuses is the regression test for a
+// refused request that was still counted against every quota of its policy.
+// Each quota after the one that refused it spent budget the request was never
+// going to use, and counted it under a key that need not have been seen
+// before, so a client being answered 429 still created counters at full speed.
+// Quotas are now counted longest window first and the count stops at the
+// first that refuses: a request refused by a short burst limit has already
+// been counted against the sustained one, so overrunning the burst still
+// costs a client its sustained budget, and a request the sustained limit
+// refuses touches nothing shorter.
+func TestRateLimitStopsCountingAtTheQuotaThatRefuses(t *testing.T) {
+	t.Parallel()
+	counters, clock := newTestStorage(t, MemoryRateLimitOptions{})
+	storage := newRecordingStorage()
+	storage.inner = counters
+	app := limitedApp(t, RateLimitOptions{
+		Storage: storage,
+		Quotas: []Quota{
+			{Name: "burst", Window: time.Second, Limit: 1},
+			{Name: "sustained", Window: time.Hour, Limit: 3},
+		},
+	})
+
+	assertStatus(t, do(t, app, http.MethodGet, "/ping"), http.StatusOK)
+	rec := do(t, app, http.MethodGet, "/ping")
+	assertStatus(t, rec, http.StatusTooManyRequests)
+	if !strings.Contains(decodeError(t, rec).Error.Message, `"burst"`) {
+		t.Errorf("message = %q, want the burst quota to be the one refusing", decodeError(t, rec).Error.Message)
+	}
+	clock.advance(2 * time.Second)
+	assertStatus(t, do(t, app, http.MethodGet, "/ping"), http.StatusOK)
+	for range 3 {
+		rec = do(t, app, http.MethodGet, "/ping")
+		assertStatus(t, rec, http.StatusTooManyRequests)
+		if !strings.Contains(decodeError(t, rec).Error.Message, `"sustained"`) {
+			t.Errorf("message = %q, want the sustained quota to be the one refusing", decodeError(t, rec).Error.Message)
+		}
+	}
+
+	want := []string{
+		"sustained", "burst", // served
+		"sustained", "burst", // refused by the burst limit, and still counted against the sustained one
+		"sustained", "burst", // served, the third against the sustained limit
+		"sustained", "sustained", "sustained", // refused by the sustained limit, and nothing shorter counted
+	}
+	if got := storage.seenQuotas(); !slices.Equal(got, want) {
+		t.Errorf("quotas consulted = %q, want %q", got, want)
+	}
+	if count, _ := increment(t, counters, "burst", storage.seenKeys()[0], time.Second); count != 2 {
+		t.Errorf("the burst count = %d, want 2: requests the sustained limit refused were counted against it", count)
+	}
+}
+
+// TestRateLimitResolvedQuotasAreCountedLongestFirst covers the counting order
+// for quotas a resolver supplies, alone and added to static ones. The order is
+// the limiter's, so a plan's own slice, which a resolver typically hands out
+// to every request, is never reordered, and the policy header still lists the
+// quotas as they were declared and resolved.
+func TestRateLimitResolvedQuotasAreCountedLongestFirst(t *testing.T) {
+	t.Parallel()
+	plan := []Quota{
+		{Name: "plan-burst", Window: time.Second, Limit: 5},
+		{Name: "plan-daily", Window: 24 * time.Hour, Limit: 50},
+	}
+	resolver := func(*Context) ([]Quota, error) { return plan, nil }
+
+	t.Run("resolved alone", func(t *testing.T) {
+		t.Parallel()
+		storage := newRecordingStorage()
+		app := limitedApp(t, RateLimitOptions{Storage: storage, Resolver: resolver})
+		rec := do(t, app, http.MethodGet, "/ping")
+		assertStatus(t, rec, http.StatusOK)
+		if got, want := storage.seenQuotas(), []string{"plan-daily", "plan-burst"}; !slices.Equal(got, want) {
+			t.Errorf("quotas consulted = %q, want %q", got, want)
+		}
+		if got, want := rec.Header().Get(HeaderRateLimitPolicy), "5;w=1, 50;w=86400"; got != want {
+			t.Errorf("%s = %q, want %q", HeaderRateLimitPolicy, got, want)
+		}
+		if plan[0].Name != "plan-burst" {
+			t.Errorf("the resolver's own slice was reordered to %v", plan)
+		}
+	})
+
+	t.Run("added to static quotas", func(t *testing.T) {
+		t.Parallel()
+		storage := newRecordingStorage()
+		app := limitedApp(t, RateLimitOptions{
+			Storage:  storage,
+			Resolver: resolver,
+			Quotas:   []Quota{{Name: "floor", Window: time.Minute, Limit: 100}},
+		})
+		rec := do(t, app, http.MethodGet, "/ping")
+		assertStatus(t, rec, http.StatusOK)
+		if got, want := storage.seenQuotas(), []string{"plan-daily", "floor", "plan-burst"}; !slices.Equal(got, want) {
+			t.Errorf("quotas consulted = %q, want %q", got, want)
+		}
+		if got, want := rec.Header().Get(HeaderRateLimitPolicy), "100;w=60, 5;w=1, 50;w=86400"; got != want {
+			t.Errorf("%s = %q, want %q", HeaderRateLimitPolicy, got, want)
+		}
+	})
 }
 
 func TestRateLimitReportsTheLongestWaitAmongExceededQuotas(t *testing.T) {
@@ -489,6 +592,35 @@ func TestRateLimitFailsClosedWhenTheStorageCannotCount(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "connection refused") {
 		t.Error("the storage failure was not logged; a limiter that stops counting must say so")
+	}
+}
+
+// TestRateLimitStorageFailureSaysWhenToRetry is the regression test for the
+// 503 a failing storage produces, which carried no Retry-After: every client
+// refused because the store had stopped answering was free to retry at once,
+// adding its load to the store's recovery. It now says when to come back, as
+// the 429 does, and like the 429's the header outlives the reset an error
+// response gets and is sent even with the RateLimit headers turned off.
+func TestRateLimitStorageFailureSaysWhenToRetry(t *testing.T) {
+	t.Parallel()
+	for _, disableHeaders := range []bool{false, true} {
+		storage := newRecordingStorage()
+		storage.fail(errors.New("connection refused"))
+		opts := oneQuota()
+		opts.Storage = storage
+		opts.DisableHeaders = disableHeaders
+		app := limitedApp(t, opts)
+
+		rec := do(t, app, http.MethodGet, "/ping")
+		assertStatus(t, rec, http.StatusServiceUnavailable)
+		retry, err := strconv.Atoi(rec.Header().Get(HeaderRetryAfter))
+		if err != nil || retry <= 0 {
+			t.Errorf("DisableHeaders %v: %s = %q, want a positive number of seconds",
+				disableHeaders, HeaderRetryAfter, rec.Header().Get(HeaderRetryAfter))
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("DisableHeaders %v: Cache-Control = %q, want the error reset to have run", disableHeaders, got)
+		}
 	}
 }
 

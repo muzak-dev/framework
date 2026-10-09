@@ -789,6 +789,10 @@ func TestWebSocketContextCancellationEndsTheConnection(t *testing.T) {
 		})
 	})
 	conn := dialWS(t, server.URL, "/ws")
+	// The cancellation came between messages, so the peer is told the
+	// connection is going away rather than finding it gone; it used to see
+	// the end of the stream with no close frame before it.
+	conn.expectClose(uint16(WSStatusGoingAway))
 	err := <-reported
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("read error = %v, want it to report the cancellation", err)
@@ -809,6 +813,11 @@ func TestWebSocketReadDeadlineFromContext(t *testing.T) {
 		})
 	})
 	conn := dialWS(t, server.URL, "/ws")
+	// A deadline on a read is how a handler bounds how long its peer may stay
+	// silent, so the peer is told that is what happened, with the status the
+	// connection's own read timeout uses, rather than finding the stream
+	// ended with no close frame before it as it used to.
+	conn.expectClose(uint16(WSStatusPolicyViolation))
 	if err := <-reported; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("read error = %v, want the deadline to be reported", err)
 	}

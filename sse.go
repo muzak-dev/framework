@@ -74,8 +74,12 @@ const sseKeepAliveComment = "keepalive"
 //
 //	stream.SendEvent(muzak.SSEEvent[ItemOut]{Name: "item_update", ID: "42", Data: &item})
 //
-// The zero value carries nothing, which is a valid event: a client sees it
-// dispatched with empty data.
+// A client dispatches an event only when it has a data field, which an event
+// has when it carries Data, a Text that is not empty, or EmptyData. One without
+// is not an error and is still written, but no client hands it to the
+// application: a browser and [SSEReader] alike apply its ID and Retry and drop
+// the rest, Name included. The zero value is the extreme case, a blank line and
+// nothing else, which no client acts on at all.
 type SSEEvent[Out any] struct {
 	// Name is the event's type, which a browser dispatches it under, as in
 	// addEventListener("item_update", ...). An empty Name dispatches as the
@@ -106,8 +110,18 @@ type SSEEvent[Out any] struct {
 	// Text is a payload written as it stands rather than encoded, for a stream
 	// whose events are not JSON: a log line, or a sentinel such as the "[DONE]"
 	// some protocols end with. A payload spanning several lines is written as
-	// several data lines and arrives whole.
+	// several data lines and arrives whole. An empty Text writes no data field,
+	// so the event is not dispatched, unless EmptyData is set.
 	Text string
+
+	// EmptyData writes a data field even when the event carries no payload,
+	// which a client dispatches as an event whose data is the empty string. It
+	// is what lets a stream of text send an empty message, as in
+	// SSEEvent{Text: line, EmptyData: true} for a log line that may be blank,
+	// and an event that is only a name, such as a tick, be dispatched. It
+	// changes nothing for an event that carries Data or a Text that is not
+	// empty, which has a data field already.
+	EmptyData bool
 }
 
 // SSEStream is the open event stream a server-sent events handler writes to.
@@ -147,7 +161,9 @@ type SSEEvent[Out any] struct {
 // handler sets a ceiling of its own: derive a context with a timeout from
 // [SSEStream.Context] and return when it ends. A browser's EventSource
 // reconnects on its own and resumes from the last event identifier, so ending a
-// stream on purpose costs it a moment.
+// stream on purpose costs it a moment. Without either, sixteen client
+// addresses holding streams they never read fill every slot the defaults
+// allow; [SSEOptions] gives the arithmetic and the settings that change it.
 //
 // # Failure
 //
@@ -181,7 +197,9 @@ func (s *SSEStream[Out]) SendEvent(event SSEEvent[Out]) error {
 		return errSSEBothPayloads
 	case event.Data != nil:
 		frame.data, frame.hasData = *event.Data, true
-	case event.Text != "":
+	case event.Text != "", event.EmptyData:
+		// An empty text is written as a data field with nothing in it, which
+		// is what a client dispatches as empty data.
 		frame.text, frame.hasText = event.Text, true
 	}
 	return s.core.send(frame)
@@ -233,6 +251,12 @@ type sseStream struct {
 	lastEventID  string
 	writeTimeout time.Duration
 	retry        time.Duration
+
+	// bodyLeft records that the request carries a body the route's input did
+	// not bind, which is therefore the handler's to read after the header has
+	// gone out. It is set by [App.acceptSSE] and read by open, which is what
+	// it changes; see there.
+	bodyLeft bool
 
 	// deadlines records whether the response writer carries deadlines at all.
 	// net/http's does; a writer supplied by a test or by middleware that does
@@ -303,7 +327,11 @@ func newSSEStream(c *Context, opts SSEOptions) *sseStream {
 // sees the stream open rather than waiting for the first event.
 func (s *sseStream) open(c *Context) error {
 	header := s.w.Header()
-	setIfAbsent(header, "Content-Type", "text/event-stream; charset=utf-8")
+	// The type is set whatever was there, unlike the headers below. A response
+	// typed in advance, as a middleware that answers in JSON may type every
+	// response, is still an event stream, and served as anything else it is
+	// one an EventSource refuses to read.
+	header.Set("Content-Type", "text/event-stream; charset=utf-8")
 	// A cached event stream is a replayed one, and a transformed one is
 	// usually a buffered one, which is the single thing a stream cannot
 	// survive.
@@ -327,12 +355,29 @@ func (s *sseStream) open(c *Context) error {
 	// deadline of its own. Without this the whole stream would die at
 	// WriteTimeout no matter how healthy it was.
 	s.probeDeadlines()
-	// The read half is cleared for a different reason. The request has been
-	// read in full, and the only read left is the one net/http makes in the
-	// background to notice a client going away. If that read hits a deadline
-	// it cancels the request context, which would end every stream at
-	// ReadTimeout and blame the client for it.
-	_ = s.rc.SetReadDeadline(time.Time{})
+	if s.bodyLeft {
+		// Over HTTP/1 net/http drops whatever is left of the request body when
+		// the header goes out, or gives up on the connection when that is more
+		// than it will read, so a handler that reads its own body, which is what
+		// [Router.SSEHandle] says it may, would find it closed. Full duplex is
+		// the mode in which a response is written while its request is still
+		// being read. HTTP/2 always works this way and has nothing to enable,
+		// and a writer that cannot say either way is left as it is.
+		_ = s.rc.EnableFullDuplex()
+		// The read deadline is kept, because the body is still to be read and
+		// this is what bounds the read: without it a client that declares a body
+		// and sends half of it holds the handler for as long as it likes.
+		// net/http takes the deadline off itself once the body has been read to
+		// its end, as it starts the read that watches for the client going away,
+		// which is the read the deadline must not reach; see the clearing below.
+	} else {
+		// The read half is cleared for a different reason. The request has
+		// been read in full, and the only read left is the one net/http makes
+		// in the background to notice a client going away. If that read hits a
+		// deadline it cancels the request context, which would end every
+		// stream at ReadTimeout and blame the client for it.
+		_ = s.rc.SetReadDeadline(time.Time{})
+	}
 
 	// The header is a write like any other, so it is armed like one: a client
 	// that will not even take the header is as much a stalled writer as one
@@ -695,9 +740,11 @@ func (s *sseStream) arm() error {
 	}
 	s.writing = true
 	if s.deadlines && s.writeTimeout > 0 {
-		// This is the bound that matters: without it, a client that opens a
-		// stream and never reads it holds a goroutine and a growing socket
-		// buffer for as long as it cares to.
+		// This is the bound on a stalled write: without it, a client that
+		// stops reading a stream that keeps writing holds a goroutine and a
+		// full socket buffer for as long as it cares to. A stream that writes
+		// too little to fill the buffer never stalls, which is why this does
+		// not bound a stream's age; [SSEOptions.MaxLifetime] does.
 		_ = s.rc.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 	}
 	return nil

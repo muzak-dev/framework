@@ -7,6 +7,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"go/token"
 	"io"
 	"math"
 	"mime"
@@ -29,9 +30,11 @@ type Empty struct{}
 
 // Struct tags recognised by the binder. A field carrying one of the first six
 // is read from that part of the request; a field carrying none of them becomes
-// part of the JSON body. A json:"-" tag keeps a field out of the body and its
-// schema and nothing more, so a located field carrying one is still bound from
-// its location.
+// part of the JSON body. A located field is never a member of the body,
+// whatever its json tag says: a body naming one is refused like any member the
+// body does not have, or ignored under [AllowUnknownFields]. A json:"-" tag
+// keeps a field out of the body and its schema and nothing more, so a located
+// field carrying one is still bound from its location.
 const (
 	tagPath     = "path"
 	tagQuery    = "query"
@@ -105,8 +108,30 @@ type paramBinder struct {
 	required bool
 	defValue string
 	hasDef   bool
-	isSlice  bool
-	set      setter
+	// isSlice is true when the field takes every value sent for it rather
+	// than one, which decides whether a parameter sent twice is a list or a
+	// mistake, and whether a header is split on its commas.
+	isSlice bool
+	set     setter
+}
+
+// takesList reports whether a parameter of type t takes every value sent for
+// it, which is what its setter does for a slice, or a pointer to one, a byte
+// slice included: each value is one byte, and the document says so. A type
+// that reads itself from text, or a time.Duration, takes one piece of text
+// however it is built.
+func takesList(t reflect.Type) bool {
+	for t != durationType && !reflect.PointerTo(t).Implements(textUnmarshaler) {
+		switch t.Kind() {
+		case reflect.Pointer:
+			t = t.Elem()
+			continue
+		case reflect.Slice:
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // bodyPlan describes how the JSON request body maps onto the input struct.
@@ -123,13 +148,20 @@ type bodyPlan struct {
 	// defaults are the members of the body a `default` tag fills in when the
 	// client leaves them out.
 	defaults []bodyDefault
+	// shape is the type the body is decoded into: the input type itself when
+	// direct is true, and otherwise a struct of the body members alone, which
+	// copies moves into the input. See [bodyPlan.narrow].
+	shape  reflect.Type
+	copies []bodyCopy
 }
 
 // bodyDefault is a member of the JSON body that has a default.
 type bodyDefault struct {
-	// index locates the field in the input, name is what the body calls it,
-	// and raw is the tag's text, which set writes into the field.
+	// index locates the field in the input, at locates it in the value the
+	// body is decoded into, name is what the body calls it, and raw is the
+	// tag's text, which set writes into the field.
 	index []int
+	at    []int
 	name  string
 	typ   reflect.Type
 	raw   string
@@ -230,7 +262,7 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 		if err != nil {
 			return nil, fmt.Errorf("muzak: %s %s: %w", method, path, err)
 		}
-		plan.body = &bodyPlan{
+		body := &bodyPlan{
 			defaults: defaults,
 			// Decoding straight into the input value is only safe when the
 			// input has no located fields at all. Counting body fields against
@@ -240,9 +272,137 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 			direct:   len(plan.params) == 0 && len(bodyFields) == totalFields(t),
 			fields:   bodyFields,
 			required: true,
+			shape:    t,
 		}
+		if !body.direct {
+			body.narrow(t, bodyFields)
+		}
+		if err := checkBodyDecodes(body.shape, t); err != nil {
+			return nil, fmt.Errorf("muzak: %s %s: %w", method, path, err)
+		}
+		plan.body = body
 	}
 	return plan, nil
+}
+
+// narrow gives a body plan whose input also has located fields the type its
+// body is decoded into: a struct holding the input's body members and nothing
+// else.
+//
+// The body used to be decoded into a scratch value of the input type itself,
+// and only the body members copied out. That kept a crafted body from setting
+// a located field, but not from naming one: the decoder still knew it as a
+// member, so {"ID":999} beside a path parameter was accepted and silently
+// dropped, and {"ID":"zz"} was a 422 about a member the documented schema does
+// not list. Decoding into a struct with no such field makes a member naming a
+// located field unknown, like any other member the body does not have: refused
+// by default, and ignored, value unread, under [AllowUnknownFields].
+//
+// The struct is built once, when the route is compiled. Every body member keeps
+// its own type and tag, so the decoder reads it exactly as it would have read
+// it in the input. An embedded struct is rebuilt the same way and embedded
+// again under the embed option, which is how encoding/json/v2 spells what
+// embedding means to it; an unexported one is given an exported name, which
+// is the only name reflect can build a field under, and its members are copied
+// out one by one, since an unexported embedded struct cannot be set whole.
+//
+// An input that decodes itself, through UnmarshalJSON or the like, is left to
+// do so into a scratch value of its own type, because rebuilding it would lose
+// the method; what it writes into a located field is still not copied out.
+func (b *bodyPlan) narrow(t reflect.Type, bodyFields [][]int) {
+	if decodesItself(t) {
+		for _, index := range bodyFields {
+			b.copies = append(b.copies, bodyCopy{from: index, to: index})
+		}
+		return
+	}
+	b.shape, b.copies = bodyShape(t, nil)
+	at := make(map[string][]int, len(b.copies))
+	for _, c := range b.copies {
+		at[fmt.Sprint(c.to)] = c.from
+	}
+	for i := range b.defaults {
+		b.defaults[i].at = at[fmt.Sprint(b.defaults[i].index)]
+	}
+}
+
+// bodyCopy pairs a field of the type a body is decoded into with the field of
+// the input it is copied to, each located by its index path.
+type bodyCopy struct {
+	from, to []int
+}
+
+// bodyShape builds the struct holding the body members of t, which sits at the
+// index path at within the input, and the copies that move each member from
+// it into the input. See [bodyPlan.narrow].
+func bodyShape(t reflect.Type, at []int) (reflect.Type, []bodyCopy) {
+	var fields []reflect.StructField
+	var copies []bodyCopy
+	taken := make(map[string]bool, t.NumField())
+	for i := range t.NumField() {
+		taken[t.Field(i).Name] = true
+	}
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if !usableField(f) {
+			continue
+		}
+		if _, located := declaredLocation(f); located {
+			continue
+		}
+		name, options, _ := strings.Cut(f.Tag.Get(tagJSON), ",")
+		if name == "-" && options == "" {
+			continue
+		}
+		index := append(slices.Clone(at), i)
+		field := reflect.StructField{Name: exportedName(f.Name, taken), Type: f.Type, Tag: f.Tag}
+		if f.Anonymous && name == "" {
+			field.Tag = embedTag(options)
+		}
+		if f.Anonymous && f.Type.Kind() == reflect.Struct {
+			inner, innerCopies := bodyShape(f.Type, index)
+			if inner.NumField() == 0 {
+				continue
+			}
+			field.Type = inner
+			for _, c := range innerCopies {
+				copies = append(copies, bodyCopy{from: append([]int{len(fields)}, c.from...), to: c.to})
+			}
+		} else {
+			copies = append(copies, bodyCopy{from: []int{len(fields)}, to: index})
+		}
+		fields = append(fields, field)
+	}
+	return reflect.StructOf(fields), copies
+}
+
+// exportedName returns a field name reflect can build a struct with, which an
+// unexported embedded type's name is not, and one no other field of the
+// struct already has.
+func exportedName(name string, taken map[string]bool) string {
+	if token.IsExported(name) {
+		return name
+	}
+	candidate := "X" + name
+	for taken[candidate] {
+		candidate += "_"
+	}
+	taken[candidate] = true
+	return candidate
+}
+
+// embedTag is the json tag that embeds a rebuilt struct under a field name of
+// its own, keeping whatever options the original embedding carried so that
+// the decoder refuses them, if it does, exactly as it would have.
+func embedTag(options string) reflect.StructTag {
+	parts := strings.Split(options, ",")
+	if options == "" {
+		parts = nil
+	}
+	if !slices.Contains(parts, "embed") && !slices.Contains(parts, "inline") {
+		parts = append([]string{"embed"}, parts...)
+	}
+	return reflect.StructTag(`json:",` + strings.Join(parts, ",") + `"`)
 }
 
 // bodyDefaults finds the members of the JSON body that carry a `default` tag.
@@ -289,7 +449,7 @@ func bodyDefaults(t reflect.Type, bodyFields [][]int) ([]bodyDefault, error) {
 			if err := set(reflect.New(f.Type).Elem(), []string{raw}); err != nil {
 				return fmt.Errorf("field %s declares the default %q, which is not a valid %s", f.Name, raw, f.Type)
 			}
-			out = append(out, bodyDefault{index: index, name: name, typ: f.Type, raw: raw, set: set})
+			out = append(out, bodyDefault{index: index, at: index, name: name, typ: f.Type, raw: raw, set: set})
 		}
 		return nil
 	}
@@ -297,6 +457,110 @@ func bodyDefaults(t reflect.Type, bodyFields [][]int) ([]bodyDefault, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// checkBodyDecodes refuses a body type that encoding/json/v2 cannot decode
+// into, whatever a request sends.
+//
+// Such a type used to build. Every request that reached the problem then
+// failed to decode with an error that was the type's and not the request's,
+// and it was sent to the client as a 422, usually against an empty field, and
+// logged nowhere, so the one person who could fix it never heard of it.
+//
+// Two checks find them. A struct the decoder cannot make sense of, through a
+// tag it rejects or two fields claiming one name, is found by asking the
+// decoder to read an empty object into it: that is the first thing it does
+// with any struct, so it fails here exactly when it would fail on every
+// request. A field of a type JSON cannot carry, a channel, a function, a
+// complex number or an interface the decoder cannot fill, and the `string`
+// option on a field that is not a number, fail only when a request sends that
+// member, so the fields are walked for them. A type that decodes itself is
+// left to do so, and its fields are not walked.
+//
+// shape is the type the body is decoded into, and input the route's input
+// type, which is what a failure of the shape itself is reported against.
+func checkBodyDecodes(shape, input reflect.Type) error {
+	if decodesItself(shape) {
+		return nil
+	}
+	return checkStructDecodes(shape, input.String(), "", map[reflect.Type]bool{shape: true})
+}
+
+// checkDecodes is [checkBodyDecodes] for a type reached through the field at
+// path. The seen set stops a recursive type from being walked forever.
+func checkDecodes(t reflect.Type, path string, seen map[reflect.Type]bool) error {
+	for !seen[t] && !decodesItself(t) {
+		seen[t] = true
+		switch t.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+			t = t.Elem()
+			continue
+		case reflect.Chan, reflect.Func, reflect.Complex64, reflect.Complex128, reflect.UnsafePointer:
+			return fmt.Errorf("field %s is of type %s, which a JSON body cannot carry; give it a type that JSON can, or tag it json:\"-\"", path, t)
+		case reflect.Interface:
+			if t.NumMethod() > 0 {
+				return fmt.Errorf("field %s is of the interface type %s, which the decoder cannot fill because nothing says which type to decode into; give it a concrete type, or tag it json:\"-\"", path, t)
+			}
+		case reflect.Struct:
+			return checkStructDecodes(t, t.String(), path, seen)
+		}
+		return nil
+	}
+	return nil
+}
+
+// checkStructDecodes is [checkDecodes] for a struct, which a failure names as
+// name.
+func checkStructDecodes(t reflect.Type, name, path string, seen map[reflect.Type]bool) error {
+	if err := json.Unmarshal([]byte("{}"), reflect.New(t).Interface(), durationJSON); err != nil {
+		cause := err
+		var semantic *json.SemanticError
+		if errors.As(err, &semantic) && semantic.Err != nil {
+			cause = semantic.Err
+		}
+		where := ""
+		if path != "" {
+			where = ", held in field " + path + ","
+		}
+		return fmt.Errorf("type %s%s cannot be decoded from a JSON body, because encoding/json/v2 refuses it: %w", name, where, cause)
+	}
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if !f.IsExported() && !f.Anonymous {
+			continue
+		}
+		name, options, _ := strings.Cut(f.Tag.Get(tagJSON), ",")
+		if name == "-" && options == "" {
+			continue
+		}
+		at := f.Name
+		if path != "" {
+			at = path + "." + f.Name
+		}
+		if slices.Contains(strings.Split(options, ","), "string") && !isNumberBehind(f.Type) {
+			return fmt.Errorf("field %s carries the `string` option in its json tag, which encoding/json/v2 accepts only on a number, and %s is not one; remove the option", at, f.Type)
+		}
+		if err := checkDecodes(f.Type, at, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isNumberBehind reports whether a type is a number once its pointers are
+// followed, or reads itself and so decides for itself what the option means.
+// time.Time has the methods but is read natively, and refuses the option.
+func isNumberBehind(t reflect.Type) bool {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	return t != timeType && decodesItself(t)
 }
 
 // totalFields counts the exported fields of a struct, which tells newBindPlan
@@ -547,7 +811,7 @@ func newParamBinder(f reflect.StructField, index []int, source paramSource, name
 		name:    name,
 		typ:     f.Type,
 		doc:     f.Tag.Get(tagDoc),
-		isSlice: f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() != reflect.Uint8,
+		isSlice: takesList(f.Type),
 		set:     set,
 	}
 	if source == srcHeader {
@@ -628,19 +892,30 @@ func setterAt(t reflect.Type, depth int) (setter, error) {
 		}, nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		bits := t.Bits()
+		outside := integerRange(t)
 		return func(dst reflect.Value, raw []string) error {
+			// ParseInt takes a leading "+" that a JSON number may not have.
+			if !isDecimal(raw[0], false) {
+				return errNotInt
+			}
 			v, err := strconv.ParseInt(raw[0], 10, bits)
 			if err != nil {
-				return errNotInt
+				// The text is decimal, so the one way left to fail is to be
+				// outside the range of the type.
+				return outside
 			}
 			dst.SetInt(v)
 			return nil
 		}, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		bits := t.Bits()
+		outside := integerRange(t)
 		return func(dst reflect.Value, raw []string) error {
 			v, err := strconv.ParseUint(raw[0], 10, bits)
 			if err != nil {
+				if errors.Is(err, strconv.ErrRange) {
+					return outside
+				}
 				return errNotUint
 			}
 			dst.SetUint(v)
@@ -649,14 +924,20 @@ func setterAt(t reflect.Type, depth int) (setter, error) {
 	case reflect.Float32, reflect.Float64:
 		bits := t.Bits()
 		return func(dst reflect.Value, raw []string) error {
-			// ParseFloat reads "NaN", "Inf" and "Infinity" as numbers, and
-			// neither belongs in a parameter. NaN fails every comparison, so
-			// `if in.Amount > balance` waves it through; infinity passes any
-			// lower bound. A JSON body cannot carry either, so refusing them
-			// here makes a query string no more permissive than a body. An
-			// overflow such as 1e400 already fails with a range error.
+			// ParseFloat reads Go's own literal syntax, not JSON's: "NaN",
+			// "Inf", "0x1p-2", "1_000" and ".5" are all numbers to it. NaN
+			// fails every comparison, so `if in.Amount > balance` waves it
+			// through, and infinity passes any lower bound; the rest are
+			// numbers a JSON body refuses and the document's type: number
+			// does not describe, which a proxy or a firewall reading the
+			// parameter by those rules sees differently from the handler. So
+			// the text must be a decimal number first. An overflow such as
+			// 1e400 then fails with a range error.
+			if !isDecimal(raw[0], true) {
+				return errNotNumber
+			}
 			v, err := strconv.ParseFloat(raw[0], bits)
-			if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+			if err != nil {
 				return errNotNumber
 			}
 			dst.SetFloat(v)
@@ -693,6 +974,50 @@ func setterAt(t reflect.Type, depth int) (setter, error) {
 	default:
 		return nil, fmt.Errorf("type %s cannot be bound from a request parameter; supported kinds are strings, booleans, numbers, time.Duration, slices of those, and any type implementing encoding.TextUnmarshaler", t)
 	}
+}
+
+// isDecimal reports whether text is a number as a JSON body writes one: an
+// optional minus sign, digits, and, when fraction is true, an optional
+// fraction and exponent. Nothing else is: no plus sign, no hexadecimal, no
+// digit separators, no "NaN" or "Inf", and no point without a digit on each
+// side of it.
+//
+// Leading zeros are the one liberty taken beyond JSON. They are decimal and
+// mean the same thing to every reader, and "007" or "09" is what people type.
+func isDecimal(text string, fraction bool) bool {
+	i := 0
+	digits := func() bool {
+		start := i
+		for i < len(text) && text[i] >= '0' && text[i] <= '9' {
+			i++
+		}
+		return i > start
+	}
+	if i < len(text) && text[i] == '-' {
+		i++
+	}
+	if !digits() {
+		return false
+	}
+	if !fraction {
+		return i == len(text)
+	}
+	if i < len(text) && text[i] == '.' {
+		i++
+		if !digits() {
+			return false
+		}
+	}
+	if i < len(text) && (text[i] == 'e' || text[i] == 'E') {
+		i++
+		if i < len(text) && (text[i] == '+' || text[i] == '-') {
+			i++
+		}
+		if !digits() {
+			return false
+		}
+	}
+	return i == len(text)
 }
 
 // fieldByIndex resolves a possibly nested field for writing, allocating any
@@ -733,13 +1058,15 @@ func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 
 	bindParams(p.params, c, dst, query, verr)
 
+	decoded := true
 	switch {
 	case p.multipart:
 		if err := p.bindMultipart(c, dst, route, verr); err != nil {
 			return err
 		}
 	case p.body != nil:
-		if err := p.bindBody(c, dst, route, verr); err != nil {
+		var err error
+		if decoded, err = p.bindBody(c, dst, route, verr); err != nil {
 			return err
 		}
 	}
@@ -747,7 +1074,19 @@ func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 	// Validation runs even when binding found problems, so a client learns
 	// about every field at once. Fields that already failed to bind are left
 	// out, because a value that could not be parsed has nothing further to say.
-	if p.validation != nil && !route.skipValidation {
+	//
+	// A body that failed to decode is different, and the model is not
+	// validated at all. The decoder stops at the first member it cannot read,
+	// so the model holds part of a body: neither what the client sent nor
+	// anything it could have sent, and with a located parameter beside the body
+	// nothing of it at all, since the scratch value the body went into is not
+	// copied out. Rules run over that report members the client did send as
+	// missing, and a Must check, or a rule on a parameter that depends on a
+	// body member, judges a value nobody wrote. What failed to bind on its own,
+	// a path, query, header or cookie parameter, is still reported, because it
+	// does not depend on the body; the model's rules wait for a body that
+	// decodes.
+	if p.validation != nil && !route.skipValidation && decoded {
 		failed := make(map[fieldKey]bool, len(verr.Details))
 		for _, detail := range verr.Details {
 			failed[fieldKey{detail.Location, detail.Field}] = true
@@ -774,6 +1113,7 @@ var (
 	errNotUint     = errors.New("must be a valid non-negative integer")
 	errNotNumber   = errors.New("must be a valid number")
 	errNotText     = errors.New("is not in the expected format")
+	errRepeated    = errors.New("must be given only once")
 )
 
 // bindingKeys maps each of those onto the key its translation is written under.
@@ -784,6 +1124,32 @@ var bindingKeys = map[error]string{
 	errNotUint:     "unsigned",
 	errNotNumber:   "number",
 	errNotText:     "format",
+	errRepeated:    "repeated",
+}
+
+// rangeError reports a whole number that is well formed but does not fit the
+// type it is meant for, naming the range that would have.
+//
+// "Must be a valid integer" is true of 300 for an int8 and tells the client
+// nothing it can act on, since 300 is a perfectly valid integer. The range is a
+// property of the type, so one value is built per setter when the route is
+// compiled and returned for every failure.
+type rangeError struct {
+	low, high string
+}
+
+func (e *rangeError) Error() string { return "must be between " + e.low + " and " + e.high }
+
+// integerRange returns the failure for a value outside an integer type.
+func integerRange(t reflect.Type) *rangeError {
+	shift := 64 - t.Bits()
+	if t.Kind() >= reflect.Uint {
+		return &rangeError{low: "0", high: strconv.FormatUint(math.MaxUint64>>shift, 10)}
+	}
+	return &rangeError{
+		low:  strconv.FormatInt(int64(math.MinInt64)>>shift, 10),
+		high: strconv.FormatInt(math.MaxInt64>>shift, 10),
+	}
 }
 
 // entryError reports a failure inside a repeated parameter, naming the entry
@@ -820,6 +1186,10 @@ func paramIssue(err error) (issue, key string, args []any) {
 	if errors.As(err, &entry) {
 		issue, key, args = paramIssue(entry.err)
 		return fmt.Sprintf("entry %d %s", entry.index, issue), key, args
+	}
+	var outside *rangeError
+	if errors.As(err, &outside) {
+		return outside.Error(), "muzak.binding.range", []any{"min", outside.low, "max", outside.high}
 	}
 	if key := bindingKey(err); key != "" {
 		return err.Error(), key, nil
@@ -862,6 +1232,16 @@ func bindParams(binders []paramBinder, c *Context, dst reflect.Value, query url.
 				continue
 			}
 			raw = []string{b.defValue}
+		}
+		if len(raw) > 1 && !b.isSlice {
+			// A field that holds one value was sent several. Taking the first
+			// is what this did, taking the last is what FastAPI and most
+			// proxies do, and when the component that checks a request and
+			// the one that serves it pick differently, a request passes the
+			// check with one value and is served with another. Refusing it
+			// leaves nothing to pick.
+			verr.addKey(b.source.String(), b.name, errRepeated.Error(), bindingKey(errRepeated))
+			continue
 		}
 		if err := b.set(fieldByIndex(dst, b.index), raw); err != nil {
 			issue, key, args := paramIssue(err)
@@ -909,6 +1289,9 @@ func (b *paramBinder) lookup(c *Context, query url.Values) ([]string, bool) {
 		if !ok || len(v) == 0 {
 			return nil, false
 		}
+		if b.isSlice {
+			return splitHeaderList(v), true
+		}
 		return v, true
 	case srcForm:
 		// The body has already been parsed by the time a form binder runs, and
@@ -928,6 +1311,42 @@ func (b *paramBinder) lookup(c *Context, query url.Values) ([]string, bool) {
 	}
 }
 
+// splitHeaderList reads the lines of a header bound to a slice as the list
+// RFC 9110 section 5.6.1 says they are.
+//
+// A sender may write a list as several lines, as one line of comma-separated
+// elements, or as both, and the three mean the same thing, so each line is
+// split on its commas: the spaces and tabs around an element are dropped and
+// an empty element is skipped, as the RFC requires of a recipient. A comma
+// inside a quoted string, such as an entity tag, belongs to the element, which
+// keeps its quotes. A header holding nothing but separators is an empty list.
+func splitHeaderList(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	add := func(element string) {
+		if element = strings.Trim(element, " \t"); element != "" {
+			out = append(out, element)
+		}
+	}
+	for _, line := range lines {
+		start, quoted, escaped := 0, false, false
+		for i := 0; i < len(line); i++ {
+			switch c := line[i]; {
+			case escaped:
+				escaped = false
+			case quoted && c == '\\':
+				escaped = true
+			case c == '"':
+				quoted = !quoted
+			case c == ',' && !quoted:
+				add(line[start:i])
+				start = i + 1
+			}
+		}
+		add(line[start:])
+	}
+	return out
+}
+
 // declaredOverLimit reports whether a request declares a body longer than
 // limit, which is known from its Content-Length before any of the body is read.
 //
@@ -941,16 +1360,20 @@ func declaredOverLimit(r *http.Request, limit int64) bool {
 }
 
 // bindBody reads, size-limits and decodes the JSON request body.
-func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *ValidationError) error {
+//
+// It reports whether the body decoded, which is false only when the client
+// sent one the decoder could not read into the input; an absent body is not a
+// failure to decode, and is reported as missing when the route requires one.
+func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *ValidationError) (bool, error) {
 	labelled, err := checkContentType(c.r)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// A body that declares a length over the limit is refused before it is
 	// read, so a client that asked for a 100 Continue is not told to send it.
 	if declaredOverLimit(c.r, route.maxBodySize) {
-		return NewHTTPErrorf(http.StatusRequestEntityTooLarge,
+		return false, NewHTTPErrorf(http.StatusRequestEntityTooLarge,
 			"request body exceeds the %d byte limit for this route", route.maxBodySize)
 	}
 
@@ -973,29 +1396,29 @@ func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *V
 	if _, err := buf.ReadFrom(source); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return NewHTTPErrorf(http.StatusRequestEntityTooLarge,
+			return false, NewHTTPErrorf(http.StatusRequestEntityTooLarge,
 				"request body exceeds the %d byte limit for this route", route.maxBodySize).Wrap(err)
 		}
-		return NewHTTPError(http.StatusBadRequest, "the request body could not be read").Wrap(err)
+		return false, NewHTTPError(http.StatusBadRequest, "the request body could not be read").Wrap(err)
 	}
 
 	if buf.Len() == 0 {
 		if p.body.required {
 			verr.add("body", "", "is required")
 		}
-		return nil
+		return true, nil
 	}
 	if !labelled {
-		return unlabelledBody()
+		return false, unlabelledBody()
 	}
 
 	target := dst
 	if !p.body.direct {
-		// Decoding into a scratch value of the same type and copying only the
-		// body-bound fields out means a crafted body can never reach a field
-		// that is supposed to come from the path, a query parameter or a
-		// header.
-		target = reflect.New(p.typ).Elem()
+		// Decoding into a scratch value that holds the body members alone and
+		// copying them out means a crafted body can never reach a field that
+		// is supposed to come from the path, a query parameter or a header,
+		// nor even name one. See [bodyPlan.narrow].
+		target = reflect.New(p.body.shape).Elem()
 	}
 	// The decoder leaves a member the body does not mention as it found it,
 	// so a default written first is what a client that omits it gets, and one
@@ -1003,19 +1426,24 @@ func (p *bindPlan) bindBody(c *Context, dst reflect.Value, route *Route, verr *V
 	// registered, so there is no failure to report here.
 	for i := range p.body.defaults {
 		d := &p.body.defaults[i]
-		_ = d.set(fieldByIndex(target, d.index), []string{d.raw})
+		_ = d.set(fieldByIndex(target, d.at), []string{d.raw})
 	}
 	if err := json.Unmarshal(buf.Bytes(), target.Addr().Interface(), route.jsonReadOptions()); err != nil {
-		field, issue := decodeIssue(err)
-		verr.add("body", field, issue)
-		return nil
-	}
-	if !p.body.direct {
-		for _, index := range p.body.fields {
-			fieldByIndex(dst, index).Set(fieldByIndex(target, index))
+		if typeFault(err) {
+			// The type the route declared cannot hold what was sent, whatever
+			// was sent, so the request did nothing wrong. It is answered as
+			// the server's failure and logged where the developer will see
+			// it, rather than reported to the client as its own mistake.
+			return false, fmt.Errorf("muzak: %s %s: the request body could not be decoded into %s, through no fault of the request: %w",
+				route.Method, route.Path, p.typ, err)
 		}
+		verr.Details = append(verr.Details, decodeIssue(err, target.Type()))
+		return false, nil
 	}
-	return nil
+	for _, c := range p.body.copies {
+		fieldByIndex(dst, c.to).Set(fieldByIndex(target, c.from))
+	}
+	return true, nil
 }
 
 // checkContentType rejects a body sent under a media type Muzak cannot

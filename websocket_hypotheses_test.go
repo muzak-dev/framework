@@ -62,10 +62,11 @@ func closeText(payload []byte) string {
 // A route's options layer over the application's field by field, which is what
 // makes the origin opt-outs sticky: a narrower scope that leaves a field at its
 // zero value inherits it, and for a bool the zero value is what "not set"
-// looks like, so a route cannot switch an application's opt-out back off. The
-// same layering leaves an application's AllowOriginFunc in force for a route
-// that only lists origins. Both are what the documentation says layering does;
-// these pin it.
+// looks like, so a route that says nothing about the origin keeps an
+// application's opt-out. Turning it back off takes EnforceOriginCheck, which
+// TestWebSocketNarrowerScopeCanRestoreTheOriginCheck covers. The same layering
+// leaves an application's AllowOriginFunc in force for a route that only lists
+// origins. Both are what the documentation says layering does; these pin it.
 func TestWebSocketOriginOptionsLayerFieldByField(t *testing.T) {
 	t.Parallel()
 	opts := quietOptions()

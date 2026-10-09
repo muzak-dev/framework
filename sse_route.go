@@ -12,8 +12,9 @@ import (
 )
 
 // Defaults applied to an event stream when [SSEOptions] leaves them unset.
-// Each of them bounds something a client can hold on to, so none of them
-// defaults to zero.
+// None of them defaults to zero. None of them bounds how long a stream lasts
+// either, which only [SSEOptions.MaxLifetime] does and which is unset by
+// default; see [SSEOptions] for what that leaves open.
 const (
 	// DefaultSSEKeepAlive is how often a comment is written to an otherwise
 	// idle stream, at fifteen seconds. The HTML specification suggests exactly
@@ -23,7 +24,10 @@ const (
 	DefaultSSEKeepAlive = 15 * time.Second
 	// DefaultSSEWriteTimeout bounds how long one event may take to reach the
 	// client, at ten seconds. It is what stops a client that has stopped
-	// reading from pinning a goroutine and a buffer for as long as it likes.
+	// reading a stream that keeps writing from pinning a goroutine and a buffer
+	// for as long as it likes, once the socket buffers between them are full.
+	// A stream that writes little, such as one that only keeps itself alive,
+	// never fills them, and is never ended by it.
 	DefaultSSEWriteTimeout = 10 * time.Second
 	// DefaultSSEMaxStreams is how many event streams one application serves at
 	// once by default, at 1024. Each stream holds a connection and a goroutine
@@ -34,7 +38,8 @@ const (
 	// address holds open at once by default, at 64, for the same reasons as
 	// [DefaultWSMaxConnectionsPerIP]: generous for a legitimate browser
 	// session, but small enough that one address can never take more than a
-	// slice of the process-wide budget.
+	// sixteenth of [DefaultSSEMaxStreams]. Sixteen addresses take all of it;
+	// see [SSEOptions.MaxStreamsPerIP].
 	DefaultSSEMaxStreamsPerIP = 64
 )
 
@@ -72,9 +77,41 @@ func sseStreamsPerIPLimit(configured int) int {
 // whatever a narrower scope leaves at its zero value it inherits, so a route
 // that only lengthens the keepalive keeps the application's write timeout.
 //
-// The zero value is usable and safe: writes are bounded, an idle stream is
-// held open by a periodic keepalive, and the number of streams one application
-// serves at once is capped.
+// The zero value is usable: a write is bounded, an idle stream is held open by
+// a periodic keepalive, and the number of streams the application serves at
+// once, and that one client address holds, is capped.
+//
+// It does not bound how long a stream lasts, and on a route that anyone can
+// open that leaves the whole budget to whoever takes it first. A client that
+// reads nothing is never ended by WriteTimeout, because a keepalive is a few
+// bytes and never fills a socket buffer, and with MaxLifetime unset nothing
+// else ends it. MaxStreams divided by MaxStreamsPerIP is how many client
+// addresses fill the process, 1024 / 64 = 16 with the defaults: sixteen IPv4
+// addresses, or sixteen IPv6 /56 prefixes, which is a single /52 (a /48, as
+// many hosting providers assign, holds 256 of them), each opening 64 streams
+// and reading none of them, hold every slot until they disconnect or the
+// server stops, and every other stream is refused with 503 until then.
+//
+// A route that clients one does not control can open is therefore worth more
+// than the zero value:
+//
+//   - Put it behind a guard that authenticates the client where it can be,
+//     which is the only thing that ties a stream to someone rather than to an
+//     address.
+//   - Raise MaxStreams as far as the file descriptor limit allows, and lower
+//     MaxStreamsPerIP towards what the clients behind one address need, so
+//     that MaxStreams / MaxStreamsPerIP is larger than the number of addresses
+//     an abuser can be expected to have. How low depends on who shares an
+//     address: one browser needs a stream per open tab, while an office or a
+//     carrier's NAT puts many users behind one. Counting IPv6 clients by their
+//     /48 with [ClientIPOptions.ConnectionIPv6Prefix] makes each of those
+//     addresses cost a whole site's allocation.
+//   - Set MaxLifetime, to minutes rather than hours, so that a stream whose
+//     client has stopped listening is reclaimed and every slot turns over. A
+//     browser reconnects on its own and resumes from the last event identifier,
+//     so a legitimate client loses nothing. It does not stop a client that
+//     reconnects as soon as its stream ends, which is what the two above are
+//     for.
 type SSEOptions struct {
 	// KeepAlive is how often a comment is written to a stream that has sent
 	// nothing, defaulting to [DefaultSSEKeepAlive]. A comment is ignored by
@@ -84,11 +121,13 @@ type SSEOptions struct {
 	KeepAlive time.Duration
 
 	// WriteTimeout bounds how long one event may take to reach the client,
-	// defaulting to [DefaultSSEWriteTimeout]. It is the bound that matters
-	// most here: a client that opens a stream and never reads it costs a
-	// goroutine, a connection and a growing socket buffer until something
-	// gives up, and this is what gives up. A negative value removes it, which
-	// is only appropriate when something else imposes one.
+	// defaulting to [DefaultSSEWriteTimeout]. A client that stops reading a
+	// stream that keeps writing costs a goroutine, a connection and a growing
+	// socket buffer until something gives up, and once the buffers between
+	// them are full this is what gives up. A stream that writes too little to
+	// fill them, which a keepalive alone never does, is not ended by it; that
+	// is what MaxLifetime is for. A negative value removes it, which is only
+	// appropriate when something else imposes one.
 	//
 	// It is enforced through the response's write deadline, which a response
 	// writer wrapped by middleware reaches only if every wrapper implements
@@ -111,15 +150,18 @@ type SSEOptions struct {
 	// [ErrSSEStreamEnded] every later send reports, and the stream's slot in
 	// MaxStreams and MaxStreamsPerIP is released when it returns.
 	//
-	// It is worth setting on any route a client one does not control can open.
-	// The write timeout bounds one write and the keepalive is a few bytes, so a
-	// client that reads nothing at all never fills a socket buffer and holds
-	// its stream, a goroutine and a file descriptor until the server stops,
-	// and nothing but a ceiling on the stream's age can tell it from one that
-	// is listening. A stream is not cut mid-event: the ceiling is applied
-	// between events, after the one being written. A negative value removes
-	// the bound a wider scope set, for a route whose streams are meant to
-	// outlast it.
+	// It is worth setting on any route a client one does not control can open,
+	// to minutes rather than hours. The write timeout bounds one write and the
+	// keepalive is a few bytes, so a client that reads nothing at all never
+	// fills a socket buffer and holds its stream, a goroutine and a file
+	// descriptor until the server stops, and nothing but a ceiling on the
+	// stream's age can tell it from one that is listening. Left unset, sixteen
+	// such client addresses hold every stream the defaults allow; see
+	// [SSEOptions] for that arithmetic and for what bounds a client that
+	// reconnects as soon as its stream ends, which this does not. A stream is
+	// not cut mid-event: the ceiling is applied between events, after the one
+	// being written. A negative value removes the bound a wider scope set, for
+	// a route whose streams are meant to outlast it.
 	MaxLifetime time.Duration
 
 	// Retry is the reconnection delay advertised to the client at the start of
@@ -151,7 +193,9 @@ type SSEOptions struct {
 	// every one of MaxStreams' slots itself, leaving 503 for everyone else
 	// until it disconnects. This is what stops that: no matter how many
 	// streams the process has room for, one address can never hold more than
-	// this many of them.
+	// this many of them. It does not stop a few addresses together:
+	// MaxStreams / MaxStreamsPerIP of them fill the process, sixteen with the
+	// defaults, so size the two against each other as [SSEOptions] describes.
 	//
 	// The address used is the one [Context.ClientIP] resolves; see
 	// [ClientIPOptions] to configure it behind a proxy. By default an IPv4
@@ -243,6 +287,9 @@ type SSEHandler[In, Out any] func(ctx *Context, in In, stream *SSEStream[Out]) e
 // sseConfig is an event stream route's resolved configuration.
 type sseConfig struct {
 	opts SSEOptions
+	// bodyLeft records that the route's input binds nothing from the request
+	// body, which leaves a body the request carries to the handler.
+	bodyLeft bool
 	// noDeadlines makes the warning about a response that cannot carry write
 	// deadlines a once-per-route one: it is the same fact for every stream the
 	// route serves, and a line for each would bury it.
@@ -295,8 +342,18 @@ func (r *Router) SSE[In, Out any](path string, h SSEHandler[In, Out], opts ...Ro
 //	r.SSEHandle(http.MethodPost, "/chat/stream", streamChat)
 //
 // Unlike a WebSocket handshake, the request may carry a body, so the input
-// type binds one exactly as it would for any other route. The method is
-// upper-cased before use; everything else behaves as [Router.SSE].
+// type binds one exactly as it would for any other route. An input that binds
+// nothing from the body leaves it to the handler, which reads it from
+// ctx.Request().Body even though the stream's header has already gone out,
+// over HTTP/1.1 as over HTTP/2, and under [ServerOptions.ReadTimeout] as any
+// route's body is read. Read it before sending the first event, because a
+// client may send the whole body before it reads any of the response. Until a
+// body has been read to its end, net/http cannot watch the connection for the
+// client going away, so that is noticed when a write to it fails rather than
+// at once, which with the keepalive on takes a couple of its intervals.
+//
+// The method is upper-cased before use; everything else behaves as
+// [Router.SSE].
 func (r *Router) SSEHandle[In, Out any](method, path string, h SSEHandler[In, Out], opts ...RouteOption) *Route {
 	return registerSSE(r, strings.ToUpper(method), path, h, opts)
 }
@@ -340,10 +397,10 @@ func registerSSE[In, Out any](r *Router, method, path string, h SSEHandler[In, O
 				return err
 			}
 		} else {
-			// A handler may read the body itself before it sends the first
-			// event, so it is not read ahead of it. What is left is dropped
-			// when the stream ends, which for a stream that was served is
-			// late: net/http has already done the same on the first write.
+			// A handler may read the body itself, so it is not read ahead of
+			// it, and the stream opens in a mode that keeps net/http from
+			// dropping it when the header goes out; see [sseStream.open].
+			// What the handler left is dropped when the stream ends.
 			defer discardBody(c.r)
 		}
 		core, err := c.app.acceptSSE(c, rt.sse)
@@ -376,6 +433,7 @@ func (rt *Route) resolveSSE(in inherited) error {
 		return fmt.Errorf("muzak: SSE %s %s: MaxStreamsPerIP may only be set on the application, because the streams it bounds belong to the process rather than to one route", rt.Method, rt.Path)
 	}
 	rt.sse.opts = opts.withDefaults()
+	rt.sse.bodyLeft = rt.plan.empty || (!rt.plan.multipart && rt.plan.body == nil)
 	// A stream is refused when the server is draining and when it is full, so a
 	// client generated from the document is told to expect it.
 	rt.documentRefusals(responseDoc{
@@ -416,6 +474,9 @@ func (a *App) acceptSSE(c *Context, cfg *sseConfig) (*sseStream, error) {
 		return nil, err
 	}
 	stream := newSSEStream(c, cfg.opts)
+	// A request without a body has nothing left to read, whatever the input
+	// binds; a length that is not known, which is -1, may still carry one.
+	stream.bodyLeft = cfg.bodyLeft && c.r.ContentLength != 0
 	// The stream is admitted before its header is written, because a refusal
 	// has to be an ordinary error response and there is no way back to one
 	// afterwards. Admitting and recording under one lock is also what keeps

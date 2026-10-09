@@ -1,7 +1,6 @@
 package validate
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -48,25 +47,6 @@ func TestRequiredAfterAnotherCheckSkipsIt(t *testing.T) {
 	}
 	if err.Error() != "is required" {
 		t.Errorf("Check = %q, want only the presence failure", err)
-	}
-}
-
-// TestToFloatRefusesANonNumber covers the conversion's fallback. The entry
-// point constrains a field to a numeric type, so this is only reachable by
-// calling the helper directly.
-func TestToFloatRefusesANonNumber(t *testing.T) {
-	t.Parallel()
-	if _, ok := toFloat(reflect.ValueOf("text")); ok {
-		t.Error("toFloat accepted a string")
-	}
-	if value, ok := toFloat(reflect.ValueOf(int8(3))); !ok || value != 3 {
-		t.Errorf("toFloat(int8) = %v, %v", value, ok)
-	}
-	if value, ok := toFloat(reflect.ValueOf(uint16(3))); !ok || value != 3 {
-		t.Errorf("toFloat(uint16) = %v, %v", value, ok)
-	}
-	if value, ok := toFloat(reflect.ValueOf(float32(1.5))); !ok || value != 1.5 {
-		t.Errorf("toFloat(float32) = %v, %v", value, ok)
 	}
 }
 

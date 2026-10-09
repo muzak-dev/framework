@@ -641,6 +641,23 @@ func TestWSAcceptKeyMatchesTheSpecification(t *testing.T) {
 	}
 }
 
+func TestWSAcceptKeyRefusesWhatIsNotAKey(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{
+		"",
+		testWSKey[:23],
+		testWSKey + "=",
+		// The right length, but not base64 at all.
+		"!!!!!!!!!!!!!!!!!!!!!!!!",
+		// The right length and base64, but eighteen bytes rather than sixteen.
+		"AAAAAAAAAAAAAAAAAAAAAAAA",
+	} {
+		if got, err := wsAcceptKey(key); err == nil {
+			t.Errorf("wsAcceptKey(%q) = %q, want the key refused", key, got)
+		}
+	}
+}
+
 func TestHeaderHasToken(t *testing.T) {
 	t.Parallel()
 	header := http.Header{}

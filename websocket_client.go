@@ -41,6 +41,13 @@ type WSDialOptions struct {
 	// ReadLimit, ReadTimeout, WriteTimeout and CloseGracePeriod configure the
 	// connection exactly as the matching fields of [WSOptions] do for a served
 	// one.
+	//
+	// CloseGracePeriod is how long the client waits, once the close frames have
+	// crossed, for the server to close the TCP connection, which RFC 6455 asks
+	// a server to do before its client so that the server rather than every
+	// client holds the TIME_WAIT state a closed connection leaves behind. A
+	// server that answers promptly ends the wait at once; one that never
+	// answers costs the period and no more. A negative value closes at once.
 	ReadLimit        int64
 	ReadTimeout      time.Duration
 	WriteTimeout     time.Duration

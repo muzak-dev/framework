@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/github/actions/workflow/status/muzak-dev/framework/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI">
 </a>
 <a href="#test-coverage">
-  <img src="https://img.shields.io/badge/coverage-98.6%25-3fb950?style=flat-square&logo=go&logoColor=white" alt="Coverage">
+  <img src="https://img.shields.io/badge/coverage-98.8%25-3fb950?style=flat-square&logo=go&logoColor=white" alt="Coverage">
 </a>
 <a href="https://pkg.go.dev/muzak.dev/framework">
   <img src="https://img.shields.io/badge/pkg.go.dev-reference-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go Reference">
@@ -333,15 +333,17 @@ method and the rest of the numbers.
 
 ### Test coverage
 
-**98.6% of statements**, measured on Go 1.27.0.
+**98.8% of statements**, measured on Go 1.27.0.
 
 | Package | Covered |
 |---|---:|
-| `muzak.dev/framework` | 98.6% |
-| `muzak.dev/framework/validate` | 99.3% |
+| `muzak.dev/framework` | 98.9% |
+| `muzak.dev/framework/validate` | 98.2% |
+| `muzak.dev/framework/i18n` | 99.2% |
 | `muzak.dev/framework/internal/radix` | 100.0% |
 | `muzak.dev/framework/internal/wsframe` | 100.0% |
-| `muzak.dev/framework/testclient` | 93.2% |
+| `muzak.dev/framework/internal/yaml` | 100.0% |
+| `muzak.dev/framework/testclient` | 93.4% |
 
 CI recomputes this on every push and fails below 98%, so the badge cannot
 quietly go stale. The uncovered statements are defensive branches that cannot be

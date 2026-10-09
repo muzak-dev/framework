@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 )
 
@@ -16,9 +17,13 @@ import (
 // rule set is what enforces that the field is numeric at all, so asking for
 // Between on a string does not compile.
 //
-// Bounds are compared exactly for integers and as floating point for the rest.
-// A bound beyond 2^53 loses precision, which no realistic validation limit
-// reaches.
+// A field of an integer type is compared with its bounds exactly, whatever its
+// size: an int64 of 2^53 + 1 is over Max(1 << 53), although the two are the
+// same number once both are a float64. A float field is compared as floating
+// point. The bounds themselves are float64, so one written beyond 2^53 is
+// rounded to the nearest float64 where it is declared, and the value is then
+// compared exactly with that. Two things still see an integer through float64:
+// a fractional MultipleOf step, and the function given to Must.
 type NumberRules struct {
 	target   any
 	label    string
@@ -65,12 +70,18 @@ func (r *NumberRules) Evaluate() []Problem {
 	if !ok {
 		return absentProblems(r.target, r.steps)
 	}
-	number, ok := toFloat(value)
-	if !ok {
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return runInteger(value, integer{i: value.Int()}, r.steps)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return runInteger(value, integer{u: value.Uint(), unsigned: true}, r.steps)
+	case reflect.Float32, reflect.Float64:
+	default:
 		// coverage: the entry point constrains the field to a numeric type, so
-		// a rule set can only ever be bound to one that converts.
+		// a rule set can only ever be bound to an integer or a float.
 		return nil
 	}
+	number := value.Float()
 	// NaN and the infinities parse cleanly out of a path, query, header or form
 	// value (strconv.ParseFloat accepts "NaN" and "Inf"), and every comparison
 	// against one of them is false. Left unchecked that satisfies Min, Max,
@@ -83,47 +94,238 @@ func (r *NumberRules) Evaluate() []Problem {
 	}
 	original := number
 	problems := runNumber(&number, r.steps, r.required)
-	// Converting an int64 or uint64 through float64 loses precision above 2^53,
-	// so writing the converted value back on every call would silently corrupt
-	// a large integer even when no rule touched it. Writing back only when a
-	// transform (Clamp is the only one) actually changed the number confines
-	// that unavoidable rounding to the one rule that asks for it.
+	// Only a transform (Clamp is the only one) changes the number, and a field
+	// is written only when one did.
 	if number != original {
-		writeBack(value, number)
+		value.SetFloat(number)
 	}
 	return problems
 }
 
-// toFloat reads any numeric kind as a float64.
-func toFloat(value reflect.Value) (float64, bool) {
-	switch value.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return float64(value.Int()), true
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return float64(value.Uint()), true
-	case reflect.Float32, reflect.Float64:
-		return value.Float(), true
-	default:
-		return 0, false
-	}
+// integer is the value of an integer field, held exactly. Exactly one of i and
+// u is in use, which unsigned says.
+type integer struct {
+	i        int64
+	u        uint64
+	unsigned bool
 }
 
-// writeBack stores a possibly transformed number into the field it came from.
-func writeBack(value reflect.Value, number float64) {
-	switch value.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if int64(number) != value.Int() {
-			value.SetInt(int64(number))
+// unordered is what [integer.compare] reports for a bound that is not a
+// number, which no comparison is true of, so that a NaN bound fails nothing for
+// an integer just as it fails nothing for a float.
+const unordered = 2
+
+// compare reports whether n is below, equal to or above f, as -1, 0 or +1,
+// without rounding either side.
+//
+// A float64 is either beyond the integer's range, which settles the answer, or
+// within it, where its integer part converts exactly. When the integer parts
+// are equal, the fraction of f decides.
+func (n integer) compare(f float64) int {
+	if math.IsNaN(f) {
+		return unordered
+	}
+	whole := math.Trunc(f)
+	if n.unsigned {
+		switch {
+		case f < 0:
+			return 1
+		case f >= 0x1p64:
+			return -1
+		case n.u < uint64(whole):
+			return -1
+		case n.u > uint64(whole):
+			return 1
+		case f > whole:
+			return -1
 		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if uint64(number) != value.Uint() {
-			value.SetUint(uint64(number))
-		}
-	default:
-		if number != value.Float() {
-			value.SetFloat(number)
+		return 0
+	}
+	switch {
+	case f < -0x1p63:
+		return 1
+	case f >= 0x1p63:
+		return -1
+	case n.i < int64(whole):
+		return -1
+	case n.i > int64(whole):
+		return 1
+	case f > whole:
+		return -1
+	case f < whole:
+		return 1
+	}
+	return 0
+}
+
+// sign reports whether n is negative, zero or positive, as -1, 0 or +1.
+func (n integer) sign() int {
+	switch {
+	case n.unsigned && n.u > 0, !n.unsigned && n.i > 0:
+		return 1
+	case !n.unsigned && n.i < 0:
+		return -1
+	}
+	return 0
+}
+
+// float is n as a float64, rounded, for the rules that can only see one.
+func (n integer) float() float64 {
+	if n.unsigned {
+		return float64(n.u)
+	}
+	return float64(n.i)
+}
+
+// multipleOf reports whether n is a whole number of factors.
+//
+// A whole factor divides exactly. A fractional one is judged in floating point
+// by [isMultiple], since n divided by it is not an integer question; every
+// integer is a multiple of 0.5 whichever way it is asked.
+func (n integer) multipleOf(factor float64) bool {
+	step := math.Abs(factor)
+	switch {
+	case factor == 0 || math.IsNaN(factor):
+		return false
+	case step >= 0x1p64:
+		// Past every integer, so only zero is a multiple of it. An infinite
+		// factor is one of these.
+		return n.sign() == 0
+	case step != math.Trunc(step):
+		return isMultiple(n.float(), factor)
+	}
+	magnitude := n.u
+	if !n.unsigned {
+		// The magnitude of math.MinInt64 does not fit an int64, but it does fit
+		// a uint64, which is what the conversion of its two's complement gives.
+		magnitude = uint64(n.i) //nolint:gosec // the two's complement is wanted, and negated below
+		if n.i < 0 {
+			magnitude = -magnitude
 		}
 	}
+	return magnitude%uint64(step) == 0
+}
+
+// clampTo is Clamp for an integer: raised to the least integer at or above
+// lowest, then lowered to the greatest at or below highest, in that order, as
+// min(max(v, lowest), highest) does for a float.
+func (n integer) clampTo(lowest, highest float64) integer {
+	if n.compare(lowest) == -1 {
+		n = integerNear(math.Ceil(lowest), n.unsigned)
+	}
+	if n.compare(highest) == 1 {
+		n = integerNear(math.Floor(highest), n.unsigned)
+	}
+	return n
+}
+
+// integerNear returns the integer of the given signedness nearest a whole
+// float64, which is the float itself when it is in range and the end of the
+// range when it is not.
+func integerNear(f float64, unsigned bool) integer {
+	if unsigned {
+		switch {
+		case f <= 0:
+			return integer{unsigned: true}
+		case f >= 0x1p64:
+			return integer{u: math.MaxUint64, unsigned: true}
+		}
+		return integer{u: uint64(f), unsigned: true}
+	}
+	switch {
+	case f < -0x1p63:
+		return integer{i: math.MinInt64}
+	case f >= 0x1p63:
+		return integer{i: math.MaxInt64}
+	}
+	return integer{i: int64(f)}
+}
+
+// store writes n into an integer field, stopping at the end of the field's own
+// range: a Clamp whose bounds an int8 cannot hold leaves it at 127 or -128
+// rather than wrapping round to a number on the other side.
+func (n integer) store(field reflect.Value) {
+	bits := field.Type().Bits()
+	if n.unsigned {
+		field.SetUint(min(n.u, uint64(math.MaxUint64)>>(64-bits)))
+		return
+	}
+	highest := int64(math.MaxInt64 >> (64 - bits))
+	field.SetInt(max(min(n.i, highest), -highest-1))
+}
+
+// runInteger is [runNumber] for a field of an integer type, comparing exactly
+// rather than through float64.
+func runInteger(field reflect.Value, n integer, steps []step[float64]) []Problem {
+	original := n
+	skipOnZero := zeroAdmissible(steps)
+	var problems []Problem
+	for i := range steps {
+		s := &steps[i]
+		if s.kind == kindClamp {
+			n = n.clampTo(s.lo, s.hi)
+			continue
+		}
+		if s.kind != kindRequired && n.sign() == 0 && skipOnZero {
+			continue
+		}
+		if err := applyIntegerStep(s, n); err != nil {
+			problems = []Problem{problemFor(s, err)}
+			break
+		}
+	}
+	if n != original {
+		n.store(field)
+	}
+	return problems
+}
+
+// applyIntegerStep runs one numeric rule against an integer. It reports the
+// same failure [applyNumberStep] would, so the two differ only in what they
+// count as a failure.
+func applyIntegerStep(s *step[float64], n integer) error {
+	var holds bool
+	switch s.kind {
+	case kindRequired:
+		holds = n.sign() != 0
+	case kindMin:
+		holds = n.compare(s.lo) != -1
+	case kindMax:
+		holds = n.compare(s.hi) != 1
+	case kindBetween:
+		holds = n.compare(s.lo) != -1 && n.compare(s.hi) != 1
+	case kindPositive:
+		holds = n.sign() > 0
+	case kindNegative:
+		holds = n.sign() < 0
+	case kindMultipleOf:
+		holds = n.multipleOf(s.lo)
+	case kindGreaterThan:
+		c := n.compare(s.lo)
+		holds = c == 1 || c == unordered
+	case kindLessThan:
+		c := n.compare(s.hi)
+		holds = c == -1 || c == unordered
+	case kindNonNegative:
+		holds = n.sign() >= 0
+	case kindNonPositive:
+		holds = n.sign() <= 0
+	case kindWhole:
+		holds = true
+	case kindPort:
+		holds = n.compare(1) != -1 && n.compare(65535) != 1
+	case kindOneOfNumber:
+		holds = slices.ContainsFunc(s.enum, func(item any) bool {
+			number, ok := item.(float64)
+			return ok && n.compare(number) == 0
+		})
+	default:
+		return s.check(n.float())
+	}
+	if holds {
+		return nil
+	}
+	return numberFailure(s)
 }
 
 // add appends a step and returns the rule set for chaining.
@@ -346,70 +548,86 @@ func formatNumber(f float64) string {
 
 // applyNumberStep runs one numeric rule. See [applyStringStep] for why the
 // rules are dispatched rather than closed over.
+//
+// Each comparison is written the way round that a NaN bound fails nothing, as
+// it always has: "not below the minimum" rather than "at least the minimum".
 func applyNumberStep(s *step[float64], value *float64) error {
+	v := *value
+	var holds bool
 	switch s.kind {
 	case kindClamp:
-		*value = min(max(*value, s.lo), s.hi)
+		*value = min(max(v, s.lo), s.hi)
+		return nil
 	case kindRequired:
-		if *value == 0 {
-			return errRequired
-		}
+		holds = v != 0
 	case kindMin:
-		if *value < s.lo {
-			return fmt.Errorf("must be at least %s", formatNumber(s.lo))
-		}
+		holds = !(v < s.lo)
 	case kindMax:
-		if *value > s.hi {
-			return fmt.Errorf("must be at most %s", formatNumber(s.hi))
-		}
+		holds = !(v > s.hi)
 	case kindBetween:
-		if *value < s.lo || *value > s.hi {
-			return fmt.Errorf("must be between %s and %s", formatNumber(s.lo), formatNumber(s.hi))
-		}
+		holds = !(v < s.lo || v > s.hi)
 	case kindPositive:
-		if *value <= 0 {
-			return errors.New("must be greater than zero")
-		}
+		holds = v > 0
 	case kindNegative:
-		if *value >= 0 {
-			return errors.New("must be less than zero")
-		}
+		holds = v < 0
 	case kindMultipleOf:
-		if !isMultiple(*value, s.lo) {
-			return fmt.Errorf("must be a multiple of %s", formatNumber(s.lo))
-		}
+		holds = isMultiple(v, s.lo)
 	case kindGreaterThan:
-		if *value <= s.lo {
-			return fmt.Errorf("must be greater than %s", formatNumber(s.lo))
-		}
+		holds = !(v <= s.lo)
 	case kindLessThan:
-		if *value >= s.hi {
-			return fmt.Errorf("must be less than %s", formatNumber(s.hi))
-		}
+		holds = !(v >= s.hi)
 	case kindNonNegative:
-		if *value < 0 {
-			return errors.New("must not be negative")
-		}
+		holds = !(v < 0)
 	case kindNonPositive:
-		if *value > 0 {
-			return errors.New("must not be positive")
-		}
+		holds = !(v > 0)
 	case kindWhole:
-		if *value != math.Trunc(*value) {
-			return errors.New("must be a whole number")
-		}
+		holds = v == math.Trunc(v)
 	case kindPort:
-		if *value != math.Trunc(*value) || *value < 1 || *value > 65535 {
-			return errors.New("must be a port number between 1 and 65535")
-		}
+		holds = v == math.Trunc(v) && v >= 1 && v <= 65535
 	case kindOneOfNumber:
-		if !containsNumber(s.enum, *value) {
-			return fmt.Errorf("must be one of %s", numberList(s.enum))
-		}
+		holds = containsNumber(s.enum, v)
 	default:
-		return s.check(*value)
+		return s.check(v)
 	}
-	return nil
+	if holds {
+		return nil
+	}
+	return numberFailure(s)
+}
+
+// numberFailure is the failure a numeric rule reports, which is the same for a
+// float and an integer field.
+func numberFailure(s *step[float64]) error {
+	switch s.kind {
+	case kindRequired:
+		return errRequired
+	case kindMin:
+		return fmt.Errorf("must be at least %s", formatNumber(s.lo))
+	case kindMax:
+		return fmt.Errorf("must be at most %s", formatNumber(s.hi))
+	case kindBetween:
+		return fmt.Errorf("must be between %s and %s", formatNumber(s.lo), formatNumber(s.hi))
+	case kindPositive:
+		return errors.New("must be greater than zero")
+	case kindNegative:
+		return errors.New("must be less than zero")
+	case kindMultipleOf:
+		return fmt.Errorf("must be a multiple of %s", formatNumber(s.lo))
+	case kindGreaterThan:
+		return fmt.Errorf("must be greater than %s", formatNumber(s.lo))
+	case kindLessThan:
+		return fmt.Errorf("must be less than %s", formatNumber(s.hi))
+	case kindNonNegative:
+		return errors.New("must not be negative")
+	case kindNonPositive:
+		return errors.New("must not be positive")
+	case kindWhole:
+		return errors.New("must be a whole number")
+	case kindPort:
+		return errors.New("must be a port number between 1 and 65535")
+	default:
+		return fmt.Errorf("must be one of %s", numberList(s.enum))
+	}
 }
 
 // containsNumber reports whether a value appears in a permitted set.

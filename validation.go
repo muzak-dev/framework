@@ -64,6 +64,12 @@ type TimeField interface {
 // A model receives one during its Validate method and uses it to bind rule sets
 // to its own fields. It is not safe for concurrent use and must not be retained
 // after Validate returns.
+//
+// A rule may also name a member of a struct the model holds by value, as
+// v.Number(&in.Price.Amount).Positive() does, and its failures are reported
+// under the member's path, "price.amount". A struct held behind a pointer lives
+// outside the model, so its members are validated by nesting it with
+// [Validation.Nested] instead.
 type Validation struct {
 	plan *validationPlan
 	base uintptr
@@ -537,13 +543,14 @@ func (v *Validation) nameOfNested(pointer reflect.Value) string {
 		if field.Kind() != reflect.Pointer || field.IsNil() || field.Pointer() != address {
 			continue
 		}
-		if origin, found := v.plan.fields[v.value.Type().Field(i).Offset]; found {
+		declared := v.value.Type().Field(i)
+		if origin, found := v.plan.fields[originKey{declared.Offset, declared.Type}]; found {
 			return origin.name
 		}
 	}
 	for _, list := range v.plan.lists {
 		if i, found := v.elementIndex(v.value.FieldByIndex(list.index), pointer); found {
-			return v.plan.fields[list.offset].name + "[" + strconv.Itoa(i) + "]"
+			return v.plan.fields[originKey{list.offset, list.typ}].name + "[" + strconv.Itoa(i) + "]"
 		}
 	}
 	return ""
@@ -664,7 +671,14 @@ func (v *Validation) describe(target any, label string) (name, location string) 
 	}
 }
 
-// originOf looks a field pointer up by its offset within the model.
+// originOf looks a field pointer up by its offset within the model and the type
+// it points at.
+//
+// The offset alone does not identify a field. The first field of a struct the
+// model holds sits at the struct's own address, so &in.Price.Amount and
+// &in.Price are the same address, and so are an embedded struct and its first
+// field. The type a pointer is declared with tells them apart, since a value
+// cannot hold one of its own type at its start.
 func (v *Validation) originOf(target any) (fieldOrigin, bool) {
 	if target == nil || v.plan == nil || v.base == 0 {
 		return fieldOrigin{}, false
@@ -677,7 +691,7 @@ func (v *Validation) originOf(target any) (fieldOrigin, bool) {
 	if address < v.base || address >= v.base+v.size {
 		return fieldOrigin{}, false
 	}
-	origin, found := v.plan.fields[address-v.base]
+	origin, found := v.plan.fields[originKey{address - v.base, pointer.Type().Elem()}]
 	return origin, found
 }
 
@@ -699,47 +713,60 @@ func joinPath(prefix, name string) string {
 type fieldOrigin struct {
 	name     string
 	location string
+	// hidden marks a field that is no member of the body, as one an outer
+	// field of the same name shadows is not. Its failures are still reported,
+	// under the name its tag gives it, but nothing in the document is it, so
+	// its rules describe nothing there.
+	hidden bool
 }
 
-// validationPlan maps a field's offset within a model to how it should be
-// reported.
+// originKey identifies a field of a model by where it sits within the model
+// and its type, which is what a pointer to it carries. See
+// [Validation.originOf].
+type originKey struct {
+	offset uintptr
+	typ    reflect.Type
+}
+
+// validationPlan maps each field of a model to how it should be reported.
 //
 // Offsets are computed once, when the route is registered, so validating a
 // request costs a subtraction and a map lookup per rule rather than a walk over
 // the type.
 type validationPlan struct {
-	fields map[uintptr]fieldOrigin
+	fields map[originKey]fieldOrigin
 	// lists are the collections a model nested per element can be held in,
 	// which is how its failures are given the element's position.
 	lists []listField
 }
 
 // listField is a collection field whose elements are models or pointers to
-// them: where it sits, so its elements can be found, and the offset its name
-// is recorded under.
+// them: where it sits, so its elements can be found, and the key its name is
+// recorded under.
 type listField struct {
 	index  []int
 	offset uintptr
+	typ    reflect.Type
 }
 
 // newValidationPlan records where every field of an input type came from,
 // starting from the JSON names and then correcting the ones the binder read
 // from somewhere other than the body.
 func newValidationPlan(t reflect.Type, plan *bindPlan) *validationPlan {
-	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}, lists: collectLists(t, nil, 0, nil)}
-	collectOrigins(t, 0, vp.fields)
+	vp := &validationPlan{fields: map[originKey]fieldOrigin{}, lists: collectLists(t, nil, 0, nil)}
+	collectOrigins(t, 0, "", vp.fields)
 	for _, binders := range [][]paramBinder{plan.params, plan.form} {
 		for i := range binders {
 			p := &binders[i]
 			if offset, ok := offsetOf(t, p.index); ok {
-				vp.fields[offset] = fieldOrigin{name: p.name, location: p.source.String()}
+				vp.fields[originKey{offset, p.typ}] = fieldOrigin{name: p.name, location: p.source.String()}
 			}
 		}
 	}
 	for i := range plan.files {
 		f := &plan.files[i]
 		if offset, ok := offsetOf(t, f.index); ok {
-			vp.fields[offset] = fieldOrigin{name: f.name, location: srcFile.String()}
+			vp.fields[originKey{offset, t.FieldByIndex(f.index).Type}] = fieldOrigin{name: f.name, location: srcFile.String()}
 		}
 	}
 	return vp
@@ -754,64 +781,97 @@ func planForType(t reflect.Type) *validationPlan {
 	if cached, found := nestedPlans.Load(t); found {
 		return cached.(*validationPlan)
 	}
-	vp := &validationPlan{fields: map[uintptr]fieldOrigin{}, lists: collectLists(t, nil, 0, nil)}
-	collectOrigins(t, 0, vp.fields)
+	vp := &validationPlan{fields: map[originKey]fieldOrigin{}, lists: collectLists(t, nil, 0, nil)}
+	collectOrigins(t, 0, "", vp.fields)
 	actual, _ := nestedPlans.LoadOrStore(t, vp)
 	return actual.(*validationPlan)
 }
 
-// collectOrigins walks a struct, recording each field's offset and the name it
-// is encoded under. Every field starts out as body content; the caller corrects
-// the located ones afterwards.
-func collectOrigins(t reflect.Type, base uintptr, into map[uintptr]fieldOrigin) {
+// collectOrigins walks a struct, recording for each field the name a failure
+// on it is reported under, prefixed with the path of the struct within the
+// model. Every field starts out as body content; the caller corrects the
+// located ones afterwards.
+//
+// The names are the members json/v2 resolves, so a field promoted from an
+// embedded struct is named as the member it is, and the members of a struct
+// the model holds are named by their path, as "price.amount". Those used to be
+// left out, so a rule on one either named nothing and refused the route, or,
+// for the first member, which sits where the struct does, named the struct.
+// A struct that decodes itself is not walked, since its members are not its
+// fields. Neither is one behind a pointer, which lives outside the model.
+func collectOrigins(t reflect.Type, base uintptr, prefix string, into map[originKey]fieldOrigin) {
 	if t.Kind() != reflect.Struct {
 		return
 	}
+	recordFields(t, base, prefix, into)
+	for _, member := range jsonMembers(t).members {
+		if member.indirect {
+			continue
+		}
+		name := prefix + member.name
+		into[originKey{base + member.offset, member.field.Type}] = fieldOrigin{name: name, location: "body"}
+		if member.field.Type.Kind() == reflect.Struct && !decodesItself(member.field.Type) {
+			collectOrigins(member.field.Type, base+member.offset, name+".", into)
+		}
+	}
+}
+
+// recordFields names every field reachable without following a pointer as its
+// tag does, which is how a field json/v2 gives no member, such as one shadowed
+// by an outer field of the same name, has always been reported. The members
+// json/v2 does resolve are named again after it, over these.
+//
+// An embedded struct has no name of its own, since its members are its
+// parent's, so a model nested there reports its failures under its members'
+// names alone. It used to take the name of its first member, which sits at the
+// same address. One kept out of the body with json:"-" is still walked, since
+// the fields in it may be read from elsewhere, and rules may name them.
+func recordFields(t reflect.Type, base uintptr, prefix string, into map[originKey]fieldOrigin) {
 	for i := range t.NumField() {
 		field := t.Field(i)
 		if !usableField(field) {
 			continue
 		}
-		offset := base + field.Offset
-		name, _, _ := strings.Cut(field.Tag.Get(tagJSON), ",")
-		if name == "" {
-			name = field.Name
-		}
-		if name != "-" {
-			into[offset] = fieldOrigin{name: name, location: "body"}
-		}
-		if field.Anonymous && field.Type.Kind() == reflect.Struct {
-			collectOrigins(field.Type, offset, into)
+		tag, ignored := parseJSONTag(field)
+		key := originKey{base + field.Offset, field.Type}
+		switch {
+		case field.Type.Kind() == reflect.Struct && (tag.embed || (field.Anonymous && !tag.hasName)):
+			if !ignored {
+				into[key] = fieldOrigin{name: strings.TrimSuffix(prefix, "."), location: "body"}
+			}
+			recordFields(field.Type, base+field.Offset, prefix, into)
+		case !ignored:
+			into[key] = fieldOrigin{name: prefix + tag.name, location: "body", hidden: true}
 		}
 	}
 }
 
 // collectLists finds the collections of structs, or of pointers to them, that
-// collectOrigins names, walking embedded structs the way it does.
+// collectOrigins names, walking the members json/v2 resolves and the structs
+// they hold the way it does.
 func collectLists(t reflect.Type, index []int, base uintptr, into []listField) []listField {
 	if t.Kind() != reflect.Struct {
 		return into
 	}
-	for i := range t.NumField() {
-		field := t.Field(i)
-		if !usableField(field) {
+	for _, member := range jsonMembers(t).members {
+		if member.indirect {
 			continue
 		}
-		path := append(slices.Clip(index), i)
-		if field.Anonymous && field.Type.Kind() == reflect.Struct {
-			into = collectLists(field.Type, path, base+field.Offset, into)
-			continue
-		}
-		name, _, _ := strings.Cut(field.Tag.Get(tagJSON), ",")
-		if field.Type.Kind() != reflect.Slice || name == "-" {
-			continue
-		}
-		elem := field.Type.Elem()
-		if elem.Kind() == reflect.Pointer {
-			elem = elem.Elem()
-		}
-		if elem.Kind() == reflect.Struct && elem.Size() > 0 {
-			into = append(into, listField{index: path, offset: base + field.Offset})
+		path := append(slices.Clip(index), member.index...)
+		offset := base + member.offset
+		switch typ := member.field.Type; typ.Kind() {
+		case reflect.Struct:
+			if !decodesItself(typ) {
+				into = collectLists(typ, path, offset, into)
+			}
+		case reflect.Slice:
+			elem := typ.Elem()
+			if elem.Kind() == reflect.Pointer {
+				elem = elem.Elem()
+			}
+			if elem.Kind() == reflect.Struct && elem.Size() > 0 {
+				into = append(into, listField{index: path, offset: offset, typ: typ})
+			}
 		}
 	}
 	return into
@@ -845,6 +905,28 @@ type fieldKey struct {
 	location, name string
 }
 
+// fieldConstraints is what every rule set a model declares for one field says
+// of it, in the order they were declared. Each of them is enforced, so the
+// field is held to all of them at once.
+type fieldConstraints []validate.Constraints
+
+// required reports whether any of the rule sets refuses the field's absence.
+func (f fieldConstraints) required() bool {
+	return slices.ContainsFunc(f, func(c validate.Constraints) bool { return c.Required })
+}
+
+// appendRuleSet adds what one rule set demands to a field's list, with each of
+// the further patterns, formats and multiples it holds in AllOf as a set of its
+// own. The document combines a field's sets into one schema, and once a field
+// holds more than one pattern, format or multiple it writes all of them under
+// allOf, so a second Matches in one chain is described exactly as a second
+// chain would be.
+func appendRuleSet(f fieldConstraints, c validate.Constraints) fieldConstraints {
+	further := c.AllOf
+	c.AllOf = nil
+	return append(append(f, c), further...)
+}
+
 // describeConstraints reports what a model's rules demand of each field, keyed
 // by where the field is read from and the name it is reported under.
 //
@@ -852,7 +934,7 @@ type fieldKey struct {
 // is safe because declaring a rule set has no effect beyond recording it. Only
 // the rules that map onto JSON Schema keywords contribute; a Must rule is
 // opaque by nature and adds nothing.
-func (p *bindPlan) describeConstraints() map[fieldKey]validate.Constraints {
+func (p *bindPlan) describeConstraints() map[fieldKey]fieldConstraints {
 	if p.validation == nil {
 		return nil
 	}
@@ -863,7 +945,7 @@ func (p *bindPlan) describeConstraints() map[fieldKey]validate.Constraints {
 // elementConstraints reports the rules a model applies to the elements of each
 // of its collections, so an array's items can be described as precisely as the
 // array itself.
-func (p *bindPlan) elementConstraints() map[fieldKey]validate.Constraints {
+func (p *bindPlan) elementConstraints() map[fieldKey]fieldConstraints {
 	if p.validation == nil {
 		return nil
 	}
@@ -875,8 +957,8 @@ func (p *bindPlan) elementConstraints() map[fieldKey]validate.Constraints {
 // fields, for the schema that describes the nested type.
 type nestedModelDoc struct {
 	typ         reflect.Type
-	constraints map[fieldKey]validate.Constraints
-	elements    map[fieldKey]validate.Constraints
+	constraints map[fieldKey]fieldConstraints
+	elements    map[fieldKey]fieldConstraints
 }
 
 // describeNestedModels reports the rules of every model the input nests, and
@@ -922,7 +1004,11 @@ func (p *bindPlan) describeNestedModels() []nestedModelDoc {
 // describeRules runs the Validate of a model type against a zero value and
 // reports the constraints of its fields and of the elements of its collections,
 // each keyed by where the field is read from and what it is called there.
-func describeRules(typ reflect.Type, plan *validationPlan) (constraints, elements map[fieldKey]validate.Constraints) {
+//
+// A field may be named by more than one rule set, and every one is kept. The
+// last used to replace the others, so the document lost a pattern, a bound, or
+// even Required, that the server went on enforcing.
+func describeRules(typ reflect.Type, plan *validationPlan) (constraints, elements map[fieldKey]fieldConstraints) {
 	scratch := reflect.New(typ)
 	model, ok := scratch.Interface().(Validatable)
 	if !ok {
@@ -932,18 +1018,23 @@ func describeRules(typ reflect.Type, plan *validationPlan) (constraints, element
 	v := &Validation{plan: plan, base: scratch.Pointer(), size: typ.Size(), value: scratch.Elem()}
 	model.Validate(v)
 
-	constraints = make(map[fieldKey]validate.Constraints, len(v.rules))
-	elements = map[fieldKey]validate.Constraints{}
+	constraints = make(map[fieldKey]fieldConstraints, len(v.rules))
+	elements = map[fieldKey]fieldConstraints{}
 	for _, rules := range v.rules {
 		name, location := v.describe(rules.Target(), rules.Label())
 		if name == "" {
 			continue
 		}
+		if origin, _ := v.originOf(rules.Target()); origin.hidden && rules.Label() == "" {
+			// The field is no member of the body, so no member of the schema
+			// is it, though another may go by the same name.
+			continue
+		}
 		key := fieldKey{location, name}
-		constraints[key] = rules.Describe()
+		constraints[key] = appendRuleSet(constraints[key], rules.Describe())
 		if describer, ok := rules.(interface{ DescribeElement() validate.Constraints }); ok {
 			if c := describer.DescribeElement(); !c.IsZero() {
-				elements[key] = c
+				elements[key] = appendRuleSet(elements[key], c)
 			}
 		}
 	}
@@ -953,7 +1044,7 @@ func describeRules(typ reflect.Type, plan *validationPlan) (constraints, element
 // constraintsForDocs reports the field constraints for the OpenAPI document,
 // or nothing when the route skips validation, because a document should
 // describe what the route actually enforces.
-func (rt *Route) constraintsForDocs() map[fieldKey]validate.Constraints {
+func (rt *Route) constraintsForDocs() map[fieldKey]fieldConstraints {
 	if rt.skipValidation {
 		return nil
 	}
@@ -969,7 +1060,7 @@ func (rt *Route) nestedModelsForDocs() []nestedModelDoc {
 }
 
 // elementConstraintsForDocs reports the constraints on collection elements.
-func (rt *Route) elementConstraintsForDocs() map[fieldKey]validate.Constraints {
+func (rt *Route) elementConstraintsForDocs() map[fieldKey]fieldConstraints {
 	if rt.skipValidation {
 		return nil
 	}

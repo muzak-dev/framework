@@ -54,12 +54,25 @@
 // is deliberately the subset the published locale corpora use, so a file taken
 // from one loads here unchanged, formats and plural forms included.
 //
+// A locale file is input the framework did not write, so what one can cost is
+// bounded. A tree nested more than 100 levels deep is refused, and so is a
+// locale, or a file, that would take more than 64 MiB to hold once every key
+// is spelled out as the full dotted path a lookup asks for. A long key above
+// many values is paid for once per value, which is how a few kilobytes could
+// otherwise ask for hundreds of megabytes.
+//
 // # Pluralization
 //
 // A count both selects a plural form and is interpolated into it. Which form it
 // selects is the locale's own business: English has two, Russian four, Arabic
 // six, and Japanese one. This package knows the CLDR arithmetic for about
 // ninety languages, so a locale file has only to supply the words.
+//
+// A count may have a fraction, and the form it selects is the one CLDR gives
+// its language for that number as it is printed: 1.5 kilometres is plural in
+// English, singular in French, and a form of its own in Czech. That is why a
+// rule reads a count as [PluralOperands], the integer and fraction digits CLDR
+// states its rules over, rather than as an int.
 //
 // A bespoke rule is often written as a function inside the locale data, which a
 // YAML file in Go cannot hold. A locale file here names a rule instead:
@@ -69,7 +82,7 @@
 //	    plural:
 //	      rule: slavic
 //
-// and a rule that is genuinely new is supplied as a function through
+// and a rule that is genuinely new is supplied as a [PluralRule] through
 // [StoreOptions.PluralRules].
 //
 // # Fallbacks

@@ -1,10 +1,12 @@
 package muzak
 
 import (
+	"bufio"
 	"compress/gzip"
 	"compress/zlib"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -146,6 +148,27 @@ func (o CompressionOptions) compressible(contentType string) bool {
 // Vary is set on every response either way, so a cache cannot hand a
 // compressed body to a client that cannot read it.
 //
+// A compressed response is a different representation from the one the
+// handler described, and the validators are adjusted to say so. A strong ETag
+// is weakened, to W/"v1" for "v1", on the compressed response and on a 304
+// answering a client that negotiated an encoding, so that a cache can use the
+// 304 to refresh what it stored. Because RFC 9110 compares If-Match strongly,
+// which a weak tag never matches, the W/ is taken off the tags of an incoming
+// If-Match before the handler sees it: a client that read a compressed
+// response can still make a conditional write with the tag it was given. A
+// handler that compares If-Match as RFC 9110 asks is unaffected otherwise; one
+// that issues weak tags of its own and compares If-Match by string equality,
+// which RFC 9110 does not allow, sees the strong form of them, and should
+// compare the opaque tag instead.
+//
+// A compressed response does not advertise Accept-Ranges, since no range of the
+// bytes it carries can be asked for. A Range request is answered from the
+// uncompressed content, uncompressed, and one that carries If-Range with a date
+// rather than a strong tag is answered with the whole content when an encoding
+// was negotiated, because the date cannot say whether the client holds the
+// compressed bytes or the uncompressed ones, and a client appending a range of
+// one to the other ends up with neither.
+//
 // Install it with [App.Use]:
 //
 //	app.Use(muzak.Compress(muzak.CompressionOptions{}))
@@ -167,11 +190,13 @@ func Compress(opts CompressionOptions) Middleware {
 			// guarantees Vary, and setting it here instead would let a handler
 			// that writes its own Vary replace it and leave a cache free to
 			// hand a compressed body to a client that cannot read it.
+			encoding := negotiateEncoding(r.Header.Get("Accept-Encoding"))
+			r = reconcileConditions(r, encoding)
 			cw := &compressWriter{
 				ResponseWriter: w,
 				policy:         policy,
 				pool:           pool,
-				encoding:       negotiateEncoding(r.Header.Get("Accept-Encoding")),
+				encoding:       encoding,
 			}
 			// finish commits whatever is pending, which is right when the
 			// handler returned and wrong when it panicked: sending a held
@@ -192,6 +217,70 @@ func Compress(opts CompressionOptions) Middleware {
 			returned = true
 		})
 	}
+}
+
+// reconcileConditions adjusts the conditional headers of a request for what
+// this middleware does to the responses it compresses, and returns the request
+// as it arrived when there is nothing to adjust, which is nearly always, or a
+// copy when there is, so that what the caller holds is left as it was.
+//
+// Two headers carry what a compressed response told the client back to the
+// handler, which knows nothing of the compression.
+//
+// If-Match is compared strongly (RFC 9110 section 13.1.1), so the weak tag a
+// compressed response carried could never match, and a client that accepts
+// gzip had every conditional write refused. Such a tag is the strong tag of the
+// same content with W/ in front, so the W/ is taken off before the handler
+// compares. That changes no answer a handler comparing as RFC 9110 asks would
+// give, except to make one that had to fail match the tag it names: a weak tag
+// in If-Match matches nothing at all, and its strong form still matches only a
+// resource whose current tag is that same strong tag.
+//
+// If-Range with a date, sent alongside Range by a client resuming a download,
+// asks for the rest of the representation only if it is unchanged. A client
+// that holds a compressed response has a weak tag at most, which If-Range may
+// not carry, so it sends the date, and the date matched: the handler answered
+// with a range of the uncompressed content, which a client that does not look
+// at Content-Encoding splices onto the compressed bytes it has. Once an
+// encoding is negotiated a date cannot say which of the two representations
+// the client holds, so Range and If-Range are dropped and the handler sends the
+// whole of it, which is the answer to an If-Range that does not match. Only a
+// strong tag, which no compressed response carries, keeps a resume going; a
+// weak one never matches If-Range and is dropped with the date, which changes
+// nothing a handler comparing as RFC 9110 asks would do. A Range sent without
+// If-Range is left alone, as it asks for a range of the uncompressed content
+// whatever the client holds, and is answered with one.
+func reconcileConditions(r *http.Request, encoding string) *http.Request {
+	weakMatch := false
+	for _, value := range r.Header.Values("If-Match") {
+		if strings.Contains(value, `W/"`) {
+			weakMatch = true
+			break
+		}
+	}
+	dateRange := false
+	if encoding != "" && r.Header.Get("Range") != "" {
+		ifRange := r.Header.Get("If-Range")
+		dateRange = ifRange != "" && !strings.HasPrefix(strings.TrimSpace(ifRange), `"`)
+	}
+	if !weakMatch && !dateRange {
+		return r
+	}
+
+	r = r.Clone(r.Context())
+	if weakMatch {
+		values := r.Header.Values("If-Match")
+		restored := make([]string, len(values))
+		for i, value := range values {
+			restored[i] = strongEntityTags(value)
+		}
+		r.Header["If-Match"] = restored
+	}
+	if dateRange {
+		r.Header.Del("Range")
+		r.Header.Del("If-Range")
+	}
+	return r
 }
 
 // negotiateEncoding picks the encoding to use for a request, or the empty
@@ -291,6 +380,18 @@ func (w *compressWriter) WriteHeader(status int) {
 	}
 	w.status = status
 
+	if status == http.StatusNotModified && w.encoding != "" {
+		// A 304 refreshes what a cache stored, and RFC 9111 section 4.3.4 lets
+		// a strong tag refresh only a stored response with that same strong
+		// tag. The 200 this one revalidates was compressed and carried the tag
+		// weakened, so a strong tag here could refresh nothing. Weakened, it
+		// still corresponds to a stored response that was not compressed and
+		// kept the strong one, because entity tags correspond by weak
+		// comparison, which is why this does not need to know which of the two
+		// the client holds.
+		weakenETag(w.Header())
+	}
+
 	if w.encoding == "" || !w.worthCompressing(status) {
 		w.reject()
 		return
@@ -336,9 +437,12 @@ func (w *compressWriter) accept() {
 	// one is not known until it has been written.
 	header.Del("Content-Length")
 	// A strong validator has to change when the representation does.
-	if tag := header.Get("ETag"); tag != "" && !strings.HasPrefix(tag, "W/") {
-		header.Set("ETag", "W/"+tag)
-	}
+	weakenETag(header)
+	// A range of the bytes sent here cannot be asked for: a Range request is
+	// answered from the uncompressed content, as [compressWriter.worthCompressing]
+	// explains. Advertising one would invite a client to resume a download by
+	// appending a slice of one representation to the bytes of the other.
+	header.Del("Accept-Ranges")
 
 	w.decided = true
 	w.compressor = w.pool.get(w.encoding, w.ResponseWriter)
@@ -446,16 +550,41 @@ func firstError(first, next error) error {
 
 // markHijacked records that a handler took the connection over, which settles
 // the pending decision without writing anything: there is no response left to
-// compress, and no header left to send.
+// compress, no header left to send, and no trailer left to close a compressed
+// body with. A compressor already started is dropped rather than pooled, for
+// the reason [compressWriter.abandon] gives.
 func (w *compressWriter) markHijacked() {
 	w.status = http.StatusSwitchingProtocols
 	w.decided = true
 	w.headerSent = true
 	w.held = nil
+	w.compressor = nil
+}
+
+// Hijack hands the connection to a handler that takes it over, through
+// [http.ResponseController] or by asserting [http.Hijacker], and records that
+// it did.
+//
+// Unwrap alone would let the controller reach the connection past this
+// wrapper, which would then go on believing it owed a response: when the
+// handler returned it would send the header it was holding, or close the
+// compressor onto a socket that had stopped speaking HTTP, and net/http logs
+// both. The connection is taken first and recorded only once it has been, so
+// a writer that cannot give it up, such as an HTTP/2 one, reports
+// [http.ErrNotSupported] and the response carries on as before.
+func (w *compressWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	// The whole chain from here down is told, not only this writer, so that
+	// none of them finishes a response either.
+	markHijacked(w)
+	return conn, rw, nil
 }
 
 // Unwrap exposes the underlying writer to [http.ResponseController] so that
-// deadline control and hijacking keep working through this wrapper.
+// deadline control keeps working through this wrapper.
 func (w *compressWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // finish completes the response: a body too small to be worth compressing is
@@ -515,6 +644,39 @@ func (p *compressorPool) put(encoding string, compressor io.WriteCloser) {
 		return
 	}
 	p.zlib.Put(compressor)
+}
+
+// weakenETag marks a strong entity tag as weak, leaving a weak one, and a
+// response without one, as they are.
+func weakenETag(header http.Header) {
+	if tag := header.Get("ETag"); tag != "" && !strings.HasPrefix(tag, "W/") {
+		header.Set("ETag", "W/"+tag)
+	}
+}
+
+// strongEntityTags returns an entity tag list with the weakness indicator
+// taken off every tag in it, and everything else as it stands.
+//
+// It reads the list rather than splitting it on commas, because an opaque tag
+// may itself contain a comma or the characters W/, and only a W/ outside a tag
+// and directly before its opening quote marks one as weak.
+func strongEntityTags(list string) string {
+	var out strings.Builder
+	out.Grow(len(list))
+	inTag := false
+	for i := 0; i < len(list); i++ {
+		if !inTag && strings.HasPrefix(list[i:], `W/"`) {
+			// The indicator is dropped and the quote after it written as the
+			// opening of the tag on the next pass.
+			i++
+			continue
+		}
+		if list[i] == '"' {
+			inTag = !inTag
+		}
+		out.WriteByte(list[i])
+	}
+	return out.String()
 }
 
 // addVaryAcceptEncoding records that the response depends on Accept-Encoding,

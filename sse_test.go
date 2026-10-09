@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -153,6 +154,33 @@ func TestSSEResponseHeaders(t *testing.T) {
 	// The request identifier reaches a stream like it reaches any response.
 	if response.Header.Get(HeaderRequestID) == "" {
 		t.Error("the stream carries no request identifier")
+	}
+}
+
+func TestSSEStreamIsAnEventStreamWhateverAMiddlewareSaid(t *testing.T) {
+	t.Parallel()
+	// A middleware that types every response as JSON in advance used to win,
+	// because the stream set its type only where none was set, and a stream
+	// served as application/json is one EventSource refuses to read.
+	_, server := newSSETestApp(t, func(app *App) {
+		app.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				next.ServeHTTP(w, r)
+			})
+		})
+		app.SSE("/items/stream", streamItems("Plumbus"))
+	})
+
+	reader, response := tryStream(t, server.URL, "/items/stream")
+	if got, want := response.Header.Get("Content-Type"), "text/event-stream; charset=utf-8"; got != want {
+		t.Errorf("Content-Type = %q, want %q", got, want)
+	}
+	if reader == nil {
+		t.Fatalf("the stream was refused with status %d", response.StatusCode)
+	}
+	if message := nextEvent(t, reader); message.Data != `{"name":"Plumbus"}` {
+		t.Errorf("event = %+v, want the item", message)
 	}
 }
 
@@ -627,6 +655,53 @@ func TestSSEStreamsPerIPLimitResolution(t *testing.T) {
 		if got := sseStreamsPerIPLimit(tc.configured); got != tc.want {
 			t.Errorf("sseStreamsPerIPLimit(%d) = %d, want %d", tc.configured, got, tc.want)
 		}
+	}
+}
+
+func TestSSEFewAddressesFillTheProcessAsDocumented(t *testing.T) {
+	t.Parallel()
+	// SSEOptions and the package documentation state how many client addresses
+	// take every stream the defaults allow, and say so in numbers. These are
+	// those numbers, so that changing a default cannot leave the text behind.
+	if got := DefaultSSEMaxStreams / DefaultSSEMaxStreamsPerIP; got != 16 {
+		t.Errorf("the defaults are filled by %d addresses, and the documentation says 16", got)
+	}
+	if got := 1 << (DefaultConnectionIPv6Prefix - 52); got != 16 {
+		t.Errorf("an IPv6 /52 holds %d of the /%d prefixes a client is counted by, and the documentation says 16", got, DefaultConnectionIPv6Prefix)
+	}
+	if (SSEOptions{}).withDefaults().MaxLifetime != 0 {
+		t.Error("MaxLifetime has a default, and the documentation says it is unset")
+	}
+
+	// The same arithmetic at a size a test can open: MaxStreams / MaxStreamsPerIP
+	// addresses, here two IPv6 /56 prefixes of one /52, hold every slot, and a
+	// third is refused for the process being full rather than for itself.
+	opts := quietOptions()
+	opts.SSE = SSEOptions{MaxStreams: 4, MaxStreamsPerIP: 2, KeepAlive: -1}
+	opts.ClientIP = ClientIPOptions{TrustedProxies: []string{"127.0.0.1/32"}}
+	release := make(chan struct{})
+	_, server := newSSETestAppWith(t, opts, func(app *App) {
+		app.SSE("/stream", func(_ *Context, _ Empty, stream *SSEStream[itemOut]) error {
+			if err := stream.Send(itemOut{Name: "held"}); err != nil {
+				return err
+			}
+			<-release
+			return nil
+		})
+	})
+	defer close(release)
+	from := func(ip string) func(*SSEDialOptions) {
+		return func(o *SSEDialOptions) { o.Header = http.Header{"X-Forwarded-For": []string{ip}} }
+	}
+	for _, ip := range []string{"2001:db8:0:100::1", "2001:db8:0:100::2", "2001:db8:0:200::1", "2001:db8:0:200::2"} {
+		nextEvent(t, openStream(t, server.URL, "/stream", from(ip)))
+	}
+	_, refused := tryStream(t, server.URL, "/stream", from("2001:db8:0:300::1"))
+	if refused.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("a stream from a third prefix got status %d, want 503", refused.StatusCode)
+	}
+	if body, _ := io.ReadAll(refused.Body); !strings.Contains(string(body), "serving as many event streams as it is configured to") {
+		t.Errorf("the refusal said %s, want the process to be full", body)
 	}
 }
 

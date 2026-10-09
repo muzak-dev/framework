@@ -49,13 +49,16 @@ func MustLoad(files fs.FS, dir string) *Store {
 // several files adds up rather than the last one read winning. Every problem
 // found is reported together, because a first run should list everything wrong
 // with a set of locale files rather than the first thing.
+//
+// The plural rules and fallback chains are brought up to date even when some
+// files failed, because the ones that loaded are in the backend by then, and a
+// locale whose translations are in place but whose rule is not would count by
+// the wrong one.
 func (s *Store) Load(files fs.FS, dir string) error {
-	if err := s.load(files, dir); err != nil {
-		return err
-	}
+	err := s.load(files, dir)
 	s.refreshRules()
 	s.refreshChains()
-	return nil
+	return err
 }
 
 // LoadPath reads locale files from directories on disk.
@@ -118,7 +121,7 @@ func (s *Store) load(files fs.FS, dir string) error {
 			problems = append(problems, fmt.Errorf("i18n: %s could not be read: %w", name, err))
 			continue
 		}
-		if err := s.LoadFile(name, data); err != nil {
+		if err := s.loadFile(name, data); err != nil {
 			problems = append(problems, err)
 		}
 	}
@@ -173,7 +176,25 @@ func parseJSON(name string, data []byte) (map[string]any, error) {
 // The decoder is chosen by the file's extension, which is also what makes a
 // file with any other extension an error rather than a silent omission: a
 // locale nobody notices is missing is worse than one that will not load.
+//
+// A file whose locales would take more than 64 MiB between them to hold once
+// every key is spelled out in full is refused whole, before any of it is
+// stored. No real locale comes near that; a file that does is one built to
+// multiply a long key across many values.
+//
+// Like [Store.Load], it brings the plural rules and fallback chains up to date
+// afterwards, whether or not every locale in the file could be stored, so a
+// rule the file names at "i18n.plural.rule" counts from the next lookup.
 func (s *Store) LoadFile(name string, data []byte) error {
+	err := s.loadFile(name, data)
+	s.refreshRules()
+	s.refreshChains()
+	return err
+}
+
+// loadFile is [Store.LoadFile] without the refresh, for a directory load that
+// refreshes once when every file is in rather than once per file.
+func (s *Store) loadFile(name string, data []byte) error {
 	decode, known := loaders[strings.ToLower(path.Ext(name))]
 	if !known {
 		return &UnknownFileTypeError{Name: name, Ext: path.Ext(name)}
@@ -185,6 +206,21 @@ func (s *Store) LoadFile(name string, data []byte) error {
 
 	if s.writable == nil {
 		return fmt.Errorf("i18n: %s cannot be written to, so %s cannot be loaded into it", s.backend.Name(), name)
+	}
+
+	// The locales of one file are bounded together as well as one by one.
+	// Anchors are shared by the whole document, so a file can alias one tree
+	// under a long key in as many locales as the alias budget pays for, each
+	// inside the bound on its own. Checking here also covers a backend of
+	// someone else's, which receives the same trees.
+	size := 0
+	for _, node := range tree {
+		if translations, isTree := node.(map[string]any); isTree {
+			size += flatSize(0, translations, 0, maxFlattenedBytes-size)
+			if size > maxFlattenedBytes {
+				return tooLargeError(name)
+			}
+		}
 	}
 
 	var problems []error

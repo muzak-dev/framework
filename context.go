@@ -25,6 +25,13 @@ type Context struct {
 	route  *Route
 	logger *slog.Logger
 
+	// requestLogger is logger with the request's attributes attached, built
+	// the first time [Context.Logger] is called rather than on acquire, so a
+	// request whose handler never logs does not pay for a child logger it
+	// would throw away. The framework's own records keep using logger, since
+	// they name their attributes themselves.
+	requestLogger *slog.Logger
+
 	// app is the application the request is being served by, which is what
 	// lets a route reach machinery that outlives one request, such as the
 	// register of open WebSocket connections.
@@ -117,6 +124,12 @@ func (c *Context) RawBody() ([]byte, bool) { return c.rawBody, c.rawBodyCaptured
 // downloads, and return the zero Out value with a nil error afterwards. The
 // returned writer supports [http.ResponseController], so flushing and
 // hijacking work as usual.
+//
+// A handler that hijacks the connection owns it from then on, and closes it.
+// Nothing the framework would otherwise write after the handler returns
+// reaches it: a returned error is logged but not rendered, and the access log
+// records the request with status 101, as it does a WebSocket handshake, since
+// whatever went out on the connection was the handler's own.
 func (c *Context) ResponseWriter() http.ResponseWriter { return c.w }
 
 // Context returns the request's context.Context, which is cancelled when the
@@ -133,10 +146,32 @@ func (c *Context) ResponseWriter() http.ResponseWriter { return c.w }
 // should watch a channel of its own that the application closes at that point.
 func (c *Context) Context() context.Context { return c.r.Context() }
 
-// Logger returns the structured logger associated with the application,
-// annotated by the logging middleware with per-request attributes such as the
-// method, path and request identifier when that middleware is enabled.
-func (c *Context) Logger() *slog.Logger { return c.logger }
+// Logger returns the application's logger with the request attached: every
+// record it writes carries the method under "method", the path under "path"
+// and the request identifier under [RequestIDKey], which is what joins a line
+// a handler writes to the access log line of the same request. The identifier
+// is left out only when the [RequestID] middleware was removed from the chain,
+// and the method and path are cut to a bounded length, as everywhere the
+// framework logs what a client chose.
+//
+// The logger is built the first time it is asked for and kept for the rest of
+// the request, so a handler that never logs pays nothing for it. Unlike the
+// Context, it may be kept once the handler returns: it holds copies of those
+// attributes and nothing of the pooled Context, so a goroutine the handler
+// starts can log with it and its lines still name the request that began it.
+func (c *Context) Logger() *slog.Logger {
+	if c.requestLogger == nil {
+		attrs := []any{
+			slog.String("method", truncateForMessage(c.r.Method)),
+			slog.String("path", truncateForMessage(c.r.URL.Path)),
+		}
+		if c.requestID != "" {
+			attrs = append(attrs, slog.String(RequestIDKey, c.requestID))
+		}
+		c.requestLogger = c.logger.With(attrs...)
+	}
+	return c.requestLogger
+}
 
 // RequestID returns the identifier assigned to this request, which appears in
 // the X-Request-Id response header, in the "request_id" member of an error
@@ -301,6 +336,7 @@ func (c *Context) reset() {
 	c.r = nil
 	c.route = nil
 	c.logger = nil
+	c.requestLogger = nil
 	c.app = nil
 	c.status = 0
 	c.requestID = ""

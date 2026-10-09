@@ -163,16 +163,81 @@ const (
 	lifecycleStopFloor = time.Second
 )
 
+// runState is what an App knows about being run: the run in progress, if
+// there is one, and the most recent run, which [App.Addr] reports.
+//
+// One App is served by one run at a time. A second run method called while
+// one is in progress used to run alongside it: it failed to bind the address
+// the first was serving on and then, as any run whose socket could not be
+// opened does, stopped the lifecycle components the first was still using.
+// It had also replaced the runner the App kept, so cancelling the first run's
+// context shut down a runner that never served, and the first run never
+// returned. Claiming the run under a lock is what lets the second one be
+// refused before it touches anything.
+type runState struct {
+	mu sync.Mutex
+	// running is the run in progress, and nil between runs.
+	running *serverRunner
+	// last is the most recent run, kept once it has ended.
+	last *serverRunner
+	// stopPending records a Shutdown that found no run in progress, for the
+	// next run to honour; see [App.Shutdown].
+	stopPending bool
+}
+
+// errAlreadyRunning is what a run method returns while another is serving
+// the same application.
+var errAlreadyRunning = errors.New("muzak: the application is already running, and one App is served by one run at a time; " +
+	"wait for the run method in progress to return, or build a second App to serve another address")
+
+// claimRun records a new run as the one in progress, and refuses it while
+// another is. A Shutdown that arrived with no run to stop is handed to the
+// new run as already requested, and is then spent.
+func (a *App) claimRun(ctx context.Context) (*serverRunner, error) {
+	a.server.mu.Lock()
+	defer a.server.mu.Unlock()
+	if a.server.running != nil {
+		return nil, errAlreadyRunning
+	}
+	runner := newServerRunner(ctx)
+	runner.stopRequested = a.server.stopPending
+	a.server.stopPending = false
+	a.server.running = runner
+	a.server.last = runner
+	return runner, nil
+}
+
+// endRun releases what a run held and lets the application be run again.
+func (a *App) endRun(runner *serverRunner) {
+	runner.release()
+	a.server.mu.Lock()
+	defer a.server.mu.Unlock()
+	a.server.running = nil
+}
+
+// currentOrPend returns the run in progress, or, when there is none, records
+// a stop for the next run and returns nil. Both happen under the lock a run
+// is claimed under, which is what keeps a Shutdown from falling between a
+// run that has not been recorded yet and one that has.
+func (a *App) currentOrPend() *serverRunner {
+	a.server.mu.Lock()
+	defer a.server.mu.Unlock()
+	if a.server.running == nil {
+		a.server.stopPending = true
+	}
+	return a.server.running
+}
+
 // serverRunner owns the http.Server and the state needed to shut it down
 // exactly once, no matter which of the run methods started it.
 //
-// A runner is published through App.server as soon as a run method is
+// A runner is recorded as the run in progress as soon as a run method is
 // called, before the application is built, so that a Shutdown arriving while
 // the lifecycle components are still starting is recorded rather than lost.
-// The fields above mu are written before it is published and only read
-// afterwards; the atomic store supplies the happens-before edge another
-// goroutine needs to read them. Those below it are filled in once the socket
-// is open, and are read under mu.
+// The fields above mu are written before it is recorded and only read
+// afterwards; the lock it is recorded under supplies the happens-before edge
+// another goroutine needs to read them. Those below it are filled in once the
+// socket is open, and are read under mu.
 type serverRunner struct {
 	done     chan struct{}
 	stopOnce sync.Once
@@ -183,9 +248,18 @@ type serverRunner struct {
 	handlers handlerTracker
 	// startCtx is what the lifecycle components are started with, and
 	// cancelStart is how a shutdown requested during start-up tells a
-	// component still dialling to give up.
+	// component still dialling to give up. endStartUp stops the run's own
+	// context from cancelling it, once the components are up; see
+	// newServerRunner.
 	startCtx    context.Context
 	cancelStart context.CancelFunc
+	endStartUp  func() bool
+	// provided is a listener the caller opened, served on instead of a socket
+	// opened on AppOptions.Addr, and plaintext serves it HTTP whatever TLS is
+	// configured. Both are for the test client; see [App.serveInProcess].
+	// They are set before the run starts and read only by the run itself.
+	provided  net.Listener
+	plaintext bool
 
 	mu sync.Mutex
 	// stopRequested records a Shutdown, including one that arrived before
@@ -196,14 +270,33 @@ type serverRunner struct {
 }
 
 // newServerRunner prepares the runner for one call of a run method.
+//
+// The context the components are started with keeps ctx's values but is not
+// its child. Cancelling ctx is how [App.RunContext] is asked to shut down, and
+// how [App.RunSignals] answers SIGTERM, so a child ended the moment the drain
+// began: a worker a component had kept on it was cancelled while requests that
+// still used it were being served, and Stop was called on components whose
+// context had already gone, against what [Lifecycle] promises. ctx still
+// cancels it while the components are starting, which is when a component
+// dialling should hear that the run is over; after that it ends only once the
+// components have been stopped, when the lifecycle manager and the run
+// method's return both release it.
 func newServerRunner(ctx context.Context) *serverRunner {
-	startCtx, cancel := context.WithCancel(ctx)
+	startCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &serverRunner{
 		done:        make(chan struct{}),
 		stopped:     make(chan struct{}),
 		startCtx:    startCtx,
 		cancelStart: cancel,
+		endStartUp:  context.AfterFunc(ctx, cancel),
 	}
+}
+
+// release ends the start context and whatever still ties it to the run's
+// context, on every way out of a run method.
+func (r *serverRunner) release() {
+	r.endStartUp()
+	r.cancelStart()
 }
 
 // handlerTracker counts the handlers a server is running, so that a shutdown
@@ -315,9 +408,15 @@ func (a *App) newServer() *http.Server {
 // not be opened, the application could not be built, or serving failed, in
 // which last case the lifecycle components are stopped first. A shutdown requested
 // while Run is still starting, before the socket is open, is honoured too:
-// Run stops the components that started and returns nil without serving. Use [App.RunContext]
+// Run stops the components that started and returns nil without serving. So
+// is one requested before Run was called at all; see [App.Shutdown]. Use [App.RunContext]
 // for a server that should stop when a context is cancelled, or
 // [App.RunSignals] for one that should stop on an interrupt.
+//
+// An App is served by one run method at a time. One called while another is
+// still running, starting or shutting down returns an error at once, and
+// touches nothing the run in progress is using. Once that run has returned,
+// the application may be run again.
 func (a *App) Run() error {
 	return a.RunContext(context.Background())
 }
@@ -328,11 +427,15 @@ func (a *App) Run() error {
 // When ctx is cancelled the server shuts down as [App.Shutdown] describes,
 // waiting up to [ServerOptions.ShutdownTimeout] for in-flight requests to
 // finish before closing the rest. A shutdown triggered this way returns nil, because
-// stopping on request is the expected outcome rather than a failure.
+// stopping on request is the expected outcome rather than a failure. As with
+// [App.Run], it refuses to start while another run method is running the
+// same application.
 func (a *App) RunContext(ctx context.Context) error {
-	runner := newServerRunner(ctx)
-	defer runner.cancelStart()
-	a.server.Store(runner)
+	runner, err := a.claimRun(ctx)
+	if err != nil {
+		return err
+	}
+	defer a.endRun(runner)
 	listener, err := a.listen(ctx, runner)
 	if err != nil || listener == nil {
 		return err
@@ -371,10 +474,17 @@ func (a *App) RunSignals() error {
 // this returns.
 //
 // It returns a nil listener and the error from stopping the components when
-// a shutdown was requested while it ran, since nothing is to be served.
+// a shutdown was requested before or while it ran, since nothing is to be
+// served.
 func (a *App) listen(ctx context.Context, runner *serverRunner) (net.Listener, error) {
 	if err := a.Build(); err != nil {
 		return nil, err
+	}
+	if runner.stopWasRequested() {
+		// A Shutdown came before this run was recorded, and was kept for it.
+		// Nothing has started yet, so there is nothing to stop either.
+		Scoped(a.logger, ScopeServer).Info("Shutdown was requested before the server started; not serving")
+		return nil, nil
 	}
 	// An application that was shut down and is being run again must admit
 	// WebSockets and event streams again; only a run in progress may refuse
@@ -391,7 +501,11 @@ func (a *App) listen(ctx context.Context, runner *serverRunner) (net.Listener, e
 		}
 		return nil, err
 	}
-	listener, err := net.Listen("tcp", a.opts.Addr)
+	// From here on the components belong to the server rather than to its
+	// start-up, and cancelling the run's context means shutting the server
+	// down, which must not end the context they are using while it drains.
+	runner.endStartUp()
+	listener, err := runner.open(a.opts.Addr)
 	if err != nil {
 		return nil, errors.Join(err, a.stopAfterFailedStart(ctx))
 	}
@@ -421,6 +535,21 @@ func (a *App) stopAfterFailedStart(ctx context.Context) error {
 	return a.StopLifecycle(stop)
 }
 
+// open returns the listener the run serves on: the one it was handed, or a
+// socket opened on addr.
+func (r *serverRunner) open(addr string) (net.Listener, error) {
+	if r.provided != nil {
+		return r.provided, nil
+	}
+	return net.Listen("tcp", addr)
+}
+
+// servesTLS reports whether this run serves HTTPS, which is what the
+// configuration asks for unless the run was told to serve plain HTTP.
+func (r *serverRunner) servesTLS(a *App) bool {
+	return !r.plaintext && a.servesTLS()
+}
+
 // stopWasRequested reports whether Shutdown has been called on this runner.
 func (r *serverRunner) stopWasRequested() bool {
 	r.mu.Lock()
@@ -432,7 +561,7 @@ func (r *serverRunner) stopWasRequested() bool {
 // stops on its own.
 func (a *App) serve(ctx context.Context, runner *serverRunner, listener net.Listener) error {
 	scheme := "http"
-	if a.servesTLS() {
+	if runner.servesTLS(a) {
 		scheme = "https"
 	}
 	Scoped(a.logger, ScopeServer).Info("Listening on "+listener.Addr().String(),
@@ -443,7 +572,7 @@ func (a *App) serve(ctx context.Context, runner *serverRunner, listener net.List
 	go func() {
 		defer close(runner.done)
 		var err error
-		if a.servesTLS() {
+		if runner.servesTLS(a) {
 			err = runner.http.ServeTLS(listener, a.opts.CertFile, a.opts.KeyFile)
 		} else {
 			err = runner.http.Serve(listener)
@@ -471,9 +600,11 @@ func (a *App) serve(ctx context.Context, runner *serverRunner, listener net.List
 		// behind. ServeTLS returns before it tracks the listener when the
 		// certificate is bad, so nothing else would close it.
 		_ = listener.Close()
-		return errors.Join(err, a.Shutdown(context.Background()))
+		return errors.Join(err, a.shutdownRunner(context.Background(), runner))
 	case <-ctx.Done():
-		if err := a.Shutdown(context.Background()); err != nil {
+		// This run's own runner, not whichever the App records, so that the
+		// shutdown can only ever reach the server this call is serving.
+		if err := a.shutdownRunner(context.Background(), runner); err != nil {
 			return err
 		}
 		return <-errCh
@@ -509,19 +640,40 @@ func (a *App) servesTLS() bool {
 // may still be running when Stop is called. Shutdown logs how many there were.
 //
 // Shutdown is safe to call more than once and from more than one goroutine;
-// only the first call does the work. Calling it on a server that was never
-// started returns nil. A run method that was serving returns once the
-// shutdown has finished, after which the application may be run again.
+// only the first call does the work. A run method that was serving returns
+// once the shutdown has finished, after which the application may be run
+// again.
 //
 // Called while a run method is still starting, before its socket is open,
 // Shutdown records the request, cancels the context the lifecycle components
 // are being started with, and returns nil at once. The run method then stops
 // whatever did start and returns nil without serving a request.
+//
+// Called when no run method is running the application, Shutdown returns nil
+// and is kept for the next run, which returns nil at once without starting the
+// components or opening a socket, much as net/http's ListenAndServe returns
+// ErrServerClosed after Shutdown. That is what makes
+//
+//	go app.Run()
+//	// ...
+//	app.Shutdown(ctx)
+//
+// stop the server even when the goroutine has not reached Run yet, which a
+// Shutdown that returned and was forgotten would not. Unlike net/http, only
+// that next run is stopped, and the one after it serves as usual, which is what
+// lets an application be run again; but a Shutdown made after a run has
+// already returned stops the next one too, so code that means to run the
+// application again should not shut it down twice.
 func (a *App) Shutdown(ctx context.Context) error {
-	runner := a.server.Load()
+	runner := a.currentOrPend()
 	if runner == nil {
 		return nil
 	}
+	return a.shutdownRunner(ctx, runner)
+}
+
+// shutdownRunner is [App.Shutdown] for one run, the one runner belongs to.
+func (a *App) shutdownRunner(ctx context.Context, runner *serverRunner) error {
 	runner.mu.Lock()
 	runner.stopRequested = true
 	serving := runner.http != nil
@@ -643,9 +795,13 @@ func lifecycleStopContext(ctx context.Context) (context.Context, context.CancelF
 
 // Addr returns the address the server is listening on, which is how a test
 // that asked for ":0" discovers the port that was assigned. It returns an
-// empty string before the server has started.
+// empty string before the server has started. Once a run has returned it
+// still reports where that run listened, until the next run opens a socket
+// of its own.
 func (a *App) Addr() string {
-	runner := a.server.Load()
+	a.server.mu.Lock()
+	runner := a.server.last
+	a.server.mu.Unlock()
 	if runner == nil {
 		return ""
 	}

@@ -2,12 +2,14 @@ package muzak
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 	"uuid"
 )
@@ -320,6 +322,57 @@ func TestSecurityHeaders(t *testing.T) {
 	framed := do(t, app, "GET", "/framed")
 	if got := framed.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
 		t.Errorf("X-Frame-Options = %q, want the handler's value", got)
+	}
+}
+
+// TestSecurityHeadersSetHSTSOverTLS is the regression test for SecurityHeaders
+// sending no Strict-Transport-Security, so a server answering over TLS never
+// told a browser to stay on HTTPS and a visitor's next plain-HTTP request was
+// open to a downgrade. It is now set on a response to a request that arrived
+// over TLS, and only there, since a browser ignores it over plain HTTP and the
+// server cannot tell from a plain request whether a proxy terminated TLS in
+// front of it, and not for localhost or an address, which a development server
+// answers to. A handler's own value still wins, and no Content-Security-Policy
+// is added, so a handler that relaxes X-Frame-Options is not overruled by a
+// frame-ancestors it never asked for.
+func TestSecurityHeadersSetHSTSOverTLS(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Get("/x", okHandler)
+	app.Get("/preload", func(ctx *Context, _ Empty) (rtOut, error) {
+		ctx.SetHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+		return rtOut{OK: true}, nil
+	})
+	mustBuild(t, app)
+
+	overTLS := func(target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.TLS = &tls.ConnectionState{}
+		return doRequest(t, app, req)
+	}
+	if got := overTLS("/x").Header().Get("Strict-Transport-Security"); got != "max-age=31536000" {
+		t.Errorf("Strict-Transport-Security over TLS = %q, want %q", got, "max-age=31536000")
+	}
+	if got := overTLS("/preload").Header().Get("Strict-Transport-Security"); got != "max-age=63072000; includeSubDomains; preload" {
+		t.Errorf("Strict-Transport-Security = %q, want the handler's own value", got)
+	}
+	plain := do(t, app, http.MethodGet, "/x")
+	if got := plain.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("Strict-Transport-Security over plain HTTP = %q, want none", got)
+	}
+	// A development server on localhost would otherwise pin every other
+	// server on localhost, whatever its port, to HTTPS in that browser, and
+	// a browser ignores the header from an address anyway.
+	for _, host := range []string{"localhost:8443", "LOCALHOST.", "app.localhost", "127.0.0.1:8443", "[::1]:8443", "[::1]"} {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Host = host
+		req.TLS = &tls.ConnectionState{}
+		if got := doRequest(t, app, req).Header().Get("Strict-Transport-Security"); got != "" {
+			t.Errorf("Strict-Transport-Security for host %q = %q, want none", host, got)
+		}
+	}
+	if got := plain.Header().Get("Content-Security-Policy"); got != "" {
+		t.Errorf("Content-Security-Policy = %q, want none set by default", got)
 	}
 }
 
@@ -653,23 +706,53 @@ func TestCORSAlwaysVariesOnOrigin(t *testing.T) {
 	}
 }
 
-// TestCORSWildcardDoesNotVaryOnOrigin pins the one policy that leaves Origin
-// out: its answer to every origin is the same "*".
+// TestCORSWildcardDoesNotVaryOnOrigin is the regression test for a wildcard
+// policy whose response differed by whether the request carried an Origin
+// while saying it did not. It sent "Access-Control-Allow-Origin: *" only to a
+// request with an Origin and no Vary on either, so a browser or shared cache
+// that stored the answer to a plain navigation, a file from a Static or
+// Frontend mount with its Last-Modified above all, served that header-less
+// copy to a later cross-origin fetch, which the browser then refused to read.
+// A wildcard policy now gives every response the same headers, Origin or not,
+// which is what makes leaving Origin out of Vary true.
 func TestCORSWildcardDoesNotVaryOnOrigin(t *testing.T) {
 	t.Parallel()
 	opts := quietOptions()
-	opts.CORS = CORSOptions{AllowedOrigins: []string{"*"}}
+	opts.CORS = CORSOptions{AllowedOrigins: []string{"*"}, ExposedHeaders: []string{"X-Total-Count"}}
 	app := New(opts)
 	app.Get("/x", okHandler)
+	app.Static("/assets", StaticOptions{FS: fstest.MapFS{"app.js": &fstest.MapFile{Data: []byte("x")}}})
 	mustBuild(t, app)
 
-	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	req.Header.Set("Origin", "https://anywhere.example")
-	rec := doRequest(t, app, req)
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+	for _, target := range []string{"/x", "/assets/app.js"} {
+		for _, origin := range []string{"", "https://anywhere.example"} {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			if origin != "" {
+				req.Header.Set("Origin", origin)
+			}
+			rec := doRequest(t, app, req)
+			assertStatus(t, rec, http.StatusOK)
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("GET %s with Origin %q: Access-Control-Allow-Origin = %q, want *", target, origin, got)
+			}
+			if got := rec.Header().Get("Access-Control-Expose-Headers"); got != "X-Total-Count" {
+				t.Errorf("GET %s with Origin %q: Access-Control-Expose-Headers = %q, want X-Total-Count", target, origin, got)
+			}
+			for _, value := range rec.Header().Values("Vary") {
+				if strings.Contains(value, "Origin") {
+					t.Errorf("GET %s with Origin %q: Vary = %q, want no Origin for a wildcard policy", target, origin, value)
+				}
+			}
+		}
 	}
-	if vary := rec.Header().Values("Vary"); len(vary) != 0 {
-		t.Errorf("Vary = %q, want none for a wildcard policy", vary)
+
+	// A request that only looks like a preflight, with no Origin, is still not
+	// answered as one.
+	req := httptest.NewRequest(http.MethodOptions, "/x", nil)
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	rec := doRequest(t, app, req)
+	assertStatus(t, rec, http.StatusForbidden)
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "" {
+		t.Errorf("Access-Control-Allow-Methods = %q, want none without an Origin", got)
 	}
 }

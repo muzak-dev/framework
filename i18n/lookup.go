@@ -33,7 +33,10 @@ type Lookup struct {
 	// Scope is prepended to Key, so that a group of related lookups can name
 	// the part they share once.
 	Scope []string
-	// Count selects a plural form and is interpolated as %{count}.
+	// Count selects a plural form and is interpolated as %{count}. It holds a
+	// whole number; a count with a fraction, such as 1.5 kilometres, is given
+	// to [Store.Translate] as its count argument, which takes any integer or
+	// floating-point type and chooses the form by its [PluralOperands].
 	Count *int
 	// Vars are the values the translation interpolates.
 	Vars map[string]any
@@ -46,6 +49,34 @@ type Lookup struct {
 	// Raise asks for a missing translation to be reported rather than rendered
 	// as a marker, whatever the store's exception handler would otherwise do.
 	Raise bool
+
+	// count is the count a plural form is chosen by: the one [Store.Translate]
+	// read from its arguments, which may have a fraction, or the one Count
+	// holds, which [Store.Get] reads into it.
+	count pluralCount
+}
+
+// pluralCount is a count as a lookup carries it.
+//
+// It is held by value rather than through a pointer, so that a count costs a
+// lookup nothing to carry. Carrying one behind a pointer, as Count does, cost
+// an allocation on every translated message that had a count.
+type pluralCount struct {
+	// operands are what a plural rule chooses by.
+	operands PluralOperands
+	// given is the count as the arguments held it, for an error to quote. It
+	// is nil when the count came from Count, which an error quotes instead.
+	given any
+	// set reports whether there is a count at all.
+	set bool
+}
+
+// countGiven returns the count as the caller gave it, for an error to quote.
+func (l Lookup) countGiven() any {
+	if l.Count != nil {
+		return *l.Count
+	}
+	return l.count.given
 }
 
 // full joins the scope and the key into the dotted path a backend is asked for.
@@ -142,11 +173,11 @@ func parseArgs(key string, args []any) (Lookup, string, error) {
 		case "raise":
 			l.Raise, _ = value.(bool)
 		case "count":
-			n, ok := toInt(value)
+			operands, ok := PluralOperandsOf(value)
 			if !ok {
 				return l, "", &ArgumentError{Key: key, Index: -1, Value: value}
 			}
-			l.Count = &n
+			l.count = pluralCount{operands: operands, given: value, set: true}
 			// A count is a value as well as an option: a plural form selects on
 			// the number and then prints it.
 			if l.Vars == nil {
@@ -196,8 +227,10 @@ func toDefaults(value any) []any {
 	}
 }
 
-// toInt reads a count written as any of the numeric types a caller might have
-// one in, which is most often the length of something.
+// toInt reads a whole number written as any of the numeric types a caller
+// might have one in, such as the precision a number is formatted to. A
+// fraction is dropped, which is why a count is read by [PluralOperandsOf]
+// instead.
 func toInt(value any) (int, bool) {
 	switch n := value.(type) {
 	case int:

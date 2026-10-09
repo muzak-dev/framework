@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -304,35 +305,36 @@ func TestLogCause(t *testing.T) {
 
 func TestDescribeJSONKind(t *testing.T) {
 	t.Parallel()
-	tests := map[byte]string{
-		'n': "null", 'f': "a boolean", 't': "a boolean", '"': "a string",
-		'0': "a number", '{': "an object", '[': "an array", 'x': "that value",
+	tests := map[byte][2]string{
+		'n': {"null", "null"}, 'f': {"a boolean", "boolean"}, 't': {"a boolean", "boolean"},
+		'"': {"a string", "string"}, '0': {"a number", "number"}, '{': {"an object", "object"},
+		'[': {"an array", "array"}, 'x': {"that value", "value"},
 	}
 	for kind, want := range tests {
-		if got := describeJSONKind(jsontext.Kind(kind)); got != want {
-			t.Errorf("describeJSONKind(%q) = %q, want %q", kind, got, want)
+		if phrase, name := describeJSONKind(jsontext.Kind(kind)); phrase != want[0] || name != want[1] {
+			t.Errorf("describeJSONKind(%q) = %q, %q, want %q, %q", kind, phrase, name, want[0], want[1])
 		}
 	}
 }
 
-func TestSanitizeSyntaxError(t *testing.T) {
+func TestSyntaxReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
 		want string
 	}{
-		{"package prefix removed", errors.New("jsontext: unexpected EOF"), "is not valid JSON: unexpected EOF"},
-		{"json prefix removed", errors.New("json: bad thing"), "is not valid JSON: bad thing"},
-		{"within clause trimmed", errors.New("jsontext: invalid character within object"), "is not valid JSON: invalid character"},
-		{"offset trimmed", errors.New("jsontext: invalid character after offset 12"), "is not valid JSON: invalid character"},
-		{"at offset trimmed", errors.New("jsontext: broken at offset 3"), "is not valid JSON: broken"},
+		{"package prefix removed", errors.New("jsontext: unexpected EOF"), "unexpected EOF"},
+		{"json prefix removed", errors.New("json: bad thing"), "bad thing"},
+		{"within clause trimmed", errors.New("jsontext: invalid character within object"), "invalid character"},
+		{"offset trimmed", errors.New("jsontext: invalid character after offset 12"), "invalid character"},
+		{"at offset trimmed", errors.New("jsontext: broken at offset 3"), "broken"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := sanitizeSyntaxError(tc.err); got != tc.want {
-				t.Errorf("sanitizeSyntaxError = %q, want %q", got, tc.want)
+			if got := syntaxReason(tc.err); got != tc.want {
+				t.Errorf("syntaxReason = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -340,12 +342,12 @@ func TestSanitizeSyntaxError(t *testing.T) {
 
 func TestDecodeIssueFallsBackForSyntaxErrors(t *testing.T) {
 	t.Parallel()
-	field, issue := decodeIssue(errors.New("jsontext: unexpected EOF"))
-	if field != "" {
-		t.Errorf("field = %q, want empty for a syntax error", field)
+	detail := decodeIssue(errors.New("jsontext: unexpected EOF"), reflect.TypeFor[struct{}]())
+	if detail.Field != "" {
+		t.Errorf("field = %q, want empty for a syntax error", detail.Field)
 	}
-	if !strings.Contains(issue, "is not valid JSON") {
-		t.Errorf("issue = %q", issue)
+	if detail.Issue != "is not valid JSON: unexpected EOF" || detail.Key != "muzak.binding.invalid_json" {
+		t.Errorf("detail = %+v", detail)
 	}
 }
 

@@ -5,6 +5,9 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -179,6 +182,75 @@ func BenchmarkWebSocketFrameWrite(b *testing.B) {
 			})
 		}
 	}
+}
+
+func BenchmarkWebSocketHandlerWrite(b *testing.B) {
+	// A write made from a real route's handler with the context it was given,
+	// which is what an application does. The benchmarks above drive a bare
+	// connection with context.Background(), which never needs an arrangement
+	// of its own, so they could not see what a handler's context cost.
+	for _, tc := range benchWSMessages {
+		b.Run(tc.name, func(b *testing.B) {
+			payload := make([]byte, tc.size)
+			runs := make(chan int)
+			finished := make(chan error)
+			app := New(quietOptions())
+			app.WS("/ws", func(ctx *Context, _ Empty, conn *WSConn) error {
+				for n := range runs {
+					var err error
+					for range n {
+						if err = conn.WriteBinary(ctx.Context(), payload); err != nil {
+							break
+						}
+					}
+					finished <- err
+				}
+				return nil
+			}, WithWebSocket(WSOptions{PingInterval: -1}))
+			if err := app.Build(); err != nil {
+				b.Fatalf("Build() = %v", err)
+			}
+			server := httptest.NewServer(app)
+			defer server.Close()
+			peer := benchWSHandshake(b, server.URL)
+			defer func() { _ = peer.Close() }()
+
+			b.SetBytes(int64(tc.size))
+			b.ReportAllocs()
+			b.ResetTimer()
+			runs <- b.N
+			if err := <-finished; err != nil {
+				b.Fatalf("WriteBinary = %v", err)
+			}
+			b.StopTimer()
+			close(runs)
+		})
+	}
+}
+
+// benchWSHandshake opens a connection to a served route by hand and discards
+// whatever the server sends from then on, with one buffer for the whole run,
+// so that the peer's reading adds nothing to what a benchmark counts.
+func benchWSHandshake(b *testing.B, serverURL string) net.Conn {
+	b.Helper()
+	address := strings.TrimPrefix(serverURL, "http://")
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		b.Fatalf("dialling: %v", err)
+	}
+	handshake := "GET /ws HTTP/1.1\r\nHost: " + address + "\r\n" +
+		"Upgrade: websocket\r\nConnection: Upgrade\r\n" +
+		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + testWSKey + "\r\n\r\n"
+	if _, err := conn.Write([]byte(handshake)); err != nil {
+		b.Fatalf("sending the handshake: %v", err)
+	}
+	reader := bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil || response.StatusCode != http.StatusSwitchingProtocols {
+		b.Fatalf("handshake = %v, %v, want 101", response, err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, reader) }()
+	return conn
 }
 
 func BenchmarkWebSocketAcceptKey(b *testing.B) {

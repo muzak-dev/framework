@@ -184,7 +184,10 @@ type rootIdentity struct{ info fs.FileInfo }
 // the build unless the options say otherwise: a 404.html in the frontend's root
 // is served with 404, and failing that an index.html is served with 200 for a
 // browser navigation, which is what a client-side router needs to take over.
-// Set [FrontendOptions.NoFallback] for a plain 404 instead.
+// Set [FrontendOptions.NoFallback] for a plain 404 instead. A directory is
+// served by its index.html with or without a trailing slash, but a file is not
+// served with one: /app.js/ names a directory that is not there, and is a path
+// with no file behind it like any other.
 //
 // Mounting under a prefix works the way everything else does, through the
 // router the frontend is registered on:
@@ -562,6 +565,8 @@ var errFrontendUnavailable = errors.New("muzak: the frontend is unavailable")
 func resolveFile(files fs.FS, relative string, index bool) (string, bool) {
 	// A trailing slash names the same directory as the path without one, and
 	// fs rejects it outright, so it is dropped before anything looks at it.
+	// What it said is kept: it names a directory, and a file is not one.
+	directory := strings.HasSuffix(relative, "/")
 	relative = strings.TrimSuffix(relative, "/")
 	if relative == "" {
 		if !index {
@@ -588,6 +593,13 @@ func resolveFile(files fs.FS, relative string, index bool) (string, bool) {
 		}
 		// A directory itself is never served. Listing one would publish the
 		// shape of the build output, and no frontend expects it.
+		return "", false
+	}
+	if directory {
+		// /app.js/ names a directory called app.js, which is not there, the
+		// same as /app.js/x names a file inside one. Serving the file would
+		// give it a second URL, against which every relative reference in it
+		// resolves to somewhere else, so it is a path with nothing behind it.
 		return "", false
 	}
 	return relative, true
@@ -1116,7 +1128,8 @@ type StaticOptions struct {
 //
 // Everything else matches a frontend mount. Routes are matched first, the rate
 // limit, guards and providers of the router apply, a directory is never
-// listed, a dotfile is not served unless [StaticOptions.AllowDotfiles] says
+// listed, a file named with a trailing slash is a miss, a dotfile is not
+// served unless [StaticOptions.AllowDotfiles] says
 // so, a symbolic link cannot lead out of the directory named by
 // [StaticOptions.Dir] (or served from an [os.Root]; [os.DirFS] follows links),
 // and a method other than GET or HEAD on a file that exists is answered 405

@@ -129,6 +129,54 @@ func TestLoadRefusesAnUnwritableBackend(t *testing.T) {
 	}
 }
 
+// TestLoadFileRefreshesRulesAndChains covers a locale file loaded on its own
+// rather than as part of a directory. LoadFile stored the translations and
+// stopped there, so a plural rule the file named was ignored, and its locale
+// had no chain worked out, until something else happened to load afterwards.
+func TestLoadFileRefreshesRulesAndChains(t *testing.T) {
+	t.Parallel()
+	store, err := New(StoreOptions{})
+	if err != nil {
+		t.Fatalf("New returned %v", err)
+	}
+	file := "xx:\n  i18n:\n    plural:\n      rule: other\n  things:\n    one: ONE\n    other: OTHER\n"
+	if err := store.LoadFile("xx.yml", []byte(file)); err != nil {
+		t.Fatalf("LoadFile returned %v, want no error", err)
+	}
+
+	// The rule the file names puts every count in other, so one thing is OTHER
+	// rather than the ONE the English rule a stranger is given would choose.
+	if got := store.T("xx", "things", "count", 1); got != "OTHER" {
+		t.Errorf("T(xx, things, count=1) = %q, want OTHER from the rule the file names", got)
+	}
+	if _, cached := store.chains["xx"]; !cached {
+		t.Error("LoadFile left the new locale without a chain, so every lookup in it builds one")
+	}
+
+	// A file that fails part-way still refreshes for the locales it did store,
+	// so that what loaded is wholly in effect rather than half.
+	broken := "yy:\n  i18n:\n    plural:\n      rule: other\n  things:\n    one: ONE\n    other: OTHER\nzz: just a string\n"
+	if err := store.LoadFile("yy.yml", []byte(broken)); err == nil {
+		t.Fatal("LoadFile of a file with a string at its top level returned no error, want one")
+	}
+	if got := store.T("yy", "things", "count", 1); got != "OTHER" {
+		t.Errorf("T(yy, things, count=1) = %q after a partial load, want OTHER", got)
+	}
+
+	// Load holds to the same rule when one file of a directory fails: the
+	// files that loaded count by the rules they name.
+	files := fstest.MapFS{
+		"ww.yml":     &fstest.MapFile{Data: []byte(strings.ReplaceAll(file, "xx:", "ww:"))},
+		"broken.yml": &fstest.MapFile{Data: []byte("ww:\n\tbad: tabbed\n")},
+	}
+	if err := store.Load(files, ""); err == nil {
+		t.Fatal("Load of a directory holding a broken file returned no error, want one")
+	}
+	if got := store.T("ww", "things", "count", 1); got != "OTHER" {
+		t.Errorf("T(ww, things, count=1) = %q after a partial Load, want OTHER", got)
+	}
+}
+
 func TestStoreTranslations(t *testing.T) {
 	t.Parallel()
 	store, err := New(StoreOptions{})

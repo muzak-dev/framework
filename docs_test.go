@@ -571,6 +571,41 @@ func TestDocsPathsAreConfigurable(t *testing.T) {
 	assertStatus(t, do(t, app, "GET", "/reference/_nuxt/"+asset), http.StatusOK)
 }
 
+// TestDocsAssetsFollowADocsPathThatNeedsEncoding holds the assets to the page
+// for a documentation path a URL has to escape. The shell names them by the
+// encoded path, which is what a browser sends, and the router compares the
+// decoded one; keying them by the encoded form served the page and answered
+// every script it loaded with a 404.
+func TestDocsAssetsFollowADocsPathThatNeedsEncoding(t *testing.T) {
+	t.Parallel()
+	for _, docsPath := range []string{"/api docs", "/d\u00f6cs", "/a%b"} {
+		t.Run(docsPath, func(t *testing.T) {
+			t.Parallel()
+			opts := quietOptions()
+			opts.DocsPath = docsPath
+			app := New(opts)
+			app.Get("/x", okHandler)
+			mustBuild(t, app)
+
+			encoded := urlPath(docsPath)
+			rec := do(t, app, "GET", encoded)
+			assertStatus(t, rec, http.StatusOK)
+			body := rec.Body.String()
+			for _, ext := range []string{".js", ".css"} {
+				_, after, found := strings.Cut(body, `"`+encoded+`/_nuxt/`)
+				for found && !strings.HasPrefix(strings.SplitN(after, `"`, 2)[0], "app"+ext) {
+					_, after, found = strings.Cut(after, `"`+encoded+`/_nuxt/`)
+				}
+				if !found {
+					t.Fatalf("the page names no %s asset under %q:\n%s", ext, encoded, body)
+				}
+				asset := encoded + "/_nuxt/" + strings.SplitN(after, `"`, 2)[0]
+				assertStatus(t, do(t, app, "GET", asset), http.StatusOK)
+			}
+		})
+	}
+}
+
 // TestDocsRoutesDoNotShadowApplicationRoutes checks that a route registered at
 // the documentation path still wins, since it was declared deliberately.
 func TestDocsPathsPassThroughToOtherRoutes(t *testing.T) {

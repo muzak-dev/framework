@@ -204,6 +204,86 @@ func TestClientIPResolverUsesTheConfiguredHeader(t *testing.T) {
 	}
 }
 
+// TestClientIPResolverReadsTheForwardedHeader is the regression test for the
+// RFC 7239 Forwarded header, which ClientIPOptions.Header accepted and the
+// resolver could not read. Each of its entries is a list of parameters, and
+// "for=203.0.113.9;proto=https" is not an address, so the walk stopped at its
+// first entry and every client behind the proxy resolved to the proxy itself:
+// one IPTracker budget and one per-client connection allowance for all of
+// them. The for parameter is now read out of each entry, with the same
+// right-to-left walk and the same trust as any other forwarding header.
+func TestClientIPResolverReadsTheForwardedHeader(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{"a bare address", []string{"for=203.0.113.9;proto=https"}, "203.0.113.9"},
+		{"a parameter name in any case", []string{"proto=https;For=203.0.113.9;by=10.0.0.1"}, "203.0.113.9"},
+		{"a quoted IPv4 address with a port", []string{`FOR="203.0.113.9:8080"`}, "203.0.113.9"},
+		{"a bracketed IPv6 address with a port", []string{`for="[2001:db8::1]:443"`}, "2001:db8::1"},
+		{"a bracketed IPv6 address", []string{`for="[2001:db8::1]"`}, "2001:db8::1"},
+		{"an obfuscated port", []string{`for="[2001:db8::1]:_p1"`}, "2001:db8::1"},
+		{"an IPv6 address without the brackets the RFC asks for", []string{`for="2001:db8::1"`}, "2001:db8::1"},
+		{"a quoted-pair in the value", []string{`for="203.0.113.\9"`}, "203.0.113.9"},
+		{"spaces around the parameters", []string{" for=203.0.113.9 ; proto=https "}, "203.0.113.9"},
+		{"trusted hops are stepped over", []string{"for=198.51.100.1, for=10.4.4.4;by=10.0.0.1"}, "198.51.100.1"},
+		{"several header fields are read in order", []string{"for=198.51.100.1", "for=10.7.7.7"}, "198.51.100.1"},
+		{"a claimed address to the left of an untrusted hop is ignored", []string{"for=1.1.1.1, for=203.0.113.4"}, "203.0.113.4"},
+		{"unknown stops the walk", []string{"for=unknown"}, "10.1.2.3"},
+		{"unknown stops the walk at the nearest trusted hop", []string{"for=198.51.100.1, for=unknown, for=10.4.4.4"}, "10.4.4.4"},
+		{"an obfuscated node stops the walk", []string{`for=198.51.100.1, for="_gazonk", for=10.4.4.4`}, "10.4.4.4"},
+		{"an entry with no for stops the walk", []string{"for=198.51.100.1, proto=https"}, "10.1.2.3"},
+		{"a for repeated in one entry stops the walk", []string{"for=198.51.100.1;for=10.4.4.4"}, "10.1.2.3"},
+		{"an unterminated quote stops the walk", []string{`for="198.51.100.1`}, "10.1.2.3"},
+		{"a quote inside a bare value stops the walk", []string{`for=198.51"100.1"`}, "10.1.2.3"},
+		{"a stray quote inside a quoted value stops the walk", []string{`for="198.51"100.1"`}, "10.1.2.3"},
+		{"a value of two quoted strings stops the walk", []string{`for="198.51"."100.1"`}, "10.1.2.3"},
+		{"a dangling escape stops the walk", []string{`for="198.51.100.1\`}, "10.1.2.3"},
+		{"an empty entry stops the walk", []string{"for=198.51.100.1,"}, "10.1.2.3"},
+		{"an empty header value leaves the peer", []string{""}, "10.1.2.3"},
+		// A proxy that copies something the client chose, its Host header
+		// say, into a quoted parameter of its own entry must not let a comma
+		// or a semicolon in it start an entry or a parameter of the client's.
+		{"a separator inside a quoted parameter is data", []string{`for=198.51.100.7;host="a, for=6.6.6.6;x="`}, "198.51.100.7"},
+		{"an escaped quote inside a quoted parameter is data", []string{`for=198.51.100.7;host="a\", for=6.6.6.6;x=\\"`}, "198.51.100.7"},
+		// A client that leaves a quote open in the header it sends cannot
+		// swallow the entry the proxy appends to it.
+		{"an open quote from the client does not reach the proxy's entry", []string{`for="6.6.6.6, for=198.51.100.7`}, "198.51.100.7"},
+	}
+	resolver, err := newClientIPResolver(ClientIPOptions{TrustedProxies: []string{"10.0.0.0/8"}, Header: "forwarded"})
+	if err != nil {
+		t.Fatalf("newClientIPResolver() = %v", err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := forwardedRequest("10.1.2.3:9000", "Forwarded", tc.values...)
+			if got := resolver.resolve(req).String(); got != tc.want {
+				t.Errorf("resolve() with Forwarded %q = %q, want %q", tc.values, got, tc.want)
+			}
+		})
+	}
+
+	// The header is read only from a trusted peer, as any other is.
+	req := forwardedRequest("203.0.113.50:9000", "Forwarded", "for=198.51.100.1")
+	if got := resolver.resolve(req).String(); got != "203.0.113.50" {
+		t.Errorf("resolve() from an untrusted peer = %q, want the peer", got)
+	}
+
+	// The walk is bounded by entries, as it is for X-Forwarded-For.
+	hops := make([]string, maxForwardedHops+10)
+	for i := range hops {
+		hops[i] = "for=10.0.0.1"
+	}
+	hops[0] = "for=198.51.100.9"
+	req = forwardedRequest("10.1.2.3:9000", "Forwarded", strings.Join(hops, ", "))
+	if got := resolver.resolve(req).String(); got != "10.0.0.1" {
+		t.Errorf("resolve() = %q, want the walk to stop at the hop bound", got)
+	}
+}
+
 func TestClientIPResolverRejectsAnUnreadablePolicy(t *testing.T) {
 	t.Parallel()
 	resolver, err := newClientIPResolver(ClientIPOptions{
@@ -284,6 +364,34 @@ func TestParseForwardedAddr(t *testing.T) {
 			}
 			if ok && addr.String() != tc.want {
 				t.Errorf("parseForwardedAddr(%q) = %q, want %q", tc.field, addr, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnquoteForwardedValue(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		value, want string
+		ok          bool
+	}{
+		{value: "203.0.113.9", want: "203.0.113.9", ok: true},
+		{value: `"[2001:db8::1]:443"`, want: "[2001:db8::1]:443", ok: true},
+		{value: `"a\"b\\c"`, want: `a"b\c`, ok: true},
+		{value: `""`, want: "", ok: true},
+		{value: `"`},
+		{value: `"abc`},
+		{value: `"a"b"`},
+		{value: `"abc\"`},
+		{value: `a"b`},
+		{value: `a\b`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Parallel()
+			got, ok := unquoteForwardedValue(tc.value)
+			if ok != tc.ok || (ok && got != tc.want) {
+				t.Errorf("unquoteForwardedValue(%q) = (%q, %v), want (%q, %v)", tc.value, got, ok, tc.want, tc.ok)
 			}
 		})
 	}

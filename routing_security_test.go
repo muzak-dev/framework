@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -218,5 +219,52 @@ func TestOptionsAndMethodNotAllowedSkipRouteGuards(t *testing.T) {
 
 	if want := []string{"GET", "OPTIONS", "DELETE", "GET"}; strings.Join(seen, ",") != strings.Join(want, ",") {
 		t.Errorf("middleware saw %v, want %v", seen, want)
+	}
+}
+
+// TestCatchAllReceivesSpellingsOfAGuardedPath pins down what the
+// documentation of a "{name...}" wildcard warns about. With a guarded
+// "/admin/panel" beside a public "/{rest...}", requests that a server, a
+// proxy or a filesystem might treat as the same path are not normalised to it:
+// each reaches the public wildcard instead, with the captured value shown. The
+// guarded route is never reached without its guard, which is what
+// net/http.ServeMux does too; what the wildcard's handler does with the value
+// is the risk the documentation describes.
+func TestCatchAllReceivesSpellingsOfAGuardedPath(t *testing.T) {
+	t.Parallel()
+	type restIn struct {
+		Rest string `path:"rest"`
+	}
+	app := New(quietOptions())
+	app.Get("/admin/panel", func(_ *Context, _ Empty) (encodedUserOut, error) {
+		return encodedUserOut{Route: "admin"}, nil
+	}, WithDependencies(RequireBearerToken("s3cret")))
+	app.Get("/{rest...}", func(_ *Context, in restIn) (encodedUserOut, error) {
+		return encodedUserOut{Route: "public", ID: in.Rest}, nil
+	})
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, "GET", "/admin/panel"), http.StatusUnauthorized)
+	assertStatus(t, do(t, app, "GET", "/admin/pan%65l"), http.StatusUnauthorized)
+	for path, rest := range map[string]string{
+		"//admin/panel":     "/admin/panel",
+		"/admin//panel":     "admin//panel",
+		"/admin/panel/":     "admin/panel/",
+		"/ADMIN/panel":      "ADMIN/panel",
+		"/./admin/panel":    "./admin/panel",
+		"/x/../admin/panel": "x/../admin/panel",
+		"/admin%2Fpanel":    "admin/panel",
+		"/%2e/admin/panel":  "./admin/panel",
+		"/admin/panel;x":    "admin/panel;x",
+	} {
+		rec := doRequest(t, app, httptest.NewRequest("GET", "http://h"+path, nil))
+		assertStatus(t, rec, http.StatusOK)
+		var got encodedUserOut
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if got.Route != "public" || got.ID != rest {
+			t.Errorf("GET %s = %+v, want the public wildcard with rest %q", path, got, rest)
+		}
 	}
 }

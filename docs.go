@@ -39,7 +39,8 @@ const (
 // page is the dashboard's HTML shell, served at [AppOptions.DocsPath]. static
 // holds every file the shell then loads - the scripts, the stylesheet and the
 // fonts - keyed by the path it is served at, which is the documentation path
-// followed by the file's own name within the build.
+// followed by the file's own name within the build, as a request's decoded
+// path spells it.
 type docsAssets struct {
 	spec   *asset
 	page   *asset
@@ -88,8 +89,13 @@ func (a *App) prepareDocs() *docsAssets {
 		return assets
 	}
 
-	base := urlPath(strings.TrimSuffix(a.opts.DocsPath, "/")) + "/"
-	page := strings.ReplaceAll(string(shell), docsUIBasePlaceholder, base)
+	// The shell names the assets by the encoded path, which is what a browser
+	// sends, while a request is matched by the path it decodes to, so the
+	// assets are kept under that. Keying them by the encoded form served the
+	// page at a path such as "/api docs" and answered every script it loaded
+	// with a 404.
+	base := strings.TrimSuffix(a.opts.DocsPath, "/") + "/"
+	page := strings.ReplaceAll(string(shell), docsUIBasePlaceholder, urlPath(base))
 	page = strings.ReplaceAll(page, docsUISpecPlaceholder, urlPath(a.opts.OpenAPIPath))
 	assets.page = newAsset("text/html; charset=utf-8", []byte(page))
 	assets.page.policy = contentSecurityPolicy(page)

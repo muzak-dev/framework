@@ -708,6 +708,70 @@ filesystem reports identity, but it has not been run on Windows), real-proxy
 behaviour behind a load balancer, and the behaviour of a shared rate-limit
 store across nodes.
 
+## Fifth review - 2026-10-09
+
+A fifth pass over every subsystem, one reviewer each (routing and security
+middleware, binding, validation and the generated document, the server,
+lifecycle, logging and configuration, event streams, compression and static
+files, WebSockets, and the translation engine), re-testing the earlier fixes in
+each area. Nothing critical or high was found: no authentication bypass, no way
+to spoof a client address, no open redirect, no path traversal and no header
+injection. Each finding below was reproduced by a test that failed before the
+fix, except V7 and V16, which change no behaviour and are pinned by tests of
+what their documentation describes. One finding is a gap in an earlier fix: V1
+shows that S17's eviction from the largest quota held only while the flooded
+quota was the largest. The full list of fixes, including those with no
+security bearing, is in the 0.2.9 changelog.
+
+| # | Severity | Finding | Default config? | Status |
+|---|---|---|---|---|
+| V1 | Medium | In-memory rate-limit eviction took the oldest counter of the largest quota, so a client minting keys under a smaller quota (an API key or username counted before guards) evicted its own spent per-address counter: 31 keys took it from 11 back to 1 against a limit of 10. The S17 claim that a flood only displaces its own quota was false | With a mintable tracker | Fixed (evict within the inserting quota) |
+| V2 | Low | A refused request was still counted against every later quota, minting counters at full speed while the client was answered 429 | Multi-quota policies | Fixed (longest window first, stop at the refusal) |
+| V3 | Low | The 503 for a rate-limit storage that could not count had no Retry-After | Custom storage | Fixed |
+| V4 | Low | A wildcard CORS policy sent no Access-Control-Allow-Origin to a request without Origin and no Vary, so a cached same-origin response (a Static file with Last-Modified) broke a later cross-origin fetch | Wildcard CORS | Fixed |
+| V5 | Low | CORS AllowedOrigins entries were not validated: a trailing slash, a path, upper case, a default port or `*.example.com` never matched, and `null`, which any page can send, was accepted | With CORS | Fixed (build errors) |
+| V6 | Low | `Header: "Forwarded"` was accepted but RFC 7239 entries could not be parsed, so every client resolved to the proxy and shared one IPTracker budget and one per-client connection allowance | With Forwarded | Fixed (fuzzed) |
+| V7 | Info | A public `{rest...}` receives `//admin/panel`, `/ADMIN/panel`, `/x/../admin/panel`, `/admin%2Fpanel` (rest `admin/panel`) and other spellings of a guarded `/admin/panel`; the guarded route is never bypassed, as with net/http.ServeMux | Public catch-all | Documented |
+| V8 | Low | SecurityHeaders set no Strict-Transport-Security | TLS | Fixed (over TLS, not for localhost or addresses); no default CSP, documented |
+| V9 | Medium | `URL()`, `HTTPS()` and `URLWithSchemes()` accepted `http://:8080/admin`, whose empty hostname Go's HTTP client dials as the local machine, so a URL check meant to stop request forgery approved a request to the server itself | With URL rules | Fixed (hostname required) |
+| V10 | Low | A scalar query, header or form parameter sent twice bound its first copy, and numbers were read in Go's literal syntax (`0x1p-2`, `1_000`), so a proxy or firewall that read the other copy or the number differently judged a different request from the one served | Yes | Fixed (refused with 422) |
+| V11 | Low | `API_KEY= # fill me in` in a dotenv file loaded the comment as the value, which satisfied `required:"true"` | Dotenv templates | Fixed |
+| V12 | Low | Redaction matched attribute keys only, so `slog.Any("headers", r.Header)` logged `Authorization` and `Cookie` in full, the case the redaction list was documented to cover | Logging a header map | Fixed (http.Header, url.Values and string maps) |
+| V13 | Low | `wsAcceptKey` decoded `Sec-WebSocket-Key` before checking its length, so a key the size of the header limit cost an allocation three quarters that size on every handshake attempt | Yes | Fixed |
+| V14 | Low | A 4.5 KB locale file (a 4 KB key above 78,000 aliased values) stayed inside the YAML alias budget and was retained as about 394 MB once flattened; JSON paid quadratically for the same shape | Untrusted locale files | Fixed (64 MiB bound per locale and per file) |
+| V15 | Low | A POST event stream whose input binds no body cleared the read deadline before the handler ran, so a client that declared a body and sent part of it held the stream's opening with no deadline at all | POST streams | Fixed (read under ReadTimeout) |
+| V16 | Info | With `MaxLifetime` unset, as it is by default, a client that reads nothing (SSE) or answers every ping and says nothing (WebSocket) holds its slot indefinitely, so 1024 / 64 = 16 addresses (one IPv6 /52) fill either budget; the options called their zero value safe | Yes | Documented, with the settings that change it |
+| V17 | Low | `WSOptions.AllowedOrigins` took any string, so `"null"`, which a sandboxed iframe sends and so any page can present, would have let every page open a connection with the visitor's cookies, and an entry with a trailing slash, a path or a pattern silently refused the browser it was meant for; `AllowedHosts` likewise took entries no Host header can equal | With an origin list | Fixed (build errors, as for CORS) |
+
+V1, V2, V8 and V10 change behaviour, and V5 and V17 add build errors; each is
+listed under **Changed** or **Security** in the changelog with its migration.
+
+**Residual.**
+- A full in-memory table keeps each quota at the size it had when it filled;
+  a quota whose traffic grows afterwards gains room only as counters expire,
+  and a quota holding no counter takes one from the largest, once each time
+  it drains. Eviction within one quota is unchanged.
+- Counts made against longer quotas before a refusal are not taken back.
+- HSTS is not sent behind a proxy that terminates TLS, since the request
+  Muzak sees is plain; the proxy is the place to set it.
+- With `MaxLifetime` unset by default (V16), slots are still held for as long
+  as a client likes. A default lifetime was considered and left out: it would
+  end WebSocket connections whose clients do not reconnect on their own, and a
+  client holding slots on purpose reconnects at once. A guard that
+  authenticates is what ties a slot to someone.
+- In `Forwarded`, an unbracketed IPv6 address is accepted, as some proxies
+  write it, and an empty list element stops the walk rather than being
+  skipped, matching `X-Forwarded-For`.
+- A cookie sent twice under one name still binds its first value, because a
+  browser legitimately sends both.
+- The URL rules check the form of a URL, not where it leads: a hostname that
+  resolves to a private address is the application's to refuse.
+
+The suite now also runs on Windows in CI, which is the first time the
+Windows-only paths of static serving (backslash separators, 8.3 short names,
+`os.Root` on NTFS) run anywhere. Aliasing by trailing dots and alternate data
+streams, listed above as not established, still has no test of its own.
+
 ---
 
 ## One caveat about this review's process

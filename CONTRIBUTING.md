@@ -34,14 +34,19 @@ container, the WebSocket and SSE registries and the rate limit table are all
 shared across goroutines by design, and a data race in any of them is a bug that
 reaches production as corrupted state rather than as a crash.
 
+CI runs the build, vet and both test passes on Windows as well as Linux. If you
+are on macOS or Linux and your change touches file paths, static serving,
+sockets or timing, `GOOS=windows go vet ./...` catches what fails to compile
+there; what only fails at run time shows up in the `test (windows)` job.
+
 ## The rules the suite enforces
 
 Some of these will fail your build in ways that are not obvious the first time.
 
-- **Coverage.** The suite sits at 99.0% of statements. A statement that genuinely
-  cannot be reached carries a `// coverage:` comment saying why, and a test
-  checks that those comments contain a real justification rather than a bare
-  marker.
+- **Coverage.** The suite sits at 98.8% of statements, and CI fails below
+  98%. A statement that genuinely cannot be reached carries a `// coverage:`
+  comment saying why, and a test checks that those comments contain a real
+  justification rather than a bare marker.
 - **No em dash.** The character does not appear anywhere in source, docs or
   output, and a test enforces it.
 - **Goroutine leaks.** Request handling, the dependency container and the server

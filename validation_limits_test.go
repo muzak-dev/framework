@@ -252,8 +252,12 @@ func replyPath(depth int) string {
 // level, reported the whole path at every level that failed, and cost a 300
 // megabyte report. Past MaxNestedDepth the model is refused rather than
 // followed.
+//
+// It is not parallel because it counts calls to thread.Validate through a
+// package-level counter, and TestPooledValidationKeepsNothingFromTheRequest
+// validates a thread of its own: run beside it, the count picked up that test's
+// three calls and failed on a loaded machine.
 func TestRecursiveNestingIsBoundedInDepth(t *testing.T) {
-	t.Parallel()
 	app := New(quietOptions())
 	app.Post("/threads", func(ctx *Context, in thread) (Empty, error) { return Empty{}, nil })
 	mustBuild(t, app)

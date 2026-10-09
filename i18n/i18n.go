@@ -186,11 +186,16 @@ func (s *Store) AvailableLocales() []string {
 // Arguments are alternating names and values, the way slog reads them. Most are
 // interpolated into the result; a handful say how the lookup is performed:
 //
-//	count    selects a plural form, and is interpolated as well
+//	count    selects a plural form, and is interpolated as well: any integer or float
 //	scope    is prepended to the key, as a string or a list of segments
 //	default  is what to fall back to: text, an [i18n.Key], or a list tried in order
 //	locale   overrides the locale passed as the first argument
 //	raise    reports a missing translation rather than rendering a marker
+//
+// A count with a fraction chooses its form the way CLDR says its language
+// does, by the digits it is printed with: 1.5 is plural in English and
+// singular in French. A count that is not a number, NaN, an infinity, or a
+// magnitude of 2^63 or more is an [ArgumentError].
 //
 // A failure is passed to the store's exception handler, which by default
 // renders a missing translation as a visible marker and returns everything else
@@ -226,6 +231,13 @@ func (s *Store) Get(locale string, l Lookup) (string, error) {
 	}
 	if s.enforce && !contains(s.AvailableLocales(), locale) {
 		return "", &InvalidLocaleError{Locale: locale, Available: s.AvailableLocales()}
+	}
+	if l.Count != nil {
+		operands, ok := wholeOperands(int64(*l.Count))
+		if !ok {
+			return "", &ArgumentError{Key: l.Key, Index: -1, Value: *l.Count}
+		}
+		l.count = pluralCount{operands: operands, set: true}
 	}
 
 	key := l.full(s.separator)
@@ -378,8 +390,8 @@ func (s *Store) find(locale, key string) (*entry, bool) {
 // renderEntry turns an entry into the text a lookup asked for, choosing a
 // plural form when there is a count and filling in whatever it interpolates.
 func (s *Store) renderEntry(found *entry, locale, key string, l Lookup) (string, error) {
-	if l.Count != nil {
-		form, err := s.pluralize(found, locale, key, *l.Count)
+	if l.count.set {
+		form, err := s.pluralize(found, locale, key, l)
 		if err != nil {
 			return "", err
 		}
@@ -405,23 +417,24 @@ func (s *Store) renderEntry(found *entry, locale, key string, l Lookup) (string,
 // A zero form wins for a count of nothing whenever one is written, which is
 // a departure from CLDR: English has no zero category, but "no messages" reads
 // better than "0 messages", and a translator who wrote one meant it to be
-// used.
-func (s *Store) pluralize(found *entry, locale, key string, count int) (*entry, error) {
+// used. A fraction of nothing, such as 0.5, is a count of something.
+func (s *Store) pluralize(found *entry, locale, key string, l Lookup) (*entry, error) {
 	if found.plural == nil {
 		if found.text != "" || found.parts != nil {
 			// A single string with a count is not an error: the count is simply
 			// interpolated, which is what a language with one form needs.
 			return found, nil
 		}
-		return nil, &InvalidPluralizationDataError{Locale: locale, Key: key, Count: count}
+		return nil, &InvalidPluralizationDataError{Locale: locale, Key: key, Count: l.countGiven()}
 	}
 
-	if count == 0 {
+	n := l.count.operands
+	if n.I == 0 && n.whole() {
 		if form, written := found.plural[Zero]; written {
 			return form, nil
 		}
 	}
-	category := s.ruleFor(locale)(count)
+	category := s.ruleFor(locale)(n)
 	if form, written := found.plural[category]; written {
 		return form, nil
 	}
@@ -429,7 +442,7 @@ func (s *Store) pluralize(found *entry, locale, key string, count int) (*entry, 
 		return form, nil
 	}
 	return nil, &InvalidPluralizationDataError{
-		Locale: locale, Key: key, Count: count,
+		Locale: locale, Key: key, Count: l.countGiven(),
 		Category: category, Have: categoriesOf(found.plural),
 	}
 }
@@ -513,7 +526,7 @@ func (s *Store) applyDefaults(locale string, l Lookup) (string, bool, error) {
 	for _, fallback := range l.Default {
 		switch value := fallback.(type) {
 		case Key:
-			sub := Lookup{Key: string(value), Scope: l.Scope, Count: l.Count, Vars: l.Vars}
+			sub := Lookup{Key: string(value), Scope: l.Scope, Count: l.Count, Vars: l.Vars, count: l.count}
 			text, err := s.Get(locale, sub)
 			if err == nil {
 				return text, true, nil

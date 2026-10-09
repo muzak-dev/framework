@@ -66,8 +66,14 @@ type Constraints struct {
 	MaxItems *int
 	// UniqueItems requires a collection's elements to differ.
 	UniqueItems bool
-	// Enum lists the permitted values.
+	// Enum lists the permitted values. Two OneOf rules in one rule set both
+	// apply, so it holds only the values every list permits.
 	Enum []any
+	// AllOf holds what a rule set demands beyond the one Pattern, Format and
+	// MultipleOf above can say: a second pattern, a second format or a second
+	// multiple, each of which a value must meet as well. Bounds need no such
+	// list, because two of a kind reduce to the tighter one; these do not.
+	AllOf []Constraints
 }
 
 // IsZero reports whether a set of constraints says nothing at all, which is
@@ -83,7 +89,7 @@ func (c Constraints) IsZero() bool {
 		c.ExclusiveMinimum == nil && c.ExclusiveMaximum == nil &&
 		c.MultipleOf == nil &&
 		c.MinItems == nil && c.MaxItems == nil &&
-		!c.UniqueItems && len(c.Enum) == 0
+		!c.UniqueItems && len(c.Enum) == 0 && len(c.AllOf) == 0
 }
 
 // Evaluator is a rule set bound to a field, ready to run.
@@ -118,6 +124,70 @@ type ElementRules[E any] interface {
 // intPtr and floatPtr keep the constraint fields readable at the call site.
 func intPtr(v int) *int           { return new(v) }
 func floatPtr(v float64) *float64 { return new(v) }
+
+// atLeast returns the tighter of a lower bound already described and another
+// the same rule set declares, which is the larger: a value has to meet both.
+func atLeast[T int | float64](current *T, next T) *T {
+	if current == nil || next > *current {
+		return new(next)
+	}
+	return current
+}
+
+// atMost returns the tighter of two upper bounds, which is the smaller.
+func atMost[T int | float64](current *T, next T) *T {
+	if current == nil || next < *current {
+		return new(next)
+	}
+	return current
+}
+
+// addPattern records a pattern the value must match. The first one is the
+// Pattern; another, different one goes to AllOf, since a value has to match
+// every pattern its rule set declares and one keyword can name only one.
+func (c *Constraints) addPattern(pattern string) {
+	switch {
+	case c.Pattern == "":
+		c.Pattern = pattern
+	case c.Pattern != pattern && !slices.ContainsFunc(c.AllOf, func(o Constraints) bool { return o.Pattern == pattern }):
+		c.AllOf = append(c.AllOf, Constraints{Pattern: pattern})
+	}
+}
+
+// addFormat records a format the way addPattern records a pattern.
+func (c *Constraints) addFormat(format string) {
+	switch {
+	case c.Format == "":
+		c.Format = format
+	case c.Format != format && !slices.ContainsFunc(c.AllOf, func(o Constraints) bool { return o.Format == format }):
+		c.AllOf = append(c.AllOf, Constraints{Format: format})
+	}
+}
+
+// addMultipleOf records a multiple the way addPattern records a pattern.
+func (c *Constraints) addMultipleOf(step float64) {
+	switch {
+	case c.MultipleOf == nil:
+		c.MultipleOf = floatPtr(step)
+	case *c.MultipleOf != step && !slices.ContainsFunc(c.AllOf, func(o Constraints) bool {
+		return o.MultipleOf != nil && *o.MultipleOf == step
+	}):
+		c.AllOf = append(c.AllOf, Constraints{MultipleOf: floatPtr(step)})
+	}
+}
+
+// restrictEnum records a list of permitted values. The first list is the
+// Enum; each later one narrows it to the values both permit, because every
+// OneOf in a rule set has to hold.
+func (c *Constraints) restrictEnum(listed bool, values []any) {
+	if !listed {
+		c.Enum = slices.Clone(values)
+		return
+	}
+	c.Enum = slices.DeleteFunc(c.Enum, func(value any) bool {
+		return !slices.ContainsFunc(values, func(other any) bool { return reflect.DeepEqual(value, other) })
+	})
+}
 
 // resolve walks a field pointer down to the value the rules act on.
 //
@@ -589,111 +659,123 @@ func failureFor[T any](s *step[T]) (Kind, []any) {
 // What a rule demands is derived from its kind and its parameters, so declaring
 // one costs no closure. A rule with nothing a document can express, which is
 // every rule of the caller's own, contributes nothing.
+//
+// Every step of a rule set has to hold, so the description is what all of them
+// demand together, whatever order they were declared in: of two bounds of a
+// kind the tighter, of two OneOf lists the values both permit, and every
+// pattern, format and multiple, the ones after the first in AllOf. Writing each
+// step over the last described only the one declared last, which told a client
+// that values the server refuses were fine.
 func describeAll[T any](steps []step[T]) Constraints {
 	var c Constraints
+	listed := false
 	for i := range steps {
 		s := &steps[i]
 		switch s.kind {
 		case kindRequired:
 			c.Required = true
 		case kindMinLen:
-			c.MinLength = intPtr(s.n)
+			c.MinLength = atLeast(c.MinLength, s.n)
 		case kindMaxLen:
-			c.MaxLength = intPtr(s.n)
+			c.MaxLength = atMost(c.MaxLength, s.n)
 		case kindLen:
-			c.MinLength, c.MaxLength = intPtr(s.n), intPtr(s.n)
+			c.MinLength, c.MaxLength = atLeast(c.MinLength, s.n), atMost(c.MaxLength, s.n)
 		case kindEmail:
-			c.Format = "email"
+			c.addFormat("email")
 		case kindURL:
-			c.Format = "uri"
+			c.addFormat("uri")
 		case kindUUID:
-			c.Format = "uuid"
+			c.addFormat("uuid")
 		case kindMatches:
-			c.Pattern = s.text
+			c.addPattern(s.text)
 		case kindMin:
-			c.Minimum = floatPtr(s.lo)
+			c.Minimum = atLeast(c.Minimum, s.lo)
 		case kindMax:
-			c.Maximum = floatPtr(s.hi)
+			c.Maximum = atMost(c.Maximum, s.hi)
 		case kindBetween:
 			// A Clamp is left out on purpose: it moves a value into its range
 			// rather than refusing one outside it, so minimum and maximum
 			// would promise a rejection the server never makes.
-			c.Minimum, c.Maximum = floatPtr(s.lo), floatPtr(s.hi)
+			c.Minimum, c.Maximum = atLeast(c.Minimum, s.lo), atMost(c.Maximum, s.hi)
 		case kindPositive:
-			c.ExclusiveMinimum = floatPtr(0)
+			c.ExclusiveMinimum = atLeast(c.ExclusiveMinimum, 0)
 		case kindNegative:
-			c.ExclusiveMaximum = floatPtr(0)
+			c.ExclusiveMaximum = atMost(c.ExclusiveMaximum, 0)
 		case kindMultipleOf:
-			c.MultipleOf = floatPtr(s.lo)
+			c.addMultipleOf(s.lo)
 		case kindMinItems:
-			c.MinItems = intPtr(s.n)
+			c.MinItems = atLeast(c.MinItems, s.n)
 		case kindMaxItems:
-			c.MaxItems = intPtr(s.n)
+			c.MaxItems = atMost(c.MaxItems, s.n)
 		case kindUnique:
 			c.UniqueItems = true
 		case kindOneOfString:
-			for _, value := range s.list {
-				c.Enum = append(c.Enum, value)
+			values := make([]any, len(s.list))
+			for i, value := range s.list {
+				values[i] = value
 			}
+			c.restrictEnum(listed, values)
+			listed = true
 		case kindOneOfValue, kindOneOfNumber:
-			c.Enum = append(c.Enum, s.enum...)
+			c.restrictEnum(listed, s.enum)
+			listed = true
 
 		case kindHTTPS, kindURLScheme:
-			c.Format = "uri"
+			c.addFormat("uri")
 		case kindHost:
-			c.Format = "hostname"
+			c.addFormat("hostname")
 		case kindIP:
-			c.Format = "ip"
+			c.addFormat("ip")
 		case kindIPv4:
-			c.Format = "ipv4"
+			c.addFormat("ipv4")
 		case kindIPv6:
-			c.Format = "ipv6"
+			c.addFormat("ipv6")
 		case kindCIDR:
-			c.Format = "cidr"
+			c.addFormat("cidr")
 		case kindMAC:
-			c.Format = "mac"
+			c.addFormat("mac")
 		case kindBase64:
 			// The name OpenAPI gives base64, rather than one of its own.
-			c.Format = "byte"
+			c.addFormat("byte")
 
 		case kindAlpha:
-			c.Pattern = patternAlpha
+			c.addPattern(patternAlpha)
 		case kindAlphanumeric:
-			c.Pattern = patternAlphanumeric
+			c.addPattern(patternAlphanumeric)
 		case kindNumericString:
-			c.Pattern = patternNumeric
+			c.addPattern(patternNumeric)
 		case kindASCII:
-			c.Pattern = patternASCII
+			c.addPattern(patternASCII)
 		case kindSlug:
-			c.Pattern = patternSlug
+			c.addPattern(patternSlug)
 		case kindHex:
-			c.Pattern = patternHex
+			c.addPattern(patternHex)
 		case kindHexColour:
-			c.Pattern = patternHexColour
+			c.addPattern(patternHexColour)
 		case kindE164:
-			c.Pattern = patternE164
+			c.addPattern(patternE164)
 		case kindCountryCode:
-			c.Pattern = patternCountryCode
+			c.addPattern(patternCountryCode)
 		case kindCurrencyCode:
-			c.Pattern = patternCurrencyCode
+			c.addPattern(patternCurrencyCode)
 
 		case kindGreaterThan:
-			c.ExclusiveMinimum = floatPtr(s.lo)
+			c.ExclusiveMinimum = atLeast(c.ExclusiveMinimum, s.lo)
 		case kindLessThan:
-			c.ExclusiveMaximum = floatPtr(s.hi)
+			c.ExclusiveMaximum = atMost(c.ExclusiveMaximum, s.hi)
 		case kindNonNegative:
-			c.Minimum = floatPtr(0)
+			c.Minimum = atLeast(c.Minimum, 0)
 		case kindNonPositive:
-			c.Maximum = floatPtr(0)
+			c.Maximum = atMost(c.Maximum, 0)
 		case kindWhole:
-			c.MultipleOf = floatPtr(1)
+			c.addMultipleOf(1)
 		case kindPort:
-			c.Minimum, c.Maximum = floatPtr(1), floatPtr(65535)
+			c.Minimum, c.Maximum = atLeast(c.Minimum, 1), atMost(c.Maximum, 65535)
 
 		case kindItems:
-			c.MinItems, c.MaxItems = intPtr(s.n), intPtr(s.n)
+			c.MinItems, c.MaxItems = atLeast(c.MinItems, s.n), atMost(c.MaxItems, s.n)
 		case kindNotEmpty:
-			c.MinItems = intPtr(1)
+			c.MinItems = atLeast(c.MinItems, 1)
 		}
 	}
 	return c

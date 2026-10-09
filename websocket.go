@@ -233,6 +233,14 @@ const wsScratchSize = 4 << 10
 // a lost transport or a cancelled operation, ends it, and every later call
 // returns that same error rather than trying to carry on with a stream whose
 // position is no longer known.
+//
+// An operation that its context ends is no exception, and the peer is told
+// with a close frame wherever the stream allows one: after any read, and
+// after a write that had not begun. A write the context interrupts part way
+// through a frame ends the connection without one, since a close frame would
+// be read as more of the frame. Only a wait for another reader or writer to
+// finish gives up without ending anything, because it never touched the
+// stream.
 type WSConn struct {
 	rwc io.ReadWriteCloser
 	br  *bufio.Reader
@@ -267,9 +275,9 @@ type WSConn struct {
 	control [wsframe.MaxControlPayload]byte
 	scratch []byte
 
-	// lastPong records when the peer last answered a ping, for the keepalive
-	// to compare against.
-	lastPong monotonicStamp
+	// heard records when anything last arrived from the peer, a pong or a
+	// frame or any part of one, for the keepalive to compare against.
+	heard monotonicStamp
 
 	// reading counts the reads in progress, and notReading is the last moment
 	// none was. A pong is consumed by a read like any other frame, so the
@@ -339,8 +347,8 @@ func newWSConn(rwc io.ReadWriteCloser, br *bufio.Reader, client bool, subprotoco
 	if conn, ok := rwc.(net.Conn); ok {
 		c.nc = conn
 	}
-	c.lastPong.start()
-	c.notReading.epoch = c.lastPong.epoch
+	c.heard.start()
+	c.notReading.epoch = c.heard.epoch
 	return c
 }
 
@@ -361,14 +369,38 @@ func (c *WSConn) Subprotocol() string { return c.subprotocol }
 // buffered, which is what keeps a peer from choosing how much memory the
 // server spends. A peer sending faster than [WSOptions.MessageLimits] allows
 // is closed rather than read from again.
+//
+// A read that ctx ends, by its cancellation or its deadline, ends the
+// connection, and the peer is told why: a deadline that passed is closed with
+// [WSStatusPolicyViolation], which is what a per-read timeout used to bound how
+// long a peer may stay silent looks like from its side, and a cancellation
+// with [WSStatusGoingAway]. The read returns the context's error once the close
+// frame is out and the peer has answered it, or after
+// [WSOptions.CloseGracePeriod] at the most. A connection opened with [WSDial]
+// has no deadline to interrupt a read with, so a cancellation closes its
+// transport there, and no close frame can follow.
 func (c *WSConn) Read(ctx context.Context) (WSMessageType, []byte, error) {
 	if err := c.acquire(ctx, c.readSem); err != nil {
 		return 0, nil, err
 	}
 	defer c.release(c.readSem)
 	typ, payload, err := c.readMessage(ctx)
-	if err != nil || c.messages == nil {
-		return typ, payload, err
+	if err != nil {
+		// The target is declared only once there is an error, because taking
+		// its address for errors.As moves it to the heap, and a successful
+		// read should cost nothing for a failure it did not have.
+		var ended *wsContextError
+		if errors.As(err, &ended) {
+			// This is done here rather than where the read failed, because by
+			// now the arrangement that interrupted it has been undone, and
+			// cannot move the deadline of the wait for the peer's answer into
+			// the past.
+			return 0, nil, c.abandonReading(ended)
+		}
+		return 0, nil, err
+	}
+	if c.messages == nil {
+		return typ, payload, nil
 	}
 	// The message is counted once it is whole, so the count measures the rate
 	// a peer sustains rather than refusing the one message that crossed the
@@ -437,6 +469,12 @@ func (c *WSConn) ReadJSON(ctx context.Context, target any) error {
 // message must be valid UTF-8; one that is not is refused before anything
 // reaches the wire, since sending it would oblige the peer to close the
 // connection.
+//
+// A write whose context has already ended by the time it gets the connection
+// sends nothing of the message and ends the connection with
+// [WSStatusGoingAway], so the peer is told rather than left to find it gone.
+// One that its context interrupts part way through ends the connection
+// without a close frame; see [WSConn].
 func (c *WSConn) Write(ctx context.Context, typ WSMessageType, payload []byte) error {
 	switch typ {
 	case WSText:
@@ -529,7 +567,8 @@ func (c *WSConn) acquire(ctx context.Context, sem chan struct{}) error {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
-			return fmt.Errorf("muzak: waiting for the websocket connection: %w", ctx.Err())
+			// Nothing was sent or read, so the connection is left as it was.
+			return &wsContextError{err: fmt.Errorf("muzak: waiting for the websocket connection: %w", ctx.Err())}
 		case <-c.done:
 			return c.failure()
 		}
@@ -683,12 +722,24 @@ func (c *WSConn) readMessage(ctx context.Context) (WSMessageType, []byte, error)
 			return 0, nil, c.abortReading(WSStatusPolicyViolation,
 				"too many frames arrived before a message was complete")
 		}
+		// The wait for the next frame is kept apart from reading it, so that a
+		// read ended while nothing of that frame has arrived leaves the stream
+		// at a frame boundary. That is the common way for a read to end early,
+		// at a caller's deadline between messages, and the closing wait that
+		// follows can then recognise the peer's answer.
+		c.unread = 0
+		if _, err := c.br.Peek(1); err != nil {
+			return 0, nil, c.readFailed(ctx, err)
+		}
 		// A header cut short or refused leaves the stream somewhere inside it.
 		c.unread = -1
 		header, err := wsframe.ReadHeader(c.br)
 		if err != nil {
 			return 0, nil, c.readFailed(ctx, err)
 		}
+		// Whatever the frame is, a pong among them, its arrival is what the
+		// keepalive is asking about.
+		c.heard.mark()
 		c.unread = header.Length
 		if header.Masked == c.client {
 			return 0, nil, c.abortReading(WSStatusProtocolError, c.maskingRule())
@@ -773,13 +824,21 @@ func (c *WSConn) chargeFrame() error {
 // The payload is taken a chunk at a time rather than in one allocation the size
 // of the declared length, so a header that promises more than the peer intends
 // to send costs no more than the chunk it has reached.
+//
+// Every read that brings part of the payload counts as hearing from the peer.
+// A peer part way through a large frame cannot answer a ping until the frame
+// is finished, because its pong would have to go out in the middle of it, so
+// a keepalive that waited for the pong alone would close a healthy peer whose
+// message merely took longer than the pong timeout to arrive. One that stops
+// sending part way through is still caught, by the keepalive once nothing has
+// arrived for a pong timeout, and by the read timeout in any case.
 func (c *WSConn) readPayload(ctx context.Context, header wsframe.Header, message []byte) ([]byte, error) {
 	position := 0
 	for remaining := header.Length; remaining > 0; {
 		chunk := int(min(remaining, wsReadChunk))
 		start := len(message)
 		message = slices.Grow(message, chunk)[:start+chunk]
-		if _, err := io.ReadFull(c.br, message[start:]); err != nil {
+		if _, err := io.ReadFull(wsArrivals{c}, message[start:]); err != nil {
 			c.unread = -1
 			return nil, c.readFailed(ctx, err)
 		}
@@ -790,6 +849,24 @@ func (c *WSConn) readPayload(ctx context.Context, header wsframe.Header, message
 		c.unread = remaining
 	}
 	return message, nil
+}
+
+// wsArrivals reads a payload through the connection's buffered reader and
+// marks the peer as heard from whenever a read brings something.
+//
+// A chunk is tens of kilobytes, which a slow peer can take longer than a pong
+// timeout to fill, so it is each read rather than each chunk that counts. A
+// struct holding only a pointer fits in an interface as it stands, so passing
+// one to [io.ReadFull] costs no allocation.
+type wsArrivals struct{ c *WSConn }
+
+// Read implements [io.Reader].
+func (a wsArrivals) Read(p []byte) (int, error) {
+	n, err := a.c.br.Read(p)
+	if n > 0 {
+		a.c.heard.mark()
+	}
+	return n, err
 }
 
 // startMessageClock tightens the read deadline once a message has begun, which
@@ -866,7 +943,8 @@ func (c *WSConn) handleControl(ctx context.Context, header wsframe.Header) error
 		}
 		return err
 	case wsframe.Pong:
-		c.lastPong.mark()
+		// Its arrival was marked with its header, which is all the keepalive
+		// needs to know about it.
 		return nil
 	default:
 		status, reason, err := wsframe.ParseClose(payload)
@@ -880,7 +958,10 @@ func (c *WSConn) handleControl(ctx context.Context, header wsframe.Header) error
 		// fault of either end, and that must not overwrite the status the peer
 		// went to the trouble of sending.
 		_ = c.record(closure)
-		_ = c.sendCloseAfterFailure(WSStatus(status), "")
+		if c.sendCloseAfterFailure(WSStatus(status), "") == nil && c.client {
+			// A server closes the TCP connection first; see [WSConn.linger].
+			c.awaitHangUp()
+		}
 		return c.fail(closure)
 	}
 }
@@ -894,7 +975,9 @@ func (c *WSConn) readFailed(ctx context.Context, err error) error {
 		return c.abortReading(WSStatus(protocol.Status), protocol.Reason)
 	}
 	if ctxErr := wsContextFailure(ctx, err); ctxErr != nil {
-		return c.fail(fmt.Errorf("muzak: reading a websocket message: %w", ctxErr))
+		// Not recorded yet: [WSConn.Read] says goodbye first, once the
+		// arrangement that interrupted the read has been undone.
+		return &wsContextError{err: fmt.Errorf("muzak: reading a websocket message: %w", ctxErr)}
 	}
 	if errors.Is(err, os.ErrDeadlineExceeded) {
 		// The caller's deadline was ruled out above, so the only one left is
@@ -923,6 +1006,78 @@ func wsContextFailure(ctx context.Context, err error) error {
 	return ctx.Err()
 }
 
+// wsContextError reports an operation on a connection that the caller's own
+// context ended, by its cancellation or its deadline.
+//
+// It is a type of its own so that a handler returning it, which is what a
+// handler loop does with any error, is told apart from one that failed: the
+// handler's own context ended the conversation, which is not something to log
+// as a failure. A deadline that ran out on a query the handler made is not one
+// of these, and is still reported as the failure it is.
+type wsContextError struct{ err error }
+
+// Error implements the error interface.
+func (e *wsContextError) Error() string { return e.err.Error() }
+
+// Unwrap exposes the context's error, so that a caller can test for
+// [context.Canceled] or [context.DeadlineExceeded] with [errors.Is].
+func (e *wsContextError) Unwrap() error { return e.err }
+
+// wsContextClosure chooses what a peer is told when the caller's own context
+// ended a read or a write.
+//
+// A deadline that passed while reading says the peer stayed silent for longer
+// than the handler allows, which is the same complaint the connection's own
+// read timeout and keepalive make, so it is answered with the same status,
+// [WSStatusPolicyViolation]. Anything else is this end giving up for reasons
+// of its own, the peer having done nothing wrong, which is what
+// [WSStatusGoingAway] says.
+func wsContextClosure(ctxErr error, reading bool) (WSStatus, string) {
+	switch {
+	case !errors.Is(ctxErr, context.DeadlineExceeded):
+		return WSStatusGoingAway, "the conversation was cancelled"
+	case reading:
+		return WSStatusPolicyViolation, "no message arrived within the time allowed"
+	default:
+		return WSStatusGoingAway, "the time allowed for the conversation ran out"
+	}
+}
+
+// abandonReading ends a connection whose read the caller's context ended,
+// telling the peer why. The read half must be held.
+//
+// The connection's outbound stream is at a frame boundary whatever the inbound
+// one was doing, because a close frame waits for the write half, so the peer
+// can always be told. What it costs is the wait for the peer's answer that
+// follows every close frame; see [WSConn.linger].
+func (c *WSConn) abandonReading(ended *wsContextError) error {
+	if c.nc == nil || c.failure() != nil {
+		// Without deadlines, the only way the context could interrupt the
+		// read was to close the transport, so there is nobody left to tell.
+		// And a connection that had already ended is what cancelled the
+		// context, through [WSConn.cancelOnEnd]: whatever ended it has said
+		// all there is to say.
+		return c.fail(ended)
+	}
+	status, reason := wsContextClosure(ended.err, true)
+	if c.sendClose(status, reason) == nil {
+		c.linger()
+	}
+	return c.fail(ended)
+}
+
+// abandonWriting ends a connection whose write the caller's context ended
+// before any of the frame had gone out, telling the peer why. The write half
+// must be held, and the close frame goes out under it.
+func (c *WSConn) abandonWriting(ctxErr error) error {
+	ended := &wsContextError{err: fmt.Errorf("muzak: writing a websocket message: %w", ctxErr)}
+	status, reason := wsContextClosure(ctxErr, false)
+	if c.sendCloseHolding(status, reason) == nil {
+		c.drain()
+	}
+	return c.fail(ended)
+}
+
 // wsPayload is what a frame's payload may be given as. A string is accepted so
 // that a text message is written straight from the caller's string rather than
 // copied into a fresh slice on the way.
@@ -940,6 +1095,19 @@ func wsSend[T wsPayload](c *WSConn, ctx context.Context, opcode wsframe.Opcode, 
 	defer c.release(c.writeSem)
 	if err := c.writable(); err != nil {
 		return err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The context ended before any of the frame went out, so the stream
+		// is at a frame boundary and the peer can be told why the connection
+		// is ending. Starting the write instead would race the cancellation
+		// to the wire, and leave the stream wherever the race ended.
+		//
+		// A write the context ends part way through cannot be followed by a
+		// close frame, which would be read as more of the frame it had
+		// interrupted, so that one ends the connection without a word, and so
+		// does one stuck behind a peer that has stopped reading, which a close
+		// frame could not get past any more than the message could.
+		return c.abandonWriting(ctxErr)
 	}
 	return wsWrite(c, ctx, c.deadline(ctx), opcode, payload)
 }
@@ -966,7 +1134,7 @@ func (c *WSConn) writable() error {
 // the transport, and closing it under a frame half written would show the peer
 // a lost connection instead of the status it was being told.
 func (c *WSConn) sendClose(status WSStatus, reason string) error {
-	return c.sendCloseFrame(status, reason, false)
+	return c.sendCloseFrame(status, reason, false, false)
 }
 
 // sendCloseAfterFailure is sendClose for the echo of a close frame the peer
@@ -975,14 +1143,28 @@ func (c *WSConn) sendClose(status WSStatus, reason string) error {
 // that, an echo would be skipped whenever another goroutine held the write half
 // at that moment.
 func (c *WSConn) sendCloseAfterFailure(status WSStatus, reason string) error {
-	return c.sendCloseFrame(status, reason, true)
+	return c.sendCloseFrame(status, reason, true, false)
 }
 
-func (c *WSConn) sendCloseFrame(status WSStatus, reason string, afterFailure bool) error {
+// sendCloseHolding is sendClose for a caller that already holds the write
+// half.
+//
+// It does not wait for another goroutine that has begun sending a close frame
+// of its own: that goroutine is waiting for the write half this caller holds,
+// so neither would ever finish, and the frame it means to send has not been
+// started, so there is nothing on the wire to protect.
+func (c *WSConn) sendCloseHolding(status WSStatus, reason string) error {
+	return c.sendCloseFrame(status, reason, false, true)
+}
+
+func (c *WSConn) sendCloseFrame(status WSStatus, reason string, afterFailure, holding bool) error {
 	c.mu.Lock()
 	if c.sentClose {
 		closing := c.closing
 		c.mu.Unlock()
+		if holding {
+			return errWSClosing
+		}
 		if closing != nil {
 			// The sender is bounded by the write timeout, which is what keeps
 			// this from waiting on a peer that has stopped reading for longer
@@ -1007,10 +1189,12 @@ func (c *WSConn) sendCloseFrame(status WSStatus, reason string, afterFailure boo
 	var payload [wsframe.MaxControlPayload]byte
 	frame := wsframe.AppendClose(payload[:0], uint16(status), reason)
 
-	if err := c.acquireClose(afterFailure); err != nil {
-		return err
+	if !holding {
+		if err := c.acquireClose(afterFailure); err != nil {
+			return err
+		}
+		defer c.release(c.writeSem)
 	}
-	defer c.release(c.writeSem)
 	// The close frame goes out under its own deadline rather than a caller's
 	// context, because a connection being torn down should not be left open by
 	// a context that was cancelled a moment ago.
@@ -1115,7 +1299,7 @@ func (c *WSConn) flush(ctx context.Context, b []byte) error {
 // lost connection carrying the transport's own failure otherwise.
 func wsWriteFailure(ctx context.Context, err error) error {
 	if ctxErr := wsContextFailure(ctx, err); ctxErr != nil {
-		return fmt.Errorf("muzak: writing a websocket message: %w", ctxErr)
+		return &wsContextError{err: fmt.Errorf("muzak: writing a websocket message: %w", ctxErr)}
 	}
 	return &WSCloseError{Status: WSStatusAbnormalClosure, Reason: "the connection was lost", cause: err}
 }
@@ -1305,7 +1489,7 @@ func (e *wsExpiry) stopLocked() bool {
 //
 // A context that can never be cancelled needs none, which is what keeps the
 // close frames and the keepalive pings off the allocator. Neither does the
-// request's own context, because the connection is already watching that one
+// handler's own context, because the connection is already watching that one
 // for its whole life, and that is the context a handler passes to nearly every
 // read and write it makes.
 func (c *WSConn) arranged(ctx context.Context) bool {
@@ -1318,16 +1502,27 @@ var wsNothingToStop = func() bool { return false }
 // watch ends the connection if ctx is cancelled, once, for the whole life of
 // the connection.
 //
-// It must be called before any other goroutine can reach the connection, which
-// is what makes the fields it writes safe to read from the handler's own
-// goroutines afterwards.
+// It must be called before the handler or the keepalive can reach the
+// connection, which is what makes the fields it writes safe to read from their
+// goroutines afterwards. The register can reach a connection a moment sooner,
+// but it only ever closes one, with a context that needs no arrangement, and so
+// never reads them.
+//
+// A served connection watches the handler's context, which [WSConn.cancelOnEnd]
+// also cancels when the connection ends for any other reason. Whatever ended
+// it then closes the transport once it has finished with it, and closing it
+// from here as well could cut short a close frame still on its way out, so
+// this only acts on a cancellation that came first.
 func (c *WSConn) watch(ctx context.Context) {
 	if ctx.Done() == nil {
 		return
 	}
 	c.watched = ctx
 	c.unwatch = context.AfterFunc(ctx, func() {
-		_ = c.fail(&WSCloseError{Status: WSStatusAbnormalClosure, Reason: "the request ended"})
+		ended := &WSCloseError{Status: WSStatusAbnormalClosure, Reason: "the request ended"}
+		if errors.Is(c.record(ended), ended) {
+			_ = c.rwc.Close()
+		}
 	})
 }
 
@@ -1374,19 +1569,57 @@ func (c *WSConn) drain() {
 // is set once, to the close grace period, and no more than
 // [wsCloseDrainLimit] bytes are read. A peer that answers promptly is not
 // held up by either, because its close frame ends the wait.
+//
+// A client waits for longer, and does not stop sending first. RFC 6455 asks the
+// server to close the TCP connection before the client does, so that the
+// TIME_WAIT state a closed connection leaves behind is held by the server
+// rather than by every client it ever had, and a client that shut down its
+// write side would be the first to close. So a client sends nothing more and
+// reads on past the server's close frame to the end of the stream, within the
+// same two bounds.
 func (c *WSConn) linger() {
-	if c.closeGrace <= 0 || c.nc == nil {
+	if c.closeGrace <= 0 {
 		return
+	}
+	defer c.boundClosing()()
+	c.discardInbound()
+}
+
+// awaitHangUp is what a client does once it has answered the server's close
+// frame: it waits, within the grace period, for the server to close the
+// connection, which the specification asks the server to do first. The read
+// half must be held.
+func (c *WSConn) awaitHangUp() {
+	if c.closeGrace <= 0 {
+		return
+	}
+	defer c.boundClosing()()
+	_, _ = io.CopyN(io.Discard, c.br, wsCloseDrainLimit)
+}
+
+// boundClosing applies the close grace period to the reads of a connection
+// that is closing, and on a server stops sending, returning the function that
+// lifts the bound again. The read half must be held.
+//
+// A connection dialled through an [net/http.Client] reaches its peer through
+// the body of a response, which has no deadline to set, so its grace period is
+// enforced the way its read timeout is: by closing the transport when the time
+// is up, which is what this end was about to do anyway.
+func (c *WSConn) boundClosing() func() bool {
+	deadline := time.Now().Add(c.closeGrace)
+	if c.nc == nil {
+		c.readExpiry.arm(deadline, func() { _ = c.rwc.Close() })
+		return c.readExpiry.disarm
 	}
 	// Both the plain and the TLS connection can shut down their write side, the
 	// latter by sending its close_notify alert. A transport that cannot is left
-	// as it is: the wait below still keeps the receive buffer empty.
-	if half, ok := c.nc.(interface{ CloseWrite() error }); ok {
+	// as it is: the wait still keeps the receive buffer empty.
+	if half, ok := c.nc.(interface{ CloseWrite() error }); ok && !c.client {
 		_ = c.nc.SetWriteDeadline(time.Now().Add(c.closeTimeout()))
 		_ = half.CloseWrite()
 	}
-	_ = c.nc.SetReadDeadline(time.Now().Add(c.closeGrace))
-	c.discardInbound()
+	_ = c.nc.SetReadDeadline(deadline)
+	return wsNothingToStop
 }
 
 // wsHeaderSize is how many bytes a frame's header took on the wire, which a
@@ -1407,7 +1640,8 @@ func wsHeaderSize(header wsframe.Header) int64 {
 }
 
 // discardInbound reads and drops what the peer sends until its close frame, the
-// end of its stream, a deadline or [wsCloseDrainLimit] bytes.
+// end of its stream, a deadline or [wsCloseDrainLimit] bytes. A client reads on
+// past the server's close frame to the end of the stream.
 //
 // It follows the frames for as long as it can, which is how the peer's answer is
 // recognised, starting from wherever the failure left the stream. A stream that
@@ -1445,8 +1679,15 @@ func (c *WSConn) discardInbound() {
 			if header.Opcode == wsframe.Close {
 				// Its payload is read too, so that not even the peer's goodbye
 				// is left unread when the transport is closed.
-				_, _ = io.CopyN(io.Discard, c.br, header.Length)
-				return
+				n, _ := io.CopyN(io.Discard, c.br, header.Length)
+				if !c.client {
+					return
+				}
+				// A client goes on to wait for the server to hang up, which
+				// is the end of the stream; see [WSConn.linger].
+				budget -= n
+				skip = -1
+				continue
 			}
 			skip = header.Length
 		}
@@ -1467,6 +1708,13 @@ func (c *WSConn) discardInbound() {
 // worse than the silence being checked for. A peer that has really gone
 // leaves the handler blocked in its read, so the next round finds it waiting
 // and closes the connection then.
+//
+// What the ping asks is whether the peer is still there, and anything that
+// arrives from it after the ping answers that as well as a pong does. That
+// matters for a peer part way through sending a large frame, whose pong cannot
+// go out until the frame is finished: the bytes of the frame arriving are
+// what tell the keepalive it is alive, so only a peer from which nothing at
+// all has arrived for the pong timeout is closed.
 func (c *WSConn) keepalive(ctx context.Context, interval, timeout time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1478,7 +1726,7 @@ func (c *WSConn) keepalive(ctx context.Context, interval, timeout time.Duration)
 			return
 		case <-ticker.C:
 		}
-		sent := c.lastPong.now()
+		sent := c.heard.now()
 		if err := c.Ping(ctx); err != nil {
 			return
 		}
@@ -1492,7 +1740,7 @@ func (c *WSConn) keepalive(ctx context.Context, interval, timeout time.Duration)
 			return
 		case <-wait.C:
 		}
-		if c.lastPong.last() < sent && c.reading.Load() > 0 && c.notReading.last() < sent {
+		if c.heard.last() < sent && c.reading.Load() > 0 && c.notReading.last() < sent {
 			_ = c.Close(WSStatusPolicyViolation, "the peer did not answer a ping")
 			return
 		}

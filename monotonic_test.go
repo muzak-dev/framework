@@ -49,7 +49,7 @@ func TestLongLivedConnectionsKeepTimeOnTheMonotonicClock(t *testing.T) {
 		_ = client.Close()
 	})
 	conn := newWSConn(server, nil, false, "", WSOptions{}.withDefaults())
-	if !hasMonotonicReading(conn.lastPong.epoch) {
+	if !hasMonotonicReading(conn.heard.epoch) {
 		t.Error("a websocket measures its pong deadline against the wall clock")
 	}
 }

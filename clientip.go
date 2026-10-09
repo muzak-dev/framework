@@ -78,6 +78,14 @@ type ClientIPOptions struct {
 	// writes, such as "CF-Connecting-IP" or "X-Real-IP", when that is not
 	// X-Forwarded-For. It is consulted only for a request whose peer is
 	// trusted.
+	//
+	// "Forwarded", the standard header of RFC 7239, is read as that RFC
+	// defines it: the address is the for parameter of each entry, as in
+	// for=203.0.113.9;proto=https, a quoted "[2001:db8::1]:443" included, and
+	// other parameters are skipped. An entry whose for is "unknown" or an
+	// obfuscated identifier such as "_hidden", or that has no for at all, ends
+	// the walk at the nearest proxy already passed, exactly as an unreadable
+	// address does in any other header.
 	Header string
 
 	// ConnectionIPv6Prefix is the length, in bits, of the IPv6 prefix that
@@ -112,6 +120,9 @@ type ClientIPOptions struct {
 type clientIPResolver struct {
 	trusted []netip.Prefix
 	header  string
+	// rfc7239 reports that header is Forwarded, whose entries are lists of
+	// parameters to read the address out of rather than addresses.
+	rfc7239 bool
 
 	// connIPv4Bits and connIPv6Bits are the prefix lengths the per-client
 	// connection caps group an address by, already validated.
@@ -140,6 +151,7 @@ func newClientIPResolver(opts ClientIPOptions) (*clientIPResolver, error) {
 	if resolver.header == "" {
 		resolver.header = DefaultForwardedHeader
 	}
+	resolver.rfc7239 = strings.EqualFold(resolver.header, "Forwarded")
 	var errs []error
 	if resolver.connIPv6Bits < minConnectionIPv6Prefix || resolver.connIPv6Bits > 128 {
 		errs = append(errs, fmt.Errorf("muzak: ClientIP.ConnectionIPv6Prefix is %d, but it must be between %d and 128; "+
@@ -227,10 +239,17 @@ func (r *clientIPResolver) trusts(addr netip.Addr) bool {
 // rightmost were written by the proxies nearest this server and the leftmost by
 // whoever sent the request, who may have invented them. Each trusted hop is
 // stepped over, and the first entry that is not a trusted proxy is the client.
+// An entry of the Forwarded header is a list of parameters rather than an
+// address, so it is split and read by its own pair of functions, and walked
+// the same way.
 func (r *clientIPResolver) resolve(req *http.Request) netip.Addr {
 	nearest, ok := peerAddr(req.RemoteAddr)
 	if !ok || !r.trusts(nearest) {
 		return nearest
+	}
+	split, parse := lastField, parseForwardedAddr
+	if r.rfc7239 {
+		split, parse = lastForwardedElement, parseForwardedElement
 	}
 	values := req.Header.Values(r.header)
 	hops := 0
@@ -238,11 +257,11 @@ func (r *clientIPResolver) resolve(req *http.Request) netip.Addr {
 		rest := values[i]
 		for rest != "" {
 			var field string
-			field, rest = lastField(rest)
+			field, rest = split(rest)
 			if hops++; hops > maxForwardedHops {
 				return nearest
 			}
-			addr, parsed := parseForwardedAddr(field)
+			addr, parsed := parse(field)
 			if !parsed {
 				// A chain with an unreadable entry cannot be walked any
 				// further: an obfuscated identifier or a mangled address hides
@@ -290,6 +309,155 @@ func parseForwardedAddr(field string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return normalizeAddr(addr), true
+}
+
+// lastForwardedElement splits the rightmost entry off a Forwarded header
+// value, the way [lastField] does for a plain list, except that a comma inside
+// a quoted string is part of the string rather than the end of an entry.
+//
+// That distinction is what keeps a proxy's own entry whole. A proxy may quote
+// something the client chose into a parameter of the entry it appends, its
+// Host header as host="..." for instance, and a split on every comma would
+// let that text end the proxy's entry early and present the rest as a for of
+// the client's choosing. Read from the right, the proxy's entry comes first
+// and is well formed, so its quotes pair up; a quote the client left open to
+// the left of it is only reached once that entry is done, and an entry that
+// never closes its quote fails to parse rather than being believed.
+func lastForwardedElement(value string) (element, rest string) {
+	quoted := false
+	for i := len(value) - 1; i >= 0; i-- {
+		switch value[i] {
+		case '"':
+			// Met from the right, a quote outside a string closes one, and a
+			// quote inside one opens it unless it is escaped.
+			if !quoted || !escapedAt(value, i) {
+				quoted = !quoted
+			}
+		case ',':
+			if !quoted {
+				return strings.TrimSpace(value[i+1:]), value[:i]
+			}
+		}
+	}
+	return strings.TrimSpace(value), ""
+}
+
+// escapedAt reports whether the byte at i is escaped by a quoted-pair, which it
+// is when an odd number of backslashes run up to it: each pair of them is one
+// escaped backslash, and only a backslash left over escapes what follows.
+func escapedAt(value string, i int) bool {
+	run := 0
+	for i--; i >= 0 && value[i] == '\\'; i-- {
+		run++
+	}
+	return run%2 == 1
+}
+
+// parseForwardedElement reads the address out of one entry of a Forwarded
+// header: the node its for parameter names, with any port and the brackets an
+// IPv6 address carries removed.
+//
+// An entry that is not well formed, has no for or names it twice is
+// unreadable, and so is a for of "unknown" or an obfuscated identifier such as
+// "_hidden", since neither is an address. The walk stops at the nearest
+// trusted hop for any of them, as it does for an unreadable entry of a plain
+// list, because whatever is to its left can no longer be attributed.
+func parseForwardedElement(element string) (netip.Addr, bool) {
+	node, ok := forwardedFor(element)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	// The RFC brackets an IPv6 address whether or not a port follows, and a
+	// bracketed address with no port is not something parseForwardedAddr
+	// reads, so the brackets come off first. An address with a port goes
+	// through as it is, and so does an unbracketed one, which some proxies
+	// write and which is not ambiguous without a port.
+	if len(node) > 2 && node[0] == '[' && node[len(node)-1] == ']' {
+		node = node[1 : len(node)-1]
+	}
+	return parseForwardedAddr(node)
+}
+
+// forwardedFor returns the value of the for parameter of one Forwarded entry,
+// unquoted. Parameter names are compared without regard to case, as the RFC
+// says they are, and the other parameters are skipped. It reports false for an
+// entry that is not well formed, has no for, or has more than one, which the
+// RFC forbids and which leaves no way to tell which was written by whom.
+func forwardedFor(element string) (string, bool) {
+	var node string
+	found := false
+	for element != "" {
+		pair, rest, ok := nextForwardedPair(element)
+		if !ok {
+			return "", false
+		}
+		element = rest
+		name, value, _ := strings.Cut(pair, "=")
+		if !strings.EqualFold(strings.TrimSpace(name), "for") {
+			continue
+		}
+		if found {
+			return "", false
+		}
+		node, ok = unquoteForwardedValue(strings.TrimSpace(value))
+		if !ok {
+			return "", false
+		}
+		found = true
+	}
+	return node, found
+}
+
+// nextForwardedPair splits the first parameter off a Forwarded entry, where a
+// semicolon inside a quoted string is part of the string. It reports false for
+// a quoted string that is never closed.
+func nextForwardedPair(element string) (pair, rest string, ok bool) {
+	quoted := false
+	for i := 0; i < len(element); i++ {
+		switch c := element[i]; {
+		case quoted && c == '\\':
+			// A quoted-pair: whatever follows the backslash is part of the
+			// string, a quote included.
+			i++
+		case c == '"':
+			quoted = !quoted
+		case c == ';' && !quoted:
+			return element[:i], element[i+1:], true
+		}
+	}
+	return element, "", !quoted
+}
+
+// unquoteForwardedValue returns a parameter value as text: a token as it is,
+// and a quoted string without its quotes and with its quoted-pairs resolved.
+// A value that is neither, one with a quote or a backslash outside a quoted
+// string or a quote left unescaped inside one, is refused.
+func unquoteForwardedValue(value string) (string, bool) {
+	if !strings.HasPrefix(value, `"`) {
+		return value, !strings.ContainsAny(value, `"\`)
+	}
+	if len(value) < 2 || value[len(value)-1] != '"' {
+		return "", false
+	}
+	inner := value[1 : len(value)-1]
+	if !strings.ContainsAny(inner, `"\`) {
+		return inner, true
+	}
+	var unquoted strings.Builder
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		switch c {
+		case '"':
+			return "", false
+		case '\\':
+			if i++; i == len(inner) {
+				return "", false
+			}
+			c = inner[i]
+		}
+		unquoted.WriteByte(c)
+	}
+	return unquoted.String(), true
 }
 
 // peerAddr parses the address net/http recorded for the connection, which

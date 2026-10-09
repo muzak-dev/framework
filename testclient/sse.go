@@ -166,9 +166,10 @@ func (s *SSEStream) Decode[T any]() T {
 	return value
 }
 
-// LastEventID returns the identifier of the last event that carried one, which
-// is what a test resuming a stream sends back with
-// testclient.Header("Last-Event-ID", id).
+// LastEventID returns the identifier of the last complete event that carried
+// one, which is what a test resuming a stream sends back with
+// testclient.Header("Last-Event-ID", id). An event the stream cut off part way
+// leaves it where it was; see [muzak.SSEReader.LastEventID].
 func (s *SSEStream) LastEventID() string { return s.reader.LastEventID() }
 
 // Close ends the stream, which is what a test does to check that the handler

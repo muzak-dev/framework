@@ -71,7 +71,9 @@ func (in *everyRule) Validate(v *Validation) {
 	v.Slice(&in.ManyItems).MaxItems(1)
 	v.Slice(&in.Repeated).Unique()
 	v.Time(&in.Before).Before(epoch)
-	v.Time(&in.After).After(time.Now().Add(time.Hour))
+	// A fixed bound rather than one read off the clock: the message quotes it,
+	// and two requests a second apart would otherwise be told different things.
+	v.Time(&in.After).After(epoch.AddDate(1000, 0, 0))
 	v.Time(&in.InBetween).Between(epoch, epoch.Add(time.Hour))
 }
 

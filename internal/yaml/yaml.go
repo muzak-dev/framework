@@ -23,6 +23,10 @@ const MaxDepth = 100
 // far above what sharing a block of defaults between locales needs, which is
 // a few hundred values, and far below what a load can afford to allocate for
 // a file the framework did not write.
+//
+// It counts values, not bytes. A value copied under a long key costs that key
+// again in every dotted path the i18n package stores it under, so what a tree
+// costs once flattened is bounded there, separately, rather than here.
 const MaxAliasNodes = 100_000
 
 // Parse decodes a document into a tree.

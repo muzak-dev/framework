@@ -304,6 +304,35 @@ func TestWebSocketRefusesARepeatedHandshakeHeader(t *testing.T) {
 	}
 }
 
+func TestWebSocketAcceptKeyRefusesAnOversizedKeyBeforeDecodingIt(t *testing.T) {
+	// This test is not parallel: it measures what the whole process allocates,
+	// so anything else running at the same time would be counted here.
+	//
+	// A key is sixteen bytes of base64, which is twenty four characters, so its
+	// length alone says whether a header could be one. Decoding first would let
+	// anyone who reaches the route, which on a public route is anyone at all,
+	// buy an allocation three quarters the size of whatever key it sent, up to
+	// the server's header limit, on every handshake it attempts.
+	key := strings.Repeat("A", 512<<10)
+	const attempts = 8
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range attempts {
+		if _, err := wsAcceptKey(key); err == nil {
+			t.Fatal("a key of half a mebibyte was accepted")
+		}
+	}
+	runtime.ReadMemStats(&after)
+
+	// Decoding the key would cost some three megabytes across the attempts.
+	// Refusing it on its length costs the error and nothing else.
+	const tolerated = 256 << 10
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > tolerated {
+		t.Errorf("refusing %d oversized keys allocated %d bytes, want less than %d", attempts, allocated, tolerated)
+	}
+}
+
 func TestWebSocketCrossSiteHijackingIsRefused(t *testing.T) {
 	t.Parallel()
 	// A WebSocket handshake is not subject to the same-origin policy and is

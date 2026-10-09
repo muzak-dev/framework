@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"unicode/utf8"
 
 	"muzak.dev/framework/internal/radix"
@@ -284,10 +283,11 @@ type App struct {
 
 	ctxPool sync.Pool
 
-	// server is stored atomically because Addr and Shutdown are documented to
-	// be callable from a different goroutine than the one running the server,
-	// which is exactly what a caller asking for port ":0" has to do.
-	server atomic.Pointer[serverRunner]
+	// server records the run in progress, and the one before it for Addr. It
+	// is guarded because Addr and Shutdown are documented to be callable from
+	// a different goroutine than the one running the server, which is exactly
+	// what a caller asking for port ":0" has to do; see [runState].
+	server runState
 }
 
 // buildState collects everything discovered while walking the router tree, so
@@ -1011,7 +1011,11 @@ func (a *App) fail(c *Context, err error) {
 		c.w.Header()["Location"] = location
 	}
 	if body == nil {
-		c.w.WriteHeader(status)
+		// Clamped here as writeResponse clamps a status sent with a body: a
+		// renderer that forgot to set one returns 0, and net/http panics on a
+		// code outside 100 to 999 rather than writing it, which would cost the
+		// client its connection instead of answering it.
+		c.w.WriteHeader(clampStatus(status))
 		return
 	}
 	c.status = status

@@ -65,6 +65,56 @@ jobs:
           go build ./...
           go vet ./...
 
+  # The Linux job never runs the code that only Windows reaches: a frontend
+  # treating a backslash as a separator and refusing 8.3 short names, os.Root
+  # on NTFS, a file that cannot be removed while it is open, a network stack
+  # that resets a connection where Linux closes it, and a coarser timer under
+  # every deadline. This job is the only place any of that is exercised.
+  #
+  # A separate job rather than a matrix over the one above, so the check named
+  # "test" keeps its name and a branch protection rule requiring it still
+  # matches. Coverage is gated on Linux alone: the number is a property of the
+  # code, and a second gate would only disagree with the first about which
+  # platform-specific branch counts.
+  test-windows:
+    name: test (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      # Git on the hosted Windows image rewrites line endings on checkout. A
+      # module fetched through the proxy keeps the bytes as committed, so that
+      # is what the tests should read; the YAML parser's CRLF handling is
+      # covered by a test of its own rather than by this accident.
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
+
+      # The race detector needs cgo on Windows, which the hosted image's MinGW
+      # gcc provides.
+      - name: Test under the race detector
+        run: go test ./... -race -count=1
+
+      - name: Build the example
+        working-directory: example
+        run: |
+          go build ./...
+          go vet ./...
+
   lint:
     name: lint
     runs-on: ubuntu-latest

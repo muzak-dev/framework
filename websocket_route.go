@@ -96,8 +96,19 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 // field: whatever a narrower scope leaves at its zero value it inherits, so a
 // route that raises only the read limit keeps the application's origin policy.
 //
-// The zero value is usable and safe: messages are bounded, writes are bounded,
-// and a cross-origin handshake is refused.
+// The zero value is usable: messages are bounded, writes are bounded, a peer
+// that stops answering pings is closed, and a cross-origin handshake is
+// refused.
+//
+// It does not bound how long a connection lasts. A peer that answers every
+// ping and sends nothing is alive as far as a keepalive can tell, and with
+// MaxLifetime unset nothing ends it, so MaxConnections divided by
+// MaxConnectionsPerIP is how many client addresses can hold every slot: 1024 /
+// 64 = 16 with the defaults, sixteen IPv4 addresses or a single IPv6 /52 at the
+// default /56 grouping. A route that clients one does not control can open is
+// worth a guard that authenticates them, a MaxLifetime in minutes, and
+// [ClientIPOptions.ConnectionIPv6Prefix] at 48, as [SSEOptions] describes for
+// event streams.
 type WSOptions struct {
 	// ReadLimit is the largest message accepted, in bytes, defaulting to
 	// [DefaultWSReadLimit]. A message that would exceed it is refused with
@@ -144,8 +155,8 @@ type WSOptions struct {
 	//
 	// MaxConnections alone bounds the process; it does not bound one client
 	// within it. A WebSocket handshake needs no Origin header at all to
-	// succeed - only a browser sends one, and the origin check exists to stop
-	// browser-based hijacking, not to authenticate a client - so a single
+	// succeed (only a browser sends one, and the origin check exists to stop
+	// browser-based hijacking, not to authenticate a client), so a single
 	// unauthenticated, non-browser client can open connections in a tight
 	// loop and hold every one of MaxConnections' slots itself, leaving 503
 	// for everyone else until it disconnects. This is what stops that: no
@@ -176,6 +187,11 @@ type WSOptions struct {
 	// stops sending, and reads and drops what the peer is still sending, at
 	// most 1 MiB of it, until the peer's close frame, the end of its stream or
 	// this period, whichever comes first. A negative value closes immediately.
+	//
+	// A connection opened with [WSDial] uses it to wait for the server to
+	// hang up, which RFC 6455 asks the server to do first: once the close
+	// frames have crossed, the client reads on to the end of the stream for up
+	// to this long before closing its own end.
 	CloseGracePeriod time.Duration
 
 	// PingInterval is how often the server pings a connection, defaulting to
@@ -189,6 +205,13 @@ type WSOptions struct {
 	// closed for an unanswered ping only when the handler was reading during
 	// it. A handler that only ever writes is never closed by keepalive, and
 	// should ping by hand with [WSConn.Ping] if it wants that.
+	//
+	// Anything that arrives from the peer after a ping answers it as well as a
+	// pong would, because what is being asked is whether the peer is still
+	// there. A peer part way through sending a large message cannot send its
+	// pong until the frame it is in is finished, and is kept alive by the
+	// bytes of that frame arriving; one that stops sending part way through is
+	// closed once a pong timeout passes with nothing at all from it.
 	PingInterval time.Duration
 
 	// MaxLifetime is the longest a connection stays open, unset by default,
@@ -260,7 +283,11 @@ type WSOptions struct {
 	// with nothing after it: a value carrying credentials, a path, a query or
 	// a fragment is not the server's own origin however its host reads, and a
 	// handshake with more than one Origin header is refused as malformed. An
-	// entry of this list is compared with the value exactly as it arrived.
+	// entry of this list is compared with the value as it arrived, without
+	// regard to case. An entry that could never match, one with a trailing
+	// slash, a path, a pattern other than "*" or the scheme's default port, is
+	// a build error, and so is "null", which a sandboxed iframe sends and so
+	// any page can present.
 	//
 	// The server's own origin is any whose host is the request's Host, which is
 	// whatever the client wrote there. That is enough for a browser that
@@ -280,7 +307,9 @@ type WSOptions struct {
 
 	// AllowedHosts lists the Host header values this route answers to, such as
 	// "app.example.com" or "app.example.com:8443", compared without regard to
-	// case and with any port written as the client wrote it. It is unset by
+	// case and with any port written as the client wrote it. An entry that
+	// carries a scheme, a path, credentials or a pattern can never equal a Host
+	// header and is a build error. It is unset by
 	// default, which leaves the server's own origin to be any whose host is the
 	// request's own Host, as described on [WSOptions.AllowedOrigins].
 	//
@@ -306,7 +335,24 @@ type WSOptions struct {
 	// authenticated by a token the client has to present explicitly, never by
 	// a cookie, since a browser attaches cookies to a cross-origin handshake
 	// without being asked.
+	//
+	// Set on the application or a router, it covers every route beneath, and
+	// a route or router beneath that does need the check turns it back on with
+	// EnforceOriginCheck.
 	InsecureSkipOriginCheck bool
+
+	// EnforceOriginCheck turns the origin check back on for a router or a
+	// route beneath a scope that set InsecureSkipOriginCheck, so that one
+	// cookie-authenticated route is not left open to every origin because the
+	// rest of the application authenticates by token. It is needed only for
+	// that: the check is on by default, and a false value here changes
+	// nothing, which is what keeps an option that relaxes security from being
+	// the one that a narrower scope can never take back.
+	//
+	// A scope beneath can set InsecureSkipOriginCheck again, and the narrowest
+	// scope that set either wins. One that sets both at once keeps the check,
+	// because that is the safe reading of a contradiction.
+	EnforceOriginCheck bool
 }
 
 // overlay layers a narrower scope's options on top of a wider one's, leaving
@@ -354,8 +400,15 @@ func (o WSOptions) overlay(over WSOptions) WSOptions {
 	if over.AllowOriginFunc != nil {
 		o.AllowOriginFunc = over.AllowOriginFunc
 	}
-	if over.InsecureSkipOriginCheck {
-		o.InsecureSkipOriginCheck = true
+	// The two origin switches are one setting with three states, kept as two
+	// bools so that InsecureSkipOriginCheck reads as it always has. Whichever
+	// the narrower scope set replaces what the wider one chose, and the check
+	// wins a scope that set both.
+	switch {
+	case over.EnforceOriginCheck:
+		o.InsecureSkipOriginCheck, o.EnforceOriginCheck = false, true
+	case over.InsecureSkipOriginCheck:
+		o.InsecureSkipOriginCheck, o.EnforceOriginCheck = true, false
 	}
 	return o
 }
@@ -379,6 +432,12 @@ func (o WSOptions) withDefaults() WSOptions {
 	o.PingInterval = orDefaultDuration(o.PingInterval, DefaultWSPingInterval)
 	if o.MaxLifetime < 0 {
 		o.MaxLifetime = 0
+	}
+	if o.EnforceOriginCheck {
+		// The application's own options are never overlaid on anything, so a
+		// contradiction there is settled here, the same way overlay settles
+		// one in a narrower scope.
+		o.InsecureSkipOriginCheck = false
 	}
 	if o.PingInterval > 0 {
 		if o.PongTimeout <= 0 {
@@ -420,6 +479,15 @@ func WithWebSocket(opts WSOptions) SharedOption {
 // rejects a peer on its own terms. Any other error closes the connection with
 // [WSStatusInternalError] and is logged, with nothing about it disclosed to the
 // peer.
+//
+// An error that is the handler's own context ending the conversation is not a
+// failure, and is logged at debug level rather than as one. That is an error
+// from a read, a write or a wait on conn that the context passed to it ended,
+// such as a per-read deadline that bounds how long the peer may stay silent,
+// or the error of ctx.Context() itself once it has ended. The peer has been
+// told already when the connection ended on such a read or write; one still
+// open is closed with [WSStatusGoingAway]. A deadline that ran out anywhere
+// else, on a query for instance, is still a failure.
 //
 // ctx.Context() ends when the connection does, whichever side ends it and
 // whether or not the handler is reading at the time, with the connection's
@@ -552,6 +620,9 @@ func (rt *Route) resolveWebSocket(in inherited) error {
 			return fmt.Errorf("muzak: WS %s: subprotocol %q is not a valid token", rt.Path, wsShorten(name))
 		}
 	}
+	if err := checkWSOriginLists(rt.Path, rt.websocket.opts); err != nil {
+		return err
+	}
 	if limits := rt.websocket.opts.MessageLimits; len(limits) > 0 && !rt.skipRateLimit {
 		messages, err := newRateLimitConfig(rt.rateLimitOpts, limits)
 		if err != nil {
@@ -585,6 +656,41 @@ func (rt *Route) documentRefusals(docs ...responseDoc) {
 			rt.responses = append(rt.responses, doc)
 		}
 	}
+}
+
+// checkWSOriginLists reports every entry of a route's AllowedOrigins and
+// AllowedHosts that can never do what it appears to, joined into one error.
+//
+// The origin list is held to the rules [CORSOptions.AllowedOrigins] is, for
+// the same reasons: an entry with a trailing slash, a path, a pattern or the
+// scheme's default port never equals the Origin a browser sends, so it lets
+// nobody in and shows itself only as a browser refused, and "null" lets in
+// every page that arranges to send it, which for a WebSocket means a
+// connection opened with the visitor's cookies from anywhere. The single entry
+// "*", which allows any origin, is the one pattern the list documents. Case is
+// not a mistake here, since the list is compared without regard to it.
+//
+// A host is compared with the Host header, which never carries a scheme, a
+// path, credentials or a pattern, so an entry holding any of them never
+// matches either.
+func checkWSOriginLists(path string, opts WSOptions) error {
+	var errs []error
+	for _, entry := range opts.AllowedOrigins {
+		if entry == "*" {
+			continue
+		}
+		if err := checkOriginEntry("WS "+path+": AllowedOrigins entry", entry, true); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, host := range opts.AllowedHosts {
+		if host == "" || strings.ContainsAny(host, "/@*?# \t") {
+			errs = append(errs, fmt.Errorf("muzak: WS %s: AllowedHosts entry %q never matches, because it is compared "+
+				"with the Host header, which is a host and an optional port such as %q and nothing else",
+				path, host, "app.example.com:8443"))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // wsOriginPolicy builds the function that decides which browser origins may
@@ -690,13 +796,6 @@ func (a *App) acceptWebSocket(c *Context, cfg *wsConfig) (*WSConn, error) {
 	}
 	if cfg.messages != nil {
 		conn.messages = &wsMessageLimiter{cfg: cfg.messages, key: messageKey, logger: c.logger, requestID: c.RequestID()}
-	}
-	// The request's cancellation is watched once here rather than once per
-	// message, and it is watched before anything else can touch the
-	// connection, so the keepalive below sees a connection already arranged.
-	conn.watch(c.Context())
-	if cfg.opts.PingInterval > 0 {
-		go conn.keepalive(c.Context(), cfg.opts.PingInterval, cfg.opts.PongTimeout)
 	}
 	return conn, nil
 }
@@ -883,14 +982,23 @@ func wsUpgradeHeaders(h http.Header) {
 func wsAcceptKey(key string) (string, error) {
 	// Sixteen bytes of base64 are exactly twenty four characters, so the length
 	// is checked before anything is decoded and a header of any size cannot
-	// buy so much as an allocation.
-	raw, err := base64.StdEncoding.DecodeString(key)
-	if len(key) != 24 || err != nil || len(raw) != 16 {
-		return "", NewHTTPError(http.StatusBadRequest,
-			"the Sec-WebSocket-Key header is missing or is not sixteen base64 encoded bytes")
+	// buy so much as an allocation. Decoding first would hand a stranger a
+	// buffer three quarters the size of whatever it sent, up to the header
+	// limit, on every handshake it attempted.
+	if len(key) != 24 {
+		return "", errWSBadKey()
+	}
+	if raw, err := base64.StdEncoding.DecodeString(key); err != nil || len(raw) != 16 {
+		return "", errWSBadKey()
 	}
 	sum := sha1.Sum([]byte(key + wsGUID)) //nolint:gosec // see the comment above
 	return base64.StdEncoding.EncodeToString(sum[:]), nil
+}
+
+// errWSBadKey reports a Sec-WebSocket-Key that is not one.
+func errWSBadKey() error {
+	return NewHTTPError(http.StatusBadRequest,
+		"the Sec-WebSocket-Key header is missing or is not sixteen base64 encoded bytes")
 }
 
 // wsSubprotocol picks the subprotocol to answer with, honouring the client's
@@ -1066,6 +1174,17 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 	conn.cancelOnEnd(cancel)
 	c.r = c.r.WithContext(handlerCtx)
 
+	// The context watched is the handler's own rather than the request's it
+	// derives from. It still ends when the request does, and it is the one a
+	// handler passes to nearly every read and write it makes, which is what
+	// lets those skip an arrangement of their own; watching the request's
+	// context instead matched no operation a handler ever made. It is watched
+	// before the keepalive starts, so the pings see it arranged too.
+	conn.watch(handlerCtx)
+	if opts := c.route.websocket.opts; opts.PingInterval > 0 {
+		go conn.keepalive(handlerCtx, opts.PingInterval, opts.PongTimeout)
+	}
+
 	// The connection's slot is returned only once its transport is closed, and
 	// this is the first deferred call so that it runs after the closing one
 	// below, including when that one is re-raising a panic. Closing is not
@@ -1098,11 +1217,24 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 
 	if err := call(); err != nil {
 		var closed *WSCloseError
-		if errors.As(err, &closed) {
+		switch {
+		case errors.As(err, &closed):
 			// The handler either reported the closure it read or chose one of
 			// its own, and either way it has already said what to send.
 			status, reason = closed.Status, closed.Reason
-		} else {
+		case wsEndedByContext(err, handlerCtx):
+			// The handler's own context ended the conversation: a deadline it
+			// gave its peer passed, it cancelled an operation, or the
+			// connection ended and took the context with it. That is how a
+			// connection ends rather than a failure, and the peer has usually
+			// been told already, but it is worth a line for anyone asking
+			// why one stopped.
+			status, reason = wsContextClosure(err, false)
+			a.logger.DebugContext(c.Context(), "muzak: a websocket connection ended",
+				slog.String("route", c.route.Path),
+				slog.String(RequestIDKey, c.RequestID()),
+				slog.String("reason", err.Error()))
+		default:
 			// Nothing derived from the error reaches the peer: it may name a
 			// query, a path or a driver failure, none of which is theirs.
 			status, reason = WSStatusInternalError, "the handler failed"
@@ -1115,4 +1247,23 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 	// The handshake is long since answered, so there is no response left for
 	// the router to write.
 	return nil
+}
+
+// wsEndedByContext reports whether an error a handler returned is its own
+// context ending the conversation rather than something going wrong.
+//
+// Two shapes count. One is an error from a read, a write or a wait on the
+// connection that the context passed to it ended, which is what a handler
+// that bounds how long its peer may stay silent returns. The other is the
+// handler's own context's error once that context has ended, which is what a
+// handler waiting on the context rather than on a read returns. A deadline that
+// ran out anywhere else, on a query the handler made for instance, is neither,
+// and is reported as the failure it is.
+func wsEndedByContext(err error, handlerCtx context.Context) bool {
+	var ended *wsContextError
+	if errors.As(err, &ended) {
+		return true
+	}
+	ctxErr := handlerCtx.Err()
+	return ctxErr != nil && errors.Is(err, ctxErr)
 }

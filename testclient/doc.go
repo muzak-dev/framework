@@ -24,7 +24,9 @@
 //
 // The server, its listener and the application's lifecycle components are
 // started when the client is created and released through the test's cleanup,
-// so a test never has to remember to close anything. A cookie jar is enabled
+// so a test never has to remember to close anything. The server is the one
+// App.Run would start, with the application's own ServerOptions, and the
+// cleanup shuts it down as App.Shutdown does. A cookie jar is enabled
 // by default, which lets a login followed by an authenticated call work the
 // way it would in a browser.
 package testclient

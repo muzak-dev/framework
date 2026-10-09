@@ -91,12 +91,11 @@ func TestEmptyInputRouteKeepsTheConnectionAfterAnUnreadBody(t *testing.T) {
 	}
 }
 
-// Over HTTP/1 net/http discards a request body when the response head is first
-// written, and an event stream commits its head before the handler runs, so
-// there a handler can read none of it whatever the framework does. Over HTTP/2
-// the body stays readable, which is what this stands in for by serving the
-// request without a server in between: the framework must not have read the
-// front of it away.
+// An event stream commits its head before the handler runs. This serves the
+// request without a server in between, which checks only that the framework
+// did not read the front of the body away; that net/http does not drop it when
+// the head goes out over HTTP/1 is checked over a real connection by
+// TestSSEHandlerReadsItsOwnBodyOverHTTP1.
 func TestEmptyInputEventStreamLeavesTheWholeBodyToTheHandler(t *testing.T) {
 	t.Parallel()
 	app := New(quietOptions())

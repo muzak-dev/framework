@@ -371,7 +371,7 @@ func TestAddrIsEmptyBeforeAndAfterConstruction(t *testing.T) {
 	}
 	// A runner whose listener has been cleared reports nothing rather than
 	// dereferencing a nil listener.
-	app.server.Store(&serverRunner{})
+	app.server.last = &serverRunner{}
 	if got := app.Addr(); got != "" {
 		t.Errorf("Addr = %q with no listener, want empty", got)
 	}

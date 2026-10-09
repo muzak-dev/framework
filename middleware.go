@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 	"uuid"
 )
 
@@ -388,6 +393,15 @@ type CORSOptions struct {
 	// AllowedOrigins lists the exact origins permitted, such as
 	// "https://app.example.com". The single entry "*" allows any origin and
 	// is rejected outright when AllowCredentials is also set.
+	//
+	// Each entry is compared exactly with the Origin header, which a browser
+	// writes as scheme://host[:port] in lower case, without the scheme's
+	// default port and with nothing after it. An entry that cannot match one,
+	// such as "https://app.example.com/", "https://App.example.com:443" or
+	// "*.example.com", is reported when the application is built, with the
+	// spelling to use instead; subdomains are matched in AllowOriginFunc. The
+	// entry "null" is refused outright: it is the origin of a sandboxed iframe
+	// or a file: page, so any page can send it.
 	AllowedOrigins []string
 	// AllowOriginFunc decides dynamically whether an origin is permitted. It
 	// is consulted only when AllowedOrigins does not already allow the
@@ -426,17 +440,40 @@ type CORSOptions struct {
 // Access-Control-Allow-Origin an allowed origin would get: a shared cache
 // that stored one of them without the Vary would hand it to the allowed
 // origin's browser, which would then refuse to read it. Only a wildcard
-// policy, whose answer to every origin is the same "*", leaves it out. Every
+// policy leaves it out, and it does so by answering every request the same
+// way: "Access-Control-Allow-Origin: *" and the exposed headers go on every
+// response, one to a request with no Origin included, so that a copy a cache
+// kept from a plain navigation still serves a cross-origin fetch. Every
 // OPTIONS response varies on Access-Control-Request-Method, which decides
 // whether it is answered as a preflight, and a preflight answer on
 // Access-Control-Request-Headers as well.
 //
-// The error returned describes a policy that cannot be served safely. A valid
-// policy returns a nil error.
+// The error returned describes a policy that cannot be served safely or as
+// written: a wildcard with credentials, which is [ErrCORSWildcardCredentials],
+// and every AllowedOrigins entry that can never match, joined into one. A
+// valid policy returns a nil error.
 func CORS(opts CORSOptions) (Middleware, error) {
 	wildcard := slices.Contains(opts.AllowedOrigins, "*")
+	var errs []error
 	if wildcard && opts.AllowCredentials {
-		return nil, ErrCORSWildcardCredentials
+		errs = append(errs, ErrCORSWildcardCredentials)
+	}
+	for _, entry := range opts.AllowedOrigins {
+		if entry == "*" {
+			continue
+		}
+		if err := checkCORSOrigin(entry); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	switch len(errs) {
+	case 0:
+	case 1:
+		// Returned as itself rather than joined, so that a caller comparing
+		// with ErrCORSWildcardCredentials directly still recognises it.
+		return nil, errs[0]
+	default:
+		return nil, errors.Join(errs...)
 	}
 	if len(opts.AllowedMethods) == 0 {
 		opts.AllowedMethods = []string{
@@ -486,11 +523,28 @@ func CORS(opts CORSOptions) (Middleware, error) {
 				}
 			}
 
+			// A wildcard policy answers every request the same way, with or
+			// without an Origin, because that is the only way its response
+			// does not depend on Origin and so the only way leaving Origin out
+			// of Vary is true. A response kept by a browser or a shared cache
+			// from a request with no Origin, a navigation or a script tag, is
+			// otherwise handed to a later cross-origin fetch without the
+			// header that fetch needs. A wildcard can only be served without
+			// credentials, which CORS refused to be built with above.
+			if wildcard {
+				header.Set("Access-Control-Allow-Origin", "*")
+				if exposeHeaders != "" {
+					header.Set("Access-Control-Expose-Headers", exposeHeaders)
+				}
+			}
+
 			origin := r.Header.Get("Origin")
 			if origin == "" || !allowed(origin) {
 				// Same-origin requests and denied origins are served without
-				// any CORS header, which is what makes the browser refuse to
-				// expose the response.
+				// any CORS header of a policy that names its origins, which is
+				// what makes the browser refuse to expose the response. A
+				// request with no Origin is not a preflight, whatever else it
+				// carries, so it is refused as one under any policy.
 				if preflight {
 					w.WriteHeader(http.StatusForbidden)
 					return
@@ -499,18 +553,14 @@ func CORS(opts CORSOptions) (Middleware, error) {
 				return
 			}
 
-			// A wildcard can only be served without credentials, which CORS
-			// refused to be built with above.
-			if wildcard {
-				header.Set("Access-Control-Allow-Origin", "*")
-			} else {
+			if !wildcard {
 				header.Set("Access-Control-Allow-Origin", origin)
+				if exposeHeaders != "" {
+					header.Set("Access-Control-Expose-Headers", exposeHeaders)
+				}
 			}
 			if opts.AllowCredentials {
 				header.Set("Access-Control-Allow-Credentials", "true")
-			}
-			if exposeHeaders != "" {
-				header.Set("Access-Control-Expose-Headers", exposeHeaders)
 			}
 			if preflight {
 				header.Set("Access-Control-Allow-Methods", allowMethods)
@@ -524,6 +574,93 @@ func CORS(opts CORSOptions) (Middleware, error) {
 	}, nil
 }
 
+// checkCORSOrigin reports an [CORSOptions.AllowedOrigins] entry that can never
+// do what it appears to, with what to write instead.
+func checkCORSOrigin(entry string) error {
+	return checkOriginEntry("CORS origin", entry, false)
+}
+
+// checkOriginEntry reports an allowed-origin entry that can never do what it
+// appears to, with what to write instead. It serves [CORSOptions] and
+// [WSOptions] alike, because both compare their lists with the Origin header a
+// browser sends; subject names the entry in the message, and foldCase says
+// whether the list is compared without regard to case, as a WebSocket route's
+// is, so that a difference of case alone is no mistake there.
+//
+// A browser serializes an origin as a scheme and a host with any port that is
+// not the scheme's default, lowercased, with nothing after them. An entry
+// written any other way, with a trailing slash, a path or ":443", never
+// matches and allows nobody, which is a mistake that only shows itself as a
+// browser refused. A pattern is the same mistake made deliberately. Case and
+// default ports are only folded for http and https, the schemes whose origins
+// a browser normalizes; another scheme, a browser extension's say, is compared
+// as written.
+//
+// "null" is the opposite mistake: it matches far more than it appears to. It
+// is the origin a sandboxed iframe, a page loaded from a file: URL and a
+// request redirected across origins all present, so any page on the internet
+// can send it, and listing it lets every one of them in.
+func checkOriginEntry(subject, entry string, foldCase bool) error {
+	const example = "https://app.example.com"
+	if strings.EqualFold(entry, "null") {
+		return fmt.Errorf("muzak: %s %q is refused, because it is what a sandboxed iframe, a file: page "+
+			"or a request redirected across origins sends, so any page can present it and listing it allows them all; "+
+			"remove it", subject, entry)
+	}
+	if strings.Contains(entry, "*") {
+		return fmt.Errorf("muzak: %s %q is a pattern, and AllowedOrigins matches whole origins only, so it "+
+			"never matches; list each origin, or allow subdomains in AllowOriginFunc by checking the scheme and that "+
+			"the host ends in a dot followed by the domain", subject, entry)
+	}
+	u, err := url.Parse(entry)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Opaque != "" {
+		return fmt.Errorf("muzak: %s %q is not an origin, which is written scheme://host[:port], such as %q",
+			subject, entry, example)
+	}
+	for i := range len(u.Host) {
+		if u.Host[i] >= utf8.RuneSelf {
+			return fmt.Errorf("muzak: %s %q never matches, because a browser sends a host in its ASCII "+
+				"form; write the host as its punycode (xn--) spelling", subject, entry)
+		}
+	}
+
+	scheme, host, port := strings.ToLower(u.Scheme), u.Hostname(), u.Port()
+	if scheme == "http" || scheme == "https" {
+		host = strings.ToLower(host)
+		if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+			port = ""
+		}
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	origin := scheme + "://" + host
+	if port != "" {
+		origin += ":" + port
+	}
+	if entry == origin || (foldCase && strings.EqualFold(entry, origin)) {
+		return nil
+	}
+	var why string
+	switch {
+	case u.User != nil:
+		why = "carries credentials"
+	case u.Path == "/":
+		why = "ends in a slash"
+	case u.Path != "":
+		why = "has a path"
+	case u.RawQuery != "" || u.ForceQuery:
+		why = "has a query"
+	case u.Fragment != "":
+		why = "has a fragment"
+	default:
+		why = "is not spelled the way a browser sends it"
+	}
+	return fmt.Errorf("muzak: %s %q %s, so it never matches the Origin header; an origin is "+
+		"scheme://host[:port] in lower case, without the scheme's default port and with nothing after it, so write %q",
+		subject, entry, why, origin)
+}
+
 // SecurityHeaders sets conservative response headers on every response.
 //
 // It sets X-Content-Type-Options to stop a browser from guessing a content
@@ -531,6 +668,30 @@ func CORS(opts CORSOptions) (Middleware, error) {
 // referrer policy that keeps paths and query strings from leaking to third
 // parties. Existing values are never overwritten, so a handler or a later
 // middleware can opt out per response.
+//
+// A response to a request that arrived over TLS also gets
+// "Strict-Transport-Security: max-age=31536000", which tells the browser to
+// use HTTPS for this host for a year, so that a visitor's next request cannot
+// be downgraded to plain HTTP on the way. It is set on nothing else: a browser
+// ignores it over plain HTTP, and a server behind a proxy that terminates TLS
+// cannot tell from the request whether the client used it, so there the proxy
+// is the place to send it. It commits only the host that has just answered
+// over TLS, since it leaves out includeSubDomains and preload, which commit
+// hosts this application does not serve and are hard to take back; set the
+// header in a handler, or in middleware installed with [App.Use], to add them
+// once every subdomain is on HTTPS, or to remove it from a host that also
+// serves plain HTTP on another port, which a browser pins along with it.
+// Requests for localhost, a name under .localhost or an address are left
+// alone, so that a development server with a local certificate does not pin
+// every other server on the developer's machine to HTTPS.
+//
+// It sets no Content-Security-Policy. A policy that restricts content cannot be
+// chosen without knowing the pages it governs, and a default one would break
+// the HTML an application serves. One limited to frame-ancestors 'none' would
+// add nothing to X-Frame-Options DENY and take something away: a browser
+// prefers frame-ancestors, so a handler that relaxed X-Frame-Options to
+// SAMEORIGIN for one page would find itself overruled. A page that wants a
+// policy sets one of its own, as the documentation's pages do.
 func SecurityHeaders() Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -538,9 +699,29 @@ func SecurityHeaders() Middleware {
 			setIfAbsent(header, "X-Content-Type-Options", "nosniff")
 			setIfAbsent(header, "X-Frame-Options", "DENY")
 			setIfAbsent(header, "Referrer-Policy", "strict-origin-when-cross-origin")
+			if r.TLS != nil && !localHost(r.Host) {
+				setIfAbsent(header, "Strict-Transport-Security", "max-age=31536000")
+			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// localHost reports whether a request's Host names this machine or an address
+// rather than a deployment: localhost, a name under .localhost, or an IP
+// literal. A browser applies Strict-Transport-Security to every port of a
+// host, so pinning localhost would turn every other development server on it
+// into an HTTPS one, and it ignores the header from an address in any case.
+func localHost(host string) bool {
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	_, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	return err == nil
 }
 
 // setIfAbsent sets a header only when it has no value yet.

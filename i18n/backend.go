@@ -141,7 +141,9 @@ func (b *Simple) lookupEntry(locale, key string) (*entry, bool) {
 // rather than replace one another. Only a leaf already present is overwritten.
 //
 // A tree that cannot be stored as one is refused, and the locale is left as it
-// was: see [flatten] for what that covers.
+// was: see [flatten] for what that covers. So is a locale that would cost more
+// than [maxFlattenedBytes] to hold once merged, which is reckoned before any of
+// it is built.
 func (b *Simple) Store(locale string, tree map[string]any) error {
 	merged := map[string]any{}
 	if existing, known := b.trees[locale]; known {
@@ -149,6 +151,9 @@ func (b *Simple) Store(locale string, tree map[string]any) error {
 	}
 	mergeTree(merged, tree)
 
+	if flatSize(0, merged, 0, maxFlattenedBytes) > maxFlattenedBytes {
+		return tooLargeError(fmt.Sprintf("the translations of %q", locale))
+	}
 	flat := map[string]*entry{}
 	if err := flatten(locale, "", merged, flat, 0); err != nil {
 		return err
@@ -196,6 +201,86 @@ func mergeTree(into, from map[string]any) {
 // costs a dotted path holding every key above it, so a file of a few dozen
 // kilobytes that nests that deep is retained as many megabytes.
 const maxTreeDepth = yaml.MaxDepth
+
+// maxFlattenedBytes bounds what one locale, and the locales one file holds
+// between them, may cost to hold once they are flattened.
+//
+// Flattening spells every key out in full, so a key is paid for again under
+// every value beneath it, and a text is compiled again for every alias that
+// copies it. The YAML reader bounds how many values aliases copy, not how long
+// the paths above them are: a 4.5 KB file that wrote a 4 KB key above 78,000
+// aliased values kept inside that budget and was retained as about 394 MB, and
+// the cost grew with the length of the key. JSON has no aliases and pays the
+// same way for a long key above many short values, which is quadratic in the
+// size of the file. The bound is reckoned by [flatSize] before anything is
+// built, and it is far above any real locale: the one this package ships costs
+// under a tenth of a megabyte.
+const maxFlattenedBytes = 64 << 20
+
+// The charges [flatSize] makes besides the bytes of a path and a text. They
+// are what holding an entry costs, measured on the locale this package ships,
+// so that the bound is close to the memory it protects.
+const (
+	// entryCost is what an entry costs beyond its path and its text: the entry
+	// itself, its slot in the map, and its share of the map's growth.
+	entryCost = 256
+	// percentCost is charged for every percent sign in a text, because each
+	// can open a placeholder, and a placeholder compiles to a part of its own
+	// with a literal part on either side: three parts of three strings each.
+	percentCost = 3 * 48
+)
+
+// flatSize reckons what a tree costs to hold once [flatten] has stored every
+// node under its full dotted path, and stops counting once the total passes
+// limit, since past it the only answer is a refusal.
+//
+// It builds nothing, which is the point: a tree is refused before the cost it
+// would have run up is paid. prefix is the length of the path above node. A
+// tree deeper than [maxTreeDepth] is counted only that far down, because
+// [flatten] refuses it with an error that says why.
+func flatSize(prefix int, node map[string]any, depth, limit int) int {
+	if depth > maxTreeDepth {
+		return 0
+	}
+	total := 0
+	for key, value := range node {
+		path := len(key)
+		if prefix > 0 {
+			path += prefix + 1
+		}
+		total += entryCost + path
+		switch child := value.(type) {
+		case map[string]any:
+			total += flatSize(path, child, depth+1, limit-total)
+		case string:
+			total += textCost(child)
+			// A plural form is compiled a second time, into the set of forms
+			// its namespace holds. Charging every text under a category name
+			// twice, plural or not, errs on the side of the bound.
+			if _, form := pluralCategories[key]; form {
+				total += entryCost + textCost(child)
+			}
+		}
+		if total > limit {
+			return total
+		}
+	}
+	return total
+}
+
+// textCost is what a text adds to an entry: its bytes, and the parts it can
+// compile to at most.
+func textCost(text string) int {
+	return len(text) + percentCost*strings.Count(text, "%")
+}
+
+// tooLargeError refuses translations that would cost more than
+// [maxFlattenedBytes] to hold, naming what was refused.
+func tooLargeError(what string) error {
+	return fmt.Errorf("i18n: %s would take more than %d MiB to hold once every key is spelled out in full, "+
+		"which no real locale comes near; a long key above many values costs that much, as does a tree aliased "+
+		"many times under one, so shorten the key or stop repeating the tree", what, maxFlattenedBytes>>20)
+}
 
 // flatten records every node of a tree under its dotted path.
 //

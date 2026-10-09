@@ -2,6 +2,7 @@ package muzak
 
 import (
 	"cmp"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -275,13 +276,18 @@ type Components struct {
 // Schema is a JSON Schema 2020-12 description of a value, which is the schema
 // dialect OpenAPI 3.1 uses.
 type Schema struct {
-	// Ref points at a named schema in the components section. When set, every
-	// other field is empty.
+	// Ref points at a named schema in the components section. What is set
+	// beside it applies together with it, as JSON Schema 2020-12 reads a $ref:
+	// a description of the member that holds it, or the rules a model declares
+	// for the members of that one use of the type.
 	Ref string `json:"$ref,omitzero"`
 	// Type is the JSON type, or a list of types when the value is nullable.
 	Type any `json:"type,omitzero"`
 	// Format refines the type, as "date-time" or "uuid" do for strings.
 	Format string `json:"format,omitzero"`
+	// ContentEncoding names the encoding a string carries binary data in,
+	// which is "base64" for a byte slice or array in a JSON body.
+	ContentEncoding string `json:"contentEncoding,omitzero"`
 	// Title names the schema in generated documentation.
 	Title string `json:"title,omitzero"`
 	// Description explains the value, taken from its doc struct tag.
@@ -295,6 +301,10 @@ type Schema struct {
 	// AnyOf lists alternative schemas, used to widen a reference so that null
 	// is also permitted.
 	AnyOf []*Schema `json:"anyOf,omitzero"`
+	// AllOf lists schemas a value must satisfy every one of, used where the
+	// rules hold a value to more patterns, formats or multiples than one
+	// keyword can say.
+	AllOf []*Schema `json:"allOf,omitzero"`
 	// AdditionalProperties describes values of a map, or is false for an
 	// object that accepts no extra members.
 	AdditionalProperties any `json:"additionalProperties,omitzero"`
@@ -345,11 +355,23 @@ func (d *Document) Marshal() ([]byte, error) {
 // refuses a body without it, which is when a Required rule is declared for it:
 // the decoder itself accepts a body that leaves any member out, whatever the Go
 // type's shape suggests, so a member with no such rule is optional and a
-// pointer that a Required rule speaks for is required and not nullable. The
-// response side keeps the shape, since a member that is not a pointer and not
-// omitempty is always written; a type used both ways therefore has a component
-// for the response and a copy for the request, named for it with Input after.
-// Members of a form are required as the binder decides.
+// pointer that a Required rule speaks for is required and not nullable. That
+// holds at every depth: an object the body nests requires only what the rules
+// of a model nested with [Validation.Nested] require of it, and nothing when no
+// rule speaks for it. The response side keeps the shape, since a member that is
+// not a pointer and not omitempty is always written; a type used both ways
+// therefore has a component for the response and a copy for the request, named
+// for it with Input after, and the request's copy of an object refers to the
+// request's copies of the objects it nests. Every object a request is read into
+// says additionalProperties: false, since the decoder refuses a member it does
+// not know at any depth, unless the route allows them with
+// [AllowUnknownFields]; a response is left open, so that a member added to it
+// later breaks no client. Members of a form are required as the binder decides.
+//
+// A field named by several rule sets is held to all of them, and so is its
+// schema: the tightest of each bound, only the values every list allows, and,
+// where they ask for more than one pattern, format or multiple, each of them
+// under allOf.
 //
 // It describes authentication only as the application declares it. A guard is a
 // function that Muzak can run but not read, so it cannot say whether it wants a
@@ -432,8 +454,17 @@ func (a *App) buildDocument() *Document {
 		}
 	}
 	builder.sealResponses()
-	for _, d := range operations {
-		a.describeRequestBody(d.route, d.op, builder)
+	// Every body is described, and the rules of its types written onto them,
+	// before any is read as a request, so that what a request's copy of a
+	// component is made from does not depend on which route reads it first.
+	bodies := make([]*Schema, len(operations))
+	for i, d := range operations {
+		bodies[i] = a.describeRequestBody(d.route, d.op, builder)
+	}
+	for i, d := range operations {
+		if bodies[i] != nil {
+			a.readRequestBody(d.route, d.op, bodies[i], builder)
+		}
 	}
 
 	doc.Tags = a.tagList(tags)
@@ -524,7 +555,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 			applyConstraints(parameter.Schema, c)
 			// A default is written before any rule runs, so a parameter that
 			// has one is not refused for being left out, whatever Required says.
-			if c.Required && !rt.plan.params[i].hasDef {
+			if c.required() && !rt.plan.params[i].hasDef {
 				parameter.Required = true
 			}
 		}
@@ -567,12 +598,15 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 	return op
 }
 
-// describeRequestBody attaches the body a route accepts to its operation.
+// describeRequestBody describes the body a route accepts and writes the rules
+// of the types it is made of onto their schemas. A form is attached to the
+// operation there and then; a JSON body is returned, for [App.readRequestBody]
+// to attach once every route's body has been described.
 //
 // It runs after every route's parameters and responses have been described,
-// which is what tells it whether a type the body is made of was already
-// described for a response.
-func (a *App) describeRequestBody(rt *Route, op *Operation, builder *schemaBuilder) {
+// which is what tells the reading whether a type the body is made of was
+// already described for a response.
+func (a *App) describeRequestBody(rt *Route, op *Operation, builder *schemaBuilder) *Schema {
 	constraints := rt.constraintsForDocs()
 	elements := rt.elementConstraintsForDocs()
 
@@ -592,7 +626,7 @@ func (a *App) describeRequestBody(rt *Route, op *Operation, builder *schemaBuild
 		}
 		for _, location := range locations {
 			for name, property := range builder.resolve(body).Properties {
-				if constraints[fieldKey{location, name}].Required && property != nil && !defaulted[name] {
+				if constraints[fieldKey{location, name}].required() && property != nil && !defaulted[name] {
 					body.Required = setRequired(body.Required, name, true)
 				}
 			}
@@ -608,24 +642,26 @@ func (a *App) describeRequestBody(rt *Route, op *Operation, builder *schemaBuild
 		body := builder.bodySchema(rt.plan)
 		builder.applyBodyDefaults(body, rt.plan.body.defaults)
 		builder.applyBodyConstraints(body, constraints, elements, "body")
-		defaulted := make(map[string]bool, len(rt.plan.body.defaults))
-		for _, d := range rt.plan.body.defaults {
-			defaulted[d.name] = true
-		}
-		body = builder.requireOnlyWhatIsEnforced(body, constraints, defaulted, true)
 		for _, nested := range rt.nestedModelsForDocs() {
 			// A nested model's rules land on the component of its type, which
 			// is where a reference to it leads. One that was described inline,
 			// as an anonymous struct is, has no component to carry them.
 			if ref, described := builder.byType[nested.typ]; described {
 				builder.applyBodyConstraints(ref, nested.constraints, nested.elements, "body")
-				builder.requireOnlyWhatIsEnforced(ref, nested.constraints, nil, false)
 			}
 		}
-		op.RequestBody = &RequestBody{
-			Required: rt.plan.body.required,
-			Content:  map[string]MediaType{"application/json": {Schema: body}},
-		}
+		return body
+	}
+	return nil
+}
+
+// readRequestBody attaches a JSON body to its operation, described as the route
+// reads it; see [requestReading].
+func (a *App) readRequestBody(rt *Route, op *Operation, body *Schema, builder *schemaBuilder) {
+	reading := builder.newRequestReading(rt, body)
+	op.RequestBody = &RequestBody{
+		Required: rt.plan.body.required,
+		Content:  map[string]MediaType{"application/json": {Schema: reading.body(body)}},
 	}
 }
 
@@ -635,12 +671,14 @@ func (a *App) describeRequestBody(rt *Route, op *Operation, builder *schemaBuild
 //
 // The schema may be a reference into components, in which case the constraints
 // land on the shared definition. That is correct: the rules belong to the type,
-// so every operation that accepts it enforces them.
+// so every operation that accepts it enforces them. Each member is narrowed in
+// a copy, though, since what it holds may be a schema another member shares.
+// A rule on a member of a struct the type holds is not written here; see
+// [requestReading.object].
 //
-// Which members are required is not decided here; see
-// [schemaBuilder.requireOnlyWhatIsEnforced] for a JSON body, and the caller for
-// a form.
-func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[fieldKey]validate.Constraints, locations ...string) {
+// Which members are required is not decided here; see [requestReading] for a
+// JSON body, and the caller for a form.
+func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements map[fieldKey]fieldConstraints, locations ...string) {
 	if len(constraints) == 0 && len(elements) == 0 {
 		return
 	}
@@ -653,91 +691,380 @@ func (b *schemaBuilder) applyBodyConstraints(body *Schema, constraints, elements
 	// borrowed its name.
 	for _, location := range locations {
 		for name, property := range schema.Properties {
-			if c, described := constraints[fieldKey{location, name}]; described {
-				applyConstraints(property, c)
+			c, described := constraints[fieldKey{location, name}]
+			element, describedElement := elements[fieldKey{location, name}]
+			if !described && !describedElement {
+				continue
 			}
-			if c, described := elements[fieldKey{location, name}]; described && property.Items != nil {
-				applyConstraints(property.Items, c)
+			narrowed := *property
+			applyConstraints(&narrowed, c)
+			if describedElement && narrowed.Items != nil {
+				items := *narrowed.Items
+				applyConstraints(&items, element)
+				narrowed.Items = &items
 			}
+			schema.Properties[name] = &narrowed
 		}
 	}
 }
 
-// requireOnlyWhatIsEnforced lists a JSON body's required members as the ones
-// the runtime refuses to be without, and returns the schema to describe the body
-// with.
+// requestReading is how one route reads its JSON body, and every object the
+// body nests, at whatever depth.
 //
 // The decoder accepts a body that leaves out any member: what it does not find
 // it leaves as the zero value, and only a Required rule turns that into a
-// failure, so only a member with one is required. Absence is what Required
-// refuses in a pointer too, and null reads as absence there, so a required
-// pointer member is no longer described as nullable. Listing the rest, as the
-// Go type's shape suggests, would tell a client, or a gateway validating
-// requests against the document, that a request the server accepts is
-// malformed. A member with a default is not required either, since the default
-// is written before the rules run and leaving it out is not a failure.
+// failure, so a member is required only when one is declared for it. That holds
+// for an object nested in the body as much as for the body itself, where the
+// rules of a model the body nests speak for its members and nothing else does.
+// Absence is what Required refuses in a pointer too, and null reads as absence
+// there, so a required pointer member is no longer described as nullable.
+// Listing more, as the Go type's shape suggests, tells a client, or a gateway
+// validating requests against the document, that a request the server accepts
+// is malformed. A member of the body with a default is not required either,
+// since the default is written before the rules run.
+//
+// The decoder also refuses a member it does not know, at every depth, unless
+// the route allows them with [AllowUnknownFields], so every object read from a
+// struct says additionalProperties: false; saying nothing let a client, or a
+// gateway, pass what the server answers with a 422. An object that collects
+// unknown members in an embedded map already says what it takes instead, and
+// a type that decodes itself is not closed, since what it accepts is its own
+// business. A response is never closed: a client has to be free to read one
+// that gains a member.
 //
 // A component is also described for the responses that carry it, and there the
 // shape is the truth: a member that is not a pointer and not omitempty is always
-// present. Rewriting it in place for the request would take that away from
-// every client of the response, so a body type a response already described
-// gets a component of its own for the request, named for the type with Input
-// after it. A type only requests use keeps its name and is rewritten in place.
-// The types nested within a body are held to the same rule where the rules
-// speak for them, but are never split, since telling a parent to point at the
-// copy would mean describing it again; one a response shares keeps the shape.
-func (b *schemaBuilder) requireOnlyWhatIsEnforced(body *Schema, constraints map[fieldKey]validate.Constraints, defaulted map[string]bool, split bool) *Schema {
-	schema := b.resolve(body)
-	if schema == nil || schema.Properties == nil {
-		return body
-	}
-	var required []string
-	for name := range schema.Properties {
-		if constraints[fieldKey{"body", name}].Required && !defaulted[name] {
-			required = append(required, name)
-		}
-	}
-	slices.Sort(required)
-
-	if body.Ref == "" {
-		// A schema described inline belongs to this operation alone.
-		schema.Required = required
-		refuseNull(schema, required)
-		return body
-	}
-	name := strings.TrimPrefix(body.Ref, componentPrefix)
-	signature := strings.Join(required, "\x00")
-	if claimed, isClaimed := b.claimed[name]; isClaimed {
-		// Another route already decided this component, and described it for
-		// the same members, or this one takes a copy like any other.
-		if claimed == signature {
-			return body
-		}
-	} else if !b.responded[name] {
-		b.claimed[name] = signature
-		schema.Required = required
-		refuseNull(schema, required)
-		return body
-	}
-	if !split {
-		return body
-	}
-	if slices.Equal(schema.Required, required) && !anyNullable(schema, required) {
-		// The shape a response has is already what the request is.
-		return body
-	}
-	return b.inputVariant(body, required)
+// present. So a component a response describes is never rewritten. Where the
+// request reads one differently, the request gets a copy of its own, named for
+// the type with Input after it, and every object on the way to it gets a copy
+// too, so that the copies refer to each other and the responses' components
+// stay as they were. A type only requests use keeps its name and is rewritten in
+// place the first time a route reads it; a route that reads it differently
+// later gets a copy, and one that reads it the same shares it.
+type requestReading struct {
+	b *schemaBuilder
+	// closed is set when the route refuses unknown members.
+	closed bool
+	// rules holds what the rules the route enforces say of the members of each
+	// type the body is made of, by the name of the component describing the
+	// type, and of the body itself under root, which is empty for a body
+	// described inline; elements holds what they say of the elements of its
+	// collections. defaulted holds the members of the body a default fills in.
+	rules     map[string]map[fieldKey]fieldConstraints
+	elements  map[string]map[fieldKey]fieldConstraints
+	root      string
+	defaulted map[string]bool
+	// placed holds the component the request reads in place of each one the
+	// body reaches, and pending the name of a copy decided on but not yet made.
+	placed  map[string]string
+	pending map[string]string
 }
 
-// anyNullable reports whether any of the named members is described as
-// accepting null.
-func anyNullable(schema *Schema, names []string) bool {
-	for _, name := range names {
-		if property := schema.Properties[name]; property != nil && notNullable(property) != property {
-			return true
+// newRequestReading collects what a route's rules say of the types its body is
+// made of.
+func (b *schemaBuilder) newRequestReading(rt *Route, body *Schema) *requestReading {
+	r := &requestReading{
+		b:         b,
+		closed:    !rt.allowUnknownFields,
+		rules:     map[string]map[fieldKey]fieldConstraints{},
+		elements:  map[string]map[fieldKey]fieldConstraints{},
+		root:      strings.TrimPrefix(body.Ref, componentPrefix),
+		defaulted: map[string]bool{},
+		placed:    map[string]string{},
+		pending:   map[string]string{},
+	}
+	r.rules[r.root], r.elements[r.root] = rt.constraintsForDocs(), rt.elementConstraintsForDocs()
+	for _, d := range rt.plan.body.defaults {
+		r.defaulted[d.name] = true
+	}
+	for _, nested := range rt.nestedModelsForDocs() {
+		if ref, described := b.byType[nested.typ]; described {
+			name := strings.TrimPrefix(ref.Ref, componentPrefix)
+			r.rules[name], r.elements[name] = nested.constraints, nested.elements
 		}
 	}
-	return false
+	return r
+}
+
+// body returns the schema the route's body is described with.
+//
+// Which component a request reads in place of another depends on what the ones
+// it refers to became, and a type may refer to itself, so the choice is made
+// again for every component until none changes; each is then written out
+// referring to what the others became.
+func (r *requestReading) body(body *Schema) *Schema {
+	reach := r.b.reach(body)
+	for _, name := range reach {
+		r.placed[name] = name
+	}
+	for range len(reach) + 1 {
+		changed := false
+		for _, name := range reach {
+			if target := r.choose(name); target != r.placed[name] {
+				r.placed[name] = target
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	for _, name := range reach {
+		r.commit(name)
+	}
+	if body.Ref != "" {
+		return &Schema{Ref: componentPrefix + r.placed[r.root]}
+	}
+	// A body described inline belongs to this operation alone.
+	return r.object("", body)
+}
+
+// choose decides which component the request reads in place of one it
+// reaches: the component itself when it already says what the request needs,
+// or when no response and no other route has a claim on it; a copy made
+// earlier that says the same; or a new copy.
+func (r *requestReading) choose(name string) string {
+	if reflect.DeepEqual(r.readAs(name, name), r.b.schemas[name]) || (!r.b.responded[name] && !r.b.claimed[name]) {
+		return name
+	}
+	for _, variant := range r.b.variants[name] {
+		if reflect.DeepEqual(r.readAs(name, variant), r.b.schemas[variant]) {
+			return variant
+		}
+	}
+	if pending, decided := r.pending[name]; decided {
+		return pending
+	}
+	variant := name + "Input"
+	for n := 2; r.nameTaken(variant); n++ {
+		variant = fmt.Sprintf("%sInput%d", name, n)
+	}
+	r.pending[name] = variant
+	return variant
+}
+
+// nameTaken reports whether a component name is in use, or about to be.
+func (r *requestReading) nameTaken(name string) bool {
+	_, taken := r.b.names[name]
+	return taken || slices.Contains(slices.Collect(maps.Values(r.pending)), name)
+}
+
+// commit writes out the reading of a component where it was placed.
+func (r *requestReading) commit(name string) {
+	target := r.placed[name]
+	reading := r.readAs(name, target)
+	switch {
+	case target == name:
+		if r.b.responded[name] {
+			// The reading is the response's component as it stands.
+			return
+		}
+		if _, saved := r.b.originals[name]; !saved {
+			r.b.originals[name] = r.b.schemas[name]
+		}
+		r.b.schemas[name] = reading
+		r.b.claimed[name] = true
+	case r.pending[name] == target:
+		r.b.names[target] = reflect.TypeFor[inputVariantName]()
+		r.b.schemas[target] = reading
+		r.b.variants[name] = append(r.b.variants[name], target)
+	}
+}
+
+// readAs describes a component as the request reads it, were it placed under
+// the given name, which is what a reference to itself then leads to.
+func (r *requestReading) readAs(name, as string) *Schema {
+	placed := r.placed[name]
+	r.placed[name] = as
+	defer func() { r.placed[name] = placed }()
+	return r.object(name, r.b.original(name))
+}
+
+// object describes an object the route's rules may speak for, under the name
+// of its component, or the body described inline under the empty name.
+//
+// A rule on a member of a struct the object holds, as v.Number(&in.Price.Amount)
+// is, belongs to this use of the struct and to no other, so it narrows the
+// member that holds the struct rather than the struct's own component; see
+// [requestReading.overlay]. The member holding it is then required as well
+// when the rule is Required, since a body without it fails that rule.
+func (r *requestReading) object(name string, schema *Schema) *Schema {
+	out := r.node(schema)
+	if name != "" && decodesItself(r.b.names[name]) {
+		out.AdditionalProperties = schema.AdditionalProperties
+	}
+	out.Required = nil
+	rules := r.rules[name]
+	for _, key := range slices.SortedFunc(maps.Keys(rules), compareFieldKeys) {
+		c := rules[key]
+		member, path, deeper := strings.Cut(key.name, ".")
+		if key.location != "body" || schema.Properties[member] == nil {
+			continue
+		}
+		if deeper {
+			out.Properties[member] = r.overlay(out.Properties[member], schema.Properties[member], path, c, r.elements[name][key])
+		}
+		if c.required() && (deeper || name != r.root || !r.defaulted[member]) {
+			out.Required = append(out.Required, member)
+		}
+	}
+	slices.Sort(out.Required)
+	out.Required = slices.Compact(out.Required)
+	refuseNull(out, out.Required)
+	return out
+}
+
+// overlay narrows the member at path within an object a body holds, for a rule
+// declared on it by the model holding the object, and returns the narrowed
+// copy of read, the schema the request reads the object with. described is the
+// object as it was described, which says what the member is.
+//
+// Nothing shared is written to. An object described inline is this use's own,
+// so its member is narrowed in a copy of it. A reference leads to a component
+// every use of the type shares, and the rule was written on that shared
+// reference once, so that refund and every response carried the order's rule
+// on its price; the narrowing is written beside the reference instead, which
+// JSON Schema 2020-12 applies together with it, for this use alone.
+func (r *requestReading) overlay(read, described *Schema, path string, c, element fieldConstraints) *Schema {
+	name, rest, deeper := strings.Cut(path, ".")
+	if described.Ref != "" {
+		described = r.b.original(strings.TrimPrefix(described.Ref, componentPrefix))
+	}
+	original := described.Properties[name]
+	if original == nil {
+		// A path walked from the members json/v2 resolves names a property at
+		// every step. One a rule chose with As() may not, and then there is
+		// nothing for it to narrow.
+		return read
+	}
+	out := *read
+	out.Properties = maps.Clone(read.Properties)
+	if out.Properties == nil {
+		out.Properties = map[string]*Schema{}
+	}
+	member := &Schema{}
+	if existing := out.Properties[name]; existing != nil {
+		copied := *existing
+		member = &copied
+	}
+	required := c.required()
+	if deeper {
+		member = r.overlay(member, original, rest, c, element)
+	} else {
+		constrain(member, c, admitsNull(original) && !required)
+		if len(element) > 0 {
+			items := &Schema{}
+			if member.Items != nil {
+				copied := *member.Items
+				items = &copied
+			}
+			constrain(items, element, original.Items != nil && admitsNull(original.Items))
+			member.Items = items
+		}
+		if required && admitsNull(original) {
+			if member.Type == nil && member.AnyOf == nil {
+				// Only the narrowing is written here, beside a reference, so
+				// the type that refuses null is said again without it.
+				member.Type = notNullable(original).Type
+			} else {
+				member = notNullable(member)
+			}
+		}
+	}
+	if required {
+		out.Required = setRequired(out.Required, name, true)
+	}
+	out.Properties[name] = member
+	return &out
+}
+
+// compareFieldKeys orders fields by where they are read from and then by name.
+func compareFieldKeys(x, y fieldKey) int {
+	return cmp.Or(strings.Compare(x.location, y.location), strings.Compare(x.name, y.name))
+}
+
+// node copies a schema as the request reads it: every reference leads where
+// the component it names was placed, an object read from a struct is closed
+// when the route refuses unknown members, and an object described inline, as
+// an anonymous struct is, requires nothing, since no rule can name its members.
+func (r *requestReading) node(schema *Schema) *Schema {
+	if schema == nil {
+		return nil
+	}
+	out := *schema
+	if schema.Ref != "" {
+		out.Ref = componentPrefix + r.placed[strings.TrimPrefix(schema.Ref, componentPrefix)]
+	}
+	if r.closed && isStructObject(schema) {
+		out.AdditionalProperties = false
+	}
+	if schema.Properties != nil {
+		out.Properties = make(map[string]*Schema, len(schema.Properties))
+		for member, property := range schema.Properties {
+			out.Properties[member] = r.node(property)
+		}
+		out.Required = nil
+	}
+	out.Items = r.node(schema.Items)
+	if values, ok := schema.AdditionalProperties.(*Schema); ok {
+		out.AdditionalProperties = r.node(values)
+	}
+	if schema.AnyOf != nil {
+		out.AnyOf = make([]*Schema, len(schema.AnyOf))
+		for i, alternative := range schema.AnyOf {
+			out.AnyOf[i] = r.node(alternative)
+		}
+	}
+	return &out
+}
+
+// isStructObject reports whether a schema is an object read from a struct with
+// no embedded map to collect the members it does not name. A map has its
+// values as additional properties, and a reference has no type of its own.
+func isStructObject(schema *Schema) bool {
+	if schema.Ref != "" || schema.AdditionalProperties != nil {
+		return false
+	}
+	if types, ok := schema.Type.([]string); ok {
+		return slices.Contains(types, "object")
+	}
+	return schema.Type == "object"
+}
+
+// reach lists, in order, every component a schema leads to, at any depth.
+func (b *schemaBuilder) reach(schema *Schema) []string {
+	seen := map[string]bool{}
+	var walk func(*Schema)
+	walk = func(schema *Schema) {
+		if schema == nil {
+			return
+		}
+		if name := strings.TrimPrefix(schema.Ref, componentPrefix); schema.Ref != "" && !seen[name] {
+			seen[name] = true
+			walk(b.original(name))
+		}
+		for _, property := range schema.Properties {
+			walk(property)
+		}
+		walk(schema.Items)
+		if values, ok := schema.AdditionalProperties.(*Schema); ok {
+			walk(values)
+		}
+		for _, alternative := range schema.AnyOf {
+			walk(alternative)
+		}
+	}
+	walk(schema)
+	return slices.Sorted(maps.Keys(seen))
+}
+
+// original returns a component as it was described, before any request
+// rewrote it in place.
+func (b *schemaBuilder) original(name string) *Schema {
+	if schema, rewritten := b.originals[name]; rewritten {
+		return schema
+	}
+	return b.schemas[name]
 }
 
 // refuseNull stops describing the named members as nullable. It is for the
@@ -749,34 +1076,6 @@ func refuseNull(schema *Schema, names []string) {
 			schema.Properties[name] = notNullable(property)
 		}
 	}
-}
-
-// inputVariant returns a reference to a copy of a component whose required
-// members are the ones given, creating it the first time it is asked for.
-func (b *schemaBuilder) inputVariant(ref *Schema, required []string) *Schema {
-	name := strings.TrimPrefix(ref.Ref, componentPrefix)
-	key := name + "\x00" + strings.Join(required, "\x00")
-	if variant, ok := b.variants[key]; ok {
-		return variant
-	}
-	copied := *b.schemas[name]
-	copied.Required = required
-	// The properties are shared with the component the responses use, so the
-	// ones narrowed for the request are set on a map of the copy's own.
-	copied.Properties = maps.Clone(copied.Properties)
-	refuseNull(&copied, required)
-	variantName := name + "Input"
-	for n := 2; ; n++ {
-		if _, taken := b.names[variantName]; !taken {
-			break
-		}
-		variantName = fmt.Sprintf("%sInput%d", name, n)
-	}
-	b.names[variantName] = reflect.TypeFor[inputVariantName]()
-	b.schemas[variantName] = &copied
-	variant := &Schema{Ref: componentPrefix + variantName}
-	b.variants[key] = variant
-	return variant
 }
 
 // inputVariantName stands in the table of component names for the ones given to
@@ -874,14 +1173,26 @@ func setRequired(required []string, name string, want bool) []string {
 	return required
 }
 
-// applyConstraints writes what a rule set demands onto a schema.
+// applyConstraints writes what the rule sets declared for a field demand onto a
+// schema.
 //
 // A constraint the rules do not mention is left alone, so a format already
 // derived from the Go type, such as date-time for a time.Time, survives a rule
 // set that says nothing about it.
-func applyConstraints(schema *Schema, c validate.Constraints) {
+func applyConstraints(schema *Schema, f fieldConstraints) {
 	if schema == nil {
 		return
+	}
+	constrain(schema, f, admitsNull(schema))
+}
+
+// constrain is [applyConstraints] for a schema that may say less than the value
+// it constrains, as one written beside a reference does, so whether the value
+// admits null is given rather than read off the schema.
+func constrain(schema *Schema, f fieldConstraints, nullable bool) {
+	c, also := f.merged()
+	if len(also) > 0 {
+		schema.AllOf = also
 	}
 	if c.Format != "" {
 		schema.Format = c.Format
@@ -919,9 +1230,114 @@ func applyConstraints(schema *Schema, c validate.Constraints) {
 	if c.UniqueItems {
 		schema.UniqueItems = true
 	}
-	if len(c.Enum) > 0 {
-		schema.Enum = c.Enum
+	if c.Enum != nil {
+		schema.Enum = slices.Clone(c.Enum)
+		// A nil pointer skips its rules, so a member whose type admits null is
+		// still accepted as null whatever the list says. JSON Schema reads the
+		// two keywords together, and a list without null next to a type with it
+		// refused a request the server takes. A Required rule refuses the null,
+		// and notNullable takes it out of the list again.
+		if nullable && !slices.Contains(schema.Enum, nil) {
+			schema.Enum = append(schema.Enum, nil)
+		}
 	}
+}
+
+// merged combines the rule sets declared for one field into what they demand
+// together, since each is enforced: Required if any says it, the tightest of
+// each bound, and only the values every list allows, which may be none.
+//
+// A pattern, a format and a multiple each take one keyword. Where the rule sets
+// name more than one of a kind, the keyword is left unset and every one of them
+// is returned instead, as a schema the value has to satisfy as well, which is
+// what allOf says; describing only one let through what the others refuse.
+func (f fieldConstraints) merged() (validate.Constraints, []*Schema) {
+	var c validate.Constraints
+	var patterns, formats []string
+	var multiples []float64
+	for _, d := range f {
+		c.Required = c.Required || d.Required
+		c.UniqueItems = c.UniqueItems || d.UniqueItems
+		patterns = appendDistinct(patterns, d.Pattern)
+		formats = appendDistinct(formats, d.Format)
+		if d.MultipleOf != nil {
+			multiples = appendDistinct(multiples, *d.MultipleOf)
+		}
+		c.MinLength = tighter(c.MinLength, d.MinLength, true)
+		c.MaxLength = tighter(c.MaxLength, d.MaxLength, false)
+		c.Minimum = tighter(c.Minimum, d.Minimum, true)
+		c.Maximum = tighter(c.Maximum, d.Maximum, false)
+		c.ExclusiveMinimum = tighter(c.ExclusiveMinimum, d.ExclusiveMinimum, true)
+		c.ExclusiveMaximum = tighter(c.ExclusiveMaximum, d.ExclusiveMaximum, false)
+		c.MinItems = tighter(c.MinItems, d.MinItems, true)
+		c.MaxItems = tighter(c.MaxItems, d.MaxItems, false)
+		switch {
+		case len(d.Enum) == 0:
+		case c.Enum == nil:
+			c.Enum = slices.Clone(d.Enum)
+		default:
+			c.Enum = slices.DeleteFunc(c.Enum, func(value any) bool {
+				return !slices.ContainsFunc(d.Enum, func(other any) bool { return reflect.DeepEqual(value, other) })
+			})
+		}
+	}
+	var also []*Schema
+	if len(patterns) == 1 {
+		c.Pattern = patterns[0]
+	} else {
+		for _, pattern := range patterns {
+			also = append(also, &Schema{Pattern: pattern})
+		}
+	}
+	if len(formats) == 1 {
+		c.Format = formats[0]
+	} else {
+		for _, format := range formats {
+			also = append(also, &Schema{Format: format})
+		}
+	}
+	if len(multiples) == 1 {
+		c.MultipleOf = &multiples[0]
+	} else {
+		for i := range multiples {
+			also = append(also, &Schema{MultipleOf: &multiples[i]})
+		}
+	}
+	return c, also
+}
+
+// appendDistinct appends a value to a list unless it is the zero value or the
+// list already holds it.
+func appendDistinct[T comparable](list []T, value T) []T {
+	var zero T
+	if value == zero || slices.Contains(list, value) {
+		return list
+	}
+	return append(list, value)
+}
+
+// tighter returns the stricter of two bounds, the larger of two lower bounds or
+// the smaller of two upper ones, or whichever of them is set.
+func tighter[T cmp.Ordered](current, next *T, lower bool) *T {
+	switch {
+	case next == nil:
+		return current
+	case current == nil:
+		return next
+	}
+	if (*next > *current) == lower {
+		return next
+	}
+	return current
+}
+
+// admitsNull reports whether a schema accepts null, the way [nullable] spells
+// it.
+func admitsNull(schema *Schema) bool {
+	if types, ok := schema.Type.([]string); ok {
+		return slices.Contains(types, "null")
+	}
+	return len(schema.AnyOf) == 2 && schema.AnyOf[1].Type == "null"
 }
 
 // schemaBuilder turns Go types into JSON schemas, hoisting every named struct
@@ -935,12 +1351,14 @@ type schemaBuilder struct {
 	// containing itself is described once rather than for ever.
 	walking map[reflect.Type]bool
 	// responded holds the components that existed once every response was
-	// described, and claimed those a request body has since decided the
-	// required members of. variants holds the copies made for a request where a
-	// component could not be rewritten.
+	// described, and claimed those a request has since read in place, which
+	// another request may share but not rewrite. originals keeps a component a
+	// request rewrote as it was described, and variants the copies made of
+	// each for requests that read it differently. See [requestReading].
 	responded map[string]bool
-	claimed   map[string]string
-	variants  map[string]*Schema
+	claimed   map[string]bool
+	originals map[string]*Schema
+	variants  map[string][]string
 }
 
 // newSchemaBuilder returns an empty builder.
@@ -952,8 +1370,9 @@ func newSchemaBuilder() *schemaBuilder {
 		walking: map[reflect.Type]bool{},
 
 		responded: map[string]bool{},
-		claimed:   map[string]string{},
-		variants:  map[string]*Schema{},
+		claimed:   map[string]bool{},
+		originals: map[string]*Schema{},
+		variants:  map[string][]string{},
 	}
 }
 
@@ -1000,28 +1419,19 @@ func (b *schemaBuilder) textSchema(t reflect.Type) *Schema {
 // type is the body the named schema is referenced directly; when the input
 // mixes located parameters with body members, an object is described inline
 // from just the members that come from the body.
+//
+// The decoder reads a mixed body into the whole input type, so its members are
+// the ones json/v2 resolves over that whole type, and the fields read from the
+// path, the query, a header or a cookie are then left out: none of them is a
+// member a client may send.
 func (b *schemaBuilder) bodySchema(plan *bindPlan) *Schema {
 	if plan.body.direct {
 		return b.schemaFor(plan.typ)
 	}
-	schema := &Schema{Type: "object", Properties: map[string]*Schema{}}
-	for _, index := range plan.body.fields {
-		field := plan.typ.FieldByIndex(index)
-		name, optional := jsonFieldName(field)
-		if name == "" {
-			// coverage: body field indices come from the binding plan, which
-			// already excludes located fields and those tagged "-", so
-			// jsonFieldName cannot return an empty name here. The guard keeps a
-			// future change to that plan from emitting a nameless property.
-			continue
-		}
-		schema.Properties[name] = b.describeField(field)
-		if !optional {
-			schema.Required = append(schema.Required, name)
-		}
-	}
-	slices.Sort(schema.Required)
-	return schema
+	return b.describeObject(jsonMembers(plan.typ), func(member jsonMember) bool {
+		_, located := declaredLocation(member.field)
+		return located
+	})
 }
 
 // multipartSchema describes the form body a route accepts, with one property
@@ -1153,28 +1563,68 @@ func (b *schemaBuilder) schemaFor(t reflect.Type) *Schema {
 		}
 		return b.inline(t)
 	}
+	// Every use of the type is given a reference of its own. Handing out the
+	// one kept here made every member of the type one schema, so a rule
+	// written onto one member's reference was written onto all of them.
 	if existing, ok := b.byType[t]; ok {
-		return existing
+		ref := *existing
+		return &ref
 	}
 	name := b.nameFor(t)
-	ref := &Schema{Ref: componentPrefix + name}
 	// The reference is registered before the body is described so that a type
 	// containing itself terminates instead of recursing forever.
-	b.byType[t] = ref
+	b.byType[t] = &Schema{Ref: componentPrefix + name}
 	b.schemas[name] = &Schema{Type: "object"}
 	b.schemas[name] = b.describeStruct(t)
-	return ref
+	return &Schema{Ref: componentPrefix + name}
 }
 
-// nameFor picks a unique component name for a named type, qualifying it with
-// its package when two packages export the same type name.
+// nameFor picks a unique component name for a named type.
+//
+// A type is named for itself while that name is free. One that shares its name
+// with a type already described is qualified by its import path, an element at
+// a time from the end, so that Item in v1/models, v2/models and v3/models is
+// Item, models.Item and v3.models.Item. A qualifier only tells packages apart,
+// so once a candidate is held by a type of the same package, as it is for
+// three types declared inside three functions, a number is appended instead.
+//
+// Every candidate is checked before it is taken. The qualified name used to be
+// handed to a third type without asking, which pointed the second type's
+// references at the third type's schema. The types are met in the order the
+// routes were registered, so the names come out the same on every run.
 func (b *schemaBuilder) nameFor(t reflect.Type) string {
-	name := componentName(t.Name())
-	if existing, taken := b.names[name]; taken && existing != t {
-		name = sanitizeSchemaName(shortPackage(t.PkgPath()) + "." + t.Name())
+	claim := func(name string) bool {
+		if holder, taken := b.names[name]; taken && holder != t {
+			return false
+		}
+		b.names[name] = t
+		return true
 	}
-	b.names[name] = t
-	return name
+	base := componentName(t.Name())
+	if claim(base) {
+		return base
+	}
+	// Only a named struct is given a component, and a named type always
+	// belongs to a package, so the path is never empty.
+	path := t.PkgPath()
+	segments := strings.Split(path, "/")
+	for i := len(segments) - 1; i >= 0; i-- {
+		candidate := sanitizeSchemaName(strings.Join(segments[i:], ".") + "." + base)
+		if claim(candidate) {
+			return candidate
+		}
+		if b.names[candidate].PkgPath() == path {
+			// The holder lives in this package too, so no more of the path can
+			// tell the two apart.
+			break
+		}
+	}
+	qualified := sanitizeSchemaName(shortPackage(path) + "." + base)
+	for n := 2; ; n++ {
+		if candidate := fmt.Sprintf("%s%d", qualified, n); claim(candidate) {
+			return candidate
+		}
+	}
 }
 
 // componentName turns the name reflect gives a type into one that is a valid
@@ -1234,55 +1684,61 @@ func sanitizeSchemaName(s string) string {
 
 // describeStruct builds the object schema for a struct type.
 func (b *schemaBuilder) describeStruct(t reflect.Type) *Schema {
+	return b.describeObject(jsonMembers(t), nil)
+}
+
+// describeObject builds the schema of the object a struct encodes as, from the
+// members json/v2 gives it, leaving out any that skip reports.
+//
+// The members are json/v2's own, so the fields of an embedded struct, or of a
+// field tagged with the embed option, are where a client puts them, at the top
+// level and not under a member named for the type; a member an outer field of
+// the same name shadows is not described, nor one two fields at the same depth
+// both claim, since json/v2 neither writes nor reads it; and the members an
+// embedded map collects are described as the object's additional properties.
+// Each member is listed once, so required names none twice.
+func (b *schemaBuilder) describeObject(object jsonObject, skip func(jsonMember) bool) *Schema {
 	schema := &Schema{Type: "object", Properties: map[string]*Schema{}}
-	b.collectProperties(t, schema)
+	for _, member := range object.members {
+		if skip != nil && skip(member) {
+			continue
+		}
+		schema.Properties[member.name] = b.describeMember(member)
+		if !member.mayBeAbsent() {
+			schema.Required = append(schema.Required, member.name)
+		}
+	}
 	slices.Sort(schema.Required)
 	if len(schema.Properties) == 0 {
 		schema.Properties = nil
 	}
+	if object.fallback != nil {
+		// Every member the struct does not name is read into the map, so any
+		// is accepted, as a value of the map's element type.
+		schema.AdditionalProperties = &Schema{}
+		if target := embeddedType(object.fallback.field.Type); target != jsontextValueType {
+			schema.AdditionalProperties = b.schemaFor(target.Elem())
+		}
+	}
 	return schema
 }
 
-// collectProperties adds a struct's fields to a schema, promoting the fields
-// of an embedded struct the way JSON encoding does.
-func (b *schemaBuilder) collectProperties(t reflect.Type, schema *Schema) {
-	for i := range t.NumField() {
-		field := t.Field(i)
-		if !usableField(field) {
-			continue
-		}
-		name, optional := jsonFieldName(field)
-		if name == "" {
-			continue
-		}
-		if field.Anonymous && field.Type.Kind() == reflect.Struct && field.Tag.Get(tagJSON) == "" {
-			b.collectProperties(field.Type, schema)
-			continue
-		}
-		if field.Anonymous && field.Type.Kind() == reflect.Pointer && field.Type.Elem().Kind() == reflect.Struct &&
-			field.Tag.Get(tagJSON) == "" && !isWellKnown(field.Type.Elem()) {
-			// An embedded pointer is inlined like an embedded value, and its
-			// members are where the client puts them, at the top level, not
-			// under a member named for the type. Each is optional, since the
-			// pointer stays nil when none of them is sent.
-			promoted := &Schema{Properties: map[string]*Schema{}}
-			b.collectProperties(field.Type.Elem(), promoted)
-			for name, property := range promoted.Properties {
-				schema.Properties[name] = property
-			}
-			continue
-		}
-		schema.Properties[name] = b.describeField(field)
-		if !optional {
-			schema.Required = append(schema.Required, name)
-		}
+// describeMember builds the schema for one member, applying its doc tag and
+// what its json tag says about how it is written.
+func (b *schemaBuilder) describeMember(member jsonMember) *Schema {
+	field := member.field
+	value := field.Type
+	if value.Kind() == reflect.Pointer {
+		value = value.Elem()
 	}
-}
-
-// describeField builds the schema for one struct field, applying its doc and
-// default tags.
-func (b *schemaBuilder) describeField(field reflect.StructField) *Schema {
-	schema := b.schemaFor(field.Type)
+	var schema *Schema
+	if member.stringify && isPlainNumber(value) {
+		// The string option writes the number inside a string and reads it
+		// only from one, so a bare number is refused.
+		schema = quotedNumber(value)
+	} else {
+		schema = b.schemaFor(field.Type)
+	}
 	if field.Type.Kind() == reflect.Pointer {
 		// schemaFor looks through a pointer so that T and *T share one
 		// component. At field level the pointer still means something, though:
@@ -1309,28 +1765,15 @@ func (b *schemaBuilder) describeField(field reflect.StructField) *Schema {
 }
 
 // jsonFieldName returns the name a field is encoded under and whether it may
-// be omitted. A field tagged "-" returns an empty name and is skipped.
+// be omitted, read from its tag the way json/v2 reads it. A field tagged "-"
+// returns an empty name and is skipped, and so does one read from somewhere
+// other than the body, which is never a body member.
 func jsonFieldName(field reflect.StructField) (name string, optional bool) {
-	tag := field.Tag.Get(tagJSON)
-	name, rest, _ := strings.Cut(tag, ",")
-	if name == "-" && rest == "" {
+	tag, ignored := parseJSONTag(field)
+	if _, _, located := locationTag(field); ignored || located {
 		return "", false
 	}
-	if name == "" {
-		name = field.Name
-	}
-	optional = field.Type.Kind() == reflect.Pointer ||
-		strings.Contains(rest, "omitempty") ||
-		strings.Contains(rest, "omitzero") ||
-		field.Tag.Get(tagRequired) == "false"
-	if _, hasDefault := field.Tag.Lookup(tagDefault); hasDefault {
-		optional = true
-	}
-	// A field read from somewhere other than the body is never a body member.
-	if _, _, located := locationTag(field); located {
-		return "", false
-	}
-	return name, optional
+	return tag.name, jsonMember{jsonTag: tag, field: field}.mayBeAbsent()
 }
 
 // isWellKnown reports whether a struct type has a natural JSON representation
@@ -1381,12 +1824,18 @@ func (b *schemaBuilder) inline(t reflect.Type) *Schema {
 	case reflect.String:
 		return &Schema{Type: "string"}
 	case reflect.Slice:
-		if t.Elem().Kind() == reflect.Uint8 {
+		if isRawByte(t.Elem()) {
 			// A byte slice is encoded as a base64 string by encoding/json.
-			return &Schema{Type: "string", Format: "byte"}
+			return &Schema{Type: "string", Format: "byte", ContentEncoding: "base64"}
 		}
 		return &Schema{Type: "array", Items: b.schemaFor(t.Elem())}
 	case reflect.Array:
+		if isRawByte(t.Elem()) {
+			// So is a byte array, and json/v2 reads it back only from padded
+			// base64 of exactly as many bytes, so the length is known too.
+			low, high := base64.StdEncoding.EncodedLen(t.Len()), base64.StdEncoding.EncodedLen(t.Len())
+			return &Schema{Type: "string", Format: "byte", ContentEncoding: "base64", MinLength: &low, MaxLength: &high}
+		}
 		return &Schema{Type: "array", Items: b.schemaFor(t.Elem())}
 	case reflect.Map:
 		return &Schema{Type: "object", AdditionalProperties: b.schemaFor(t.Elem())}
@@ -1409,6 +1858,41 @@ func (b *schemaBuilder) inline(t reflect.Type) *Schema {
 // expression dialect reads alike.
 const durationPattern = `^[-+]?(0|((\d+(\.\d*)?|\.\d+)(ns|us|` + "\u00b5s|\u03bcs" + `|ms|s|m|h))+)$`
 
+// The text json/v2 reads a number from under the string option: a JSON number
+// and nothing else, with no sign but a minus, no leading zero and no space, and
+// for an integer no fraction or exponent either.
+const (
+	quotedIntegerPattern  = `^-?(0|[1-9][0-9]*)$`
+	quotedUnsignedPattern = `^(0|[1-9][0-9]*)$`
+	quotedNumberPattern   = `^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`
+)
+
+// isPlainNumber reports whether json/v2 writes a type as a JSON number of its
+// own accord, which is what the string option quotes. A type that writes
+// itself, and a duration, which the binder writes as text, are not.
+func isPlainNumber(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		return t != durationType && !encodesItself(t)
+	}
+	return false
+}
+
+// quotedNumber describes a number written inside a string, by the text json/v2
+// reads it back from.
+func quotedNumber(t reflect.Type) *Schema {
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return &Schema{Type: "string", Pattern: quotedIntegerPattern}
+	case reflect.Float32, reflect.Float64:
+		return &Schema{Type: "string", Pattern: quotedNumberPattern}
+	default:
+		return &Schema{Type: "string", Pattern: quotedUnsignedPattern}
+	}
+}
+
 // intFormat reports the OpenAPI format for an integer type, which tells a
 // client generator how wide the value can be.
 func intFormat(t reflect.Type) string {
@@ -1421,15 +1905,16 @@ func intFormat(t reflect.Type) string {
 }
 
 // notNullable is the inverse of [nullable]: it narrows a schema so that null is
-// no longer permitted. A schema that never permitted it is returned as it is.
+// no longer permitted, in its type and in any list of values it is held to. A
+// schema that never permitted it is returned as it is.
 func notNullable(schema *Schema) *Schema {
 	if len(schema.AnyOf) == 2 && schema.AnyOf[1].Type == "null" {
 		// What a nullable reference was widened to: the reference is the schema,
 		// and what the wrapper was annotated with goes with it.
-		narrowed := *schema.AnyOf[0]
-		if schema.Description != "" {
-			narrowed.Description = schema.Description
-		}
+		narrowed := *schema
+		narrowed.AnyOf = nil
+		narrowed.Ref = schema.AnyOf[0].Ref
+		narrowed.Enum = withoutNull(schema.Enum)
 		return &narrowed
 	}
 	types, ok := schema.Type.([]string)
@@ -1442,7 +1927,17 @@ func notNullable(schema *Schema) *Schema {
 	}
 	narrowed := *schema
 	narrowed.Type = types[1-i]
+	narrowed.Enum = withoutNull(schema.Enum)
 	return &narrowed
+}
+
+// withoutNull returns a list of values with null taken out, leaving the list
+// itself alone since it may be shared.
+func withoutNull(values []any) []any {
+	if !slices.Contains(values, nil) {
+		return values
+	}
+	return slices.DeleteFunc(slices.Clone(values), func(value any) bool { return value == nil })
 }
 
 // nullable widens a schema so that null is permitted, which is how OpenAPI 3.1

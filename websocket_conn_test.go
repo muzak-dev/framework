@@ -142,6 +142,12 @@ func TestWSConnRefusesToWriteAfterClosing(t *testing.T) {
 	if err := conn.sendClose(WSStatusGoingAway, "again"); err != nil {
 		t.Errorf("sendClose after the goodbye = %v, want it skipped", err)
 	}
+	// A writer that holds the write half cannot wait for a goodbye another
+	// goroutine has claimed, since that goroutine is waiting for the very
+	// half it holds; it is told nothing went out instead.
+	if err := conn.sendCloseHolding(WSStatusGoingAway, "again"); !errors.Is(err, errWSClosing) {
+		t.Errorf("sendCloseHolding after the goodbye = %v, want the connection reported as closing", err)
+	}
 }
 
 func TestWSConnPingAfterCloseIsNotAnswered(t *testing.T) {
@@ -663,10 +669,12 @@ func (b *blockedTransport) Close() error {
 	return nil
 }
 
-func TestWSConnDrainNeedsDeadlines(t *testing.T) {
+func TestWSConnDrainWithoutDeadlines(t *testing.T) {
 	t.Parallel()
 	// A connection reached through an HTTP client has no deadlines to bound a
-	// drain with, so it closes as soon as the goodbye is on the wire.
+	// drain with, so the grace period is enforced by closing the transport
+	// when it runs out instead. A peer whose stream has already ended ends the
+	// wait at once, and the transport is closed either way.
 	transport := &nopReadWriteCloser{}
 	conn := newWSConn(transport, bufio.NewReader(transport), true, "", WSOptions{}.withDefaults())
 	conn.drain()

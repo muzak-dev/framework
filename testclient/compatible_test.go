@@ -367,7 +367,9 @@ func TestAssertCompatibleWithADocumentThatCannotBeWritten(t *testing.T) {
 	rec := &recordingTB{}
 	testclient.AssertCompatible(rec, app, path)
 	rec.only(t, 0, 1, 0)
-	if !strings.Contains(rec.fatals[0], "could not be written") {
+	// The application refuses to build, since a document it cannot encode is
+	// a build error, and nothing is recorded.
+	if !strings.Contains(rec.fatals[0], "cannot be encoded as JSON") {
 		t.Errorf("fatal = %q", rec.fatals[0])
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

@@ -59,13 +59,11 @@ type docsAssets struct {
 // absolute URLs; the scripts import each other relatively and the stylesheet
 // reaches its fonts relatively, so nothing else has to be rewritten.
 func (a *App) prepareDocs() *docsAssets {
-	spec, err := a.spec.Marshal()
-	if err != nil {
-		// coverage: Document is built from Muzak's own types, every one of
-		// which is JSON-encodable, so marshaling cannot fail. The branch keeps
-		// a future schema field from taking down start-up.
-		Scoped(a.logger, ScopeDocs).Error("muzak: the OpenAPI document could not be rendered",
-			slog.String("error", err.Error()))
+	spec := a.specJSON
+	if spec == nil {
+		// coverage: build encodes the document before the handler is
+		// assembled and fails when it cannot, so the bytes are always there by
+		// now. The branch keeps a direct caller from serving an empty document.
 		return nil
 	}
 

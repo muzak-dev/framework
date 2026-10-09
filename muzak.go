@@ -333,6 +333,9 @@ type App struct {
 	frontends []*frontend
 	routers   int
 	spec      *Document
+	// specJSON is spec encoded once at build, which is where a document that
+	// cannot be encoded is reported; the documentation serves these bytes.
+	specJSON []byte
 	// docsLimits is the stand-in route carrying the rate limit the
 	// documentation is served under; see [App.resolveDocsRateLimit]. It is
 	// nil when the documentation is disabled.
@@ -710,7 +713,8 @@ func (a *App) build() {
 	})
 	a.linkNestedMounts()
 	// Handler mounts, the host allowlist, the HTTPS redirect and problem
-	// details; see interop.go.
+	// details; see interop.go. Before the operations, so the health paths are
+	// checked against the mounts as well as the routes.
 	a.buildInterop(state)
 	a.validateOperations(state)
 
@@ -740,6 +744,19 @@ func (a *App) build() {
 
 	if !a.opts.DisableDocs {
 		a.spec = a.buildDocument()
+		// Encoded here rather than when the documentation is served, so a
+		// document that cannot be is a build error. It was logged and the
+		// document silently left unserved, which an application only learned
+		// of from a client finding /openapi.json missing. Text a struct tag
+		// supplies, a doc or a description, that is not valid UTF-8 is how one
+		// gets there.
+		spec, err := a.spec.Marshal()
+		if err != nil {
+			a.buildErr = fmt.Errorf("muzak: the OpenAPI document cannot be encoded as JSON, so it could not be served: %w; "+
+				"every doc, summary, description and example written in a struct tag or a route option must be valid UTF-8", err)
+			return
+		}
+		a.specJSON = spec
 		Scoped(a.logger, ScopeDocs).Debug("Documentation prepared",
 			slog.String("docs", a.opts.DocsPath),
 			slog.String("openapi", a.opts.OpenAPIPath))

@@ -666,42 +666,50 @@ func TestIsReadMethod(t *testing.T) {
 	}
 }
 
-// TestDocsAreOmittedWhenTheDocumentCannotBeRendered covers the guard that
-// leaves the documentation routes unregistered rather than serving a broken
-// page.
-//
-// The document is built from Muzak's own types and cannot normally fail to
-// render, so the test poisons the generated schema with a value JSON has no
-// representation for.
-func TestDocsAreOmittedWhenTheDocumentCannotBeRendered(t *testing.T) {
-	t.Parallel()
-	logger, logs := captureLogger(t)
-	opts := quietOptions()
-	opts.Logger = logger
+// badDocTag carries a doc tag that is not valid UTF-8, which is the one way
+// an application's own text can stop the document being encoded as JSON.
+type badDocTag struct {
+	Name string `json:"name" doc:"caf\xe9"`
+}
 
-	app := New(opts)
+// TestADocumentThatCannotBeEncodedIsABuildError is the regression test for a
+// document that could not be encoded: the failure was logged and the
+// documentation silently left unserved, so the first anyone heard of it was
+// a client finding /openapi.json missing. It is now a build error naming the
+// cause, and the application does not start.
+func TestADocumentThatCannotBeEncodedIsABuildError(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Post("/x", func(*Context, badDocTag) (Empty, error) { return Empty{}, nil })
+	err := app.Build()
+	if err == nil {
+		t.Fatal("an application whose document cannot be encoded built")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "cannot be encoded as JSON") || !strings.Contains(msg, "valid UTF-8") {
+		t.Errorf("error = %q, want it to say the document cannot be encoded and why", msg)
+	}
+
+	// The same model in an application that does not describe itself builds,
+	// since nothing has to be encoded.
+	opts := quietOptions()
+	opts.DisableDocs = true
+	quiet := New(opts)
+	quiet.Post("/x", func(*Context, badDocTag) (Empty, error) { return Empty{}, nil })
+	mustBuild(t, quiet)
+}
+
+// TestDocsServeTheDocumentEncodedAtBuild checks the documentation serves the
+// bytes encoded at build rather than encoding the document again, so what was
+// checked is what is sent.
+func TestDocsServeTheDocumentEncodedAtBuild(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
 	app.Get("/x", okHandler)
 	mustBuild(t, app)
-
-	app.spec.Components = &Components{Schemas: map[string]*Schema{
-		"poisoned": {Default: make(chan int)},
-	}}
-
-	if assets := app.prepareDocs(); assets != nil {
-		t.Fatal("prepareDocs returned assets for a document that cannot be rendered")
-	}
-	if !strings.Contains(logs.String(), "could not be rendered") {
-		t.Errorf("the failure was not reported:\n%s", logs.String())
-	}
-
-	// With no assets, the documentation paths fall through to the routes.
-	handler := app.withDocs(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTeapot)
-	}))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/openapi.json", nil))
-	if rec.Code != http.StatusTeapot {
-		t.Errorf("status = %d, want the request to pass through to the next handler", rec.Code)
+	rec := do(t, app, http.MethodGet, "/openapi.json", "")
+	assertStatus(t, rec, http.StatusOK)
+	if !bytes.Equal(rec.Body.Bytes(), app.specJSON) {
+		t.Error("the served document differs from the one encoded at build")
 	}
 }
 

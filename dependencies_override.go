@@ -17,11 +17,12 @@ import (
 //	})
 //	client := testclient.New(t, app)
 //
-// Every provider of exactly type T is replaced, on every route, file mount and
-// the documentation of this application: one declared with [Needs], [Acquire],
-// [Transaction], [Singleton] or [WithSingleton]. [From], [TryFrom] and [Dep]
-// all receive the override's value. Guards are not providers and are left as
-// they are, so a test still passes or fails them the way a client would.
+// Every provider of exactly type T is replaced, on every route, file mount,
+// handler given to [Router.Mount] and the documentation of this application:
+// one declared with [Needs], [Acquire], [Transaction], [Singleton] or
+// [WithSingleton]. [From], [TryFrom] and [Dep] all receive the override's
+// value. Guards are not providers and are left as they are, so a test still
+// passes or fails them the way a client would.
 //
 // An override changes the value, not its lifetime. Where the replaced
 // provider was request-scoped, provide runs on every request that reaches it;
@@ -118,12 +119,17 @@ func (a *App) addOverride(o *dependencyOverride) {
 // without overrides keeps its chains as they are, so the feature costs it
 // nothing on any request.
 func (a *App) finishDependencies(state *buildState) {
-	chains := make([]*[]*provider, 0, len(a.routes)+len(state.frontends)+1)
+	chains := make([]*[]*provider, 0, len(a.routes)+len(state.frontends)+len(state.mounts)+1)
 	for _, rt := range a.routes {
 		chains = append(chains, &rt.providers)
 	}
 	for _, f := range state.frontends {
 		chains = append(chains, &f.providers)
+	}
+	// A handler given to Router.Mount runs its providers as a route does, so
+	// they are checked and overridden with the rest.
+	for _, m := range state.mounts {
+		chains = append(chains, &m.providers)
 	}
 	// The application's own providers are read again when the documentation
 	// handler is assembled, after this; every route copied them long before.

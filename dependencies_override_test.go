@@ -105,6 +105,59 @@ func TestOverrideAppliesToMountsAndTheDocumentation(t *testing.T) {
 	assertStatus(t, do(t, app, http.MethodGet, "/openapi.json"), http.StatusOK)
 }
 
+// TestOverrideAppliesToHandlerMounts is the regression test for a provider
+// given to Router.Mount: the mount's chain was not among those the overrides
+// were applied to, so an override for a type only a mount provided was refused
+// as replacing nothing, and one for a type a route provided as well left the
+// mount running the real provider under test.
+func TestOverrideAppliesToHandlerMounts(t *testing.T) {
+	t.Parallel()
+	refuse := Needs(func(*Context) (depUser, error) { return depUser{}, Unauthorized("no") })
+	for _, alsoOnARoute := range []bool{false, true} {
+		app := New(quietOptions())
+		app.Mount("/metrics", &mountRecorder{}, refuse)
+		if alsoOnARoute {
+			app.Get("/me", readsUserEveryWay, refuse)
+		}
+		mustBuild(t, app)
+		assertStatus(t, do(t, app, http.MethodGet, "/metrics/x"), http.StatusUnauthorized)
+
+		app = New(quietOptions())
+		app.Mount("/metrics", &mountRecorder{}, refuse)
+		if alsoOnARoute {
+			app.Get("/me", readsUserEveryWay, refuse)
+		}
+		app.Override(overrideUser("fake"))
+		if err := app.Build(); err != nil {
+			t.Fatalf("Build() = %v, want the mount's provider overridden", err)
+		}
+		assertStatus(t, do(t, app, http.MethodGet, "/metrics/x"), http.StatusOK)
+	}
+}
+
+// TestInvalidProviderOnAHandlerMountIsABuildError covers the other half of the
+// same omission: a provider declared on a mount with an argument it cannot work
+// with built without a word and failed every request that reached the mount.
+func TestInvalidProviderOnAHandlerMountIsABuildError(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		option SharedOption
+		want   string
+	}{
+		"Acquire":     {Acquire[relA](nil), "muzak: Acquire was given a nil provider for muzak.relA"},
+		"Transaction": {Transaction(nil, nil), "muzak: Transaction was given a nil *sql.DB"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			app := New(quietOptions())
+			app.Mount("/legacy", &mountRecorder{}, tc.option)
+			if err := app.Build(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Build() = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestOverrideLeavesGuardsInPlace(t *testing.T) {
 	t.Parallel()
 	app := New(quietOptions(), WithDependencies(func(ctx *Context) error {

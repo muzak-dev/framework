@@ -372,6 +372,56 @@ func TestServerSpanForAnAbortedResponse(t *testing.T) {
 	}
 }
 
+// TestServerSpanErrorTypes checks the error.type of a failure that left no
+// cause to name: the status code for a 5xx, and _OTHER for an abort that
+// nothing logged. It also checks that a deliberate 4xx returned after the
+// response started, which aborts the connection and is logged for it, is
+// recorded too.
+func TestServerSpanErrorTypes(t *testing.T) {
+	t.Parallel()
+	opts, tracer := tracedOptions()
+	app := New(opts)
+	app.Get("/busy", func(*Context, Empty) (itemOut, error) { return itemOut{}, ServiceUnavailable("busy") })
+	app.Get("/abort-early", func(*Context, Empty) (itemOut, error) { panic(http.ErrAbortHandler) })
+	app.Get("/abort-late", func(ctx *Context, _ Empty) (itemOut, error) {
+		_, _ = ctx.ResponseWriter().Write([]byte("partial"))
+		panic(http.ErrAbortHandler)
+	})
+	app.Get("/late-404", func(ctx *Context, _ Empty) (itemOut, error) {
+		_, _ = ctx.ResponseWriter().Write([]byte("partial"))
+		return itemOut{}, NotFound("it went away")
+	})
+	mustBuild(t, app)
+	assertStatus(t, do(t, app, "GET", "/busy"), http.StatusServiceUnavailable)
+	for _, path := range []string{"/abort-early", "/abort-late", "/late-404"} {
+		if recovered := catchPanic(func() { do(t, app, "GET", path) }); recovered != http.ErrAbortHandler { //nolint:errorlint // the sentinel is compared by identity
+			t.Fatalf("%s recovered %v", path, recovered)
+		}
+	}
+	spans := tracer.all()
+	if len(spans) != 4 {
+		t.Fatalf("recorded %d spans", len(spans))
+	}
+	want := []struct{ errorType, status, description string }{
+		{"503", "503", ""},
+		{"500", "500", ""},
+		{"_OTHER", "200", abortedSpanDescription},
+		{"*muzak.HTTPError", "200", abortedSpanDescription},
+	}
+	for i, w := range want {
+		span := spans[i]
+		errorType, _ := span.attr("error.type")
+		status, _ := span.attr("http.response.status_code")
+		if errorType != w.errorType || status != w.status || span.status != SpanStatusError || span.description != w.description {
+			t.Errorf("%s: error.type = %q status = %s span status = %d %q, want %q %s %q",
+				span.name, errorType, status, span.status, span.description, w.errorType, w.status, w.description)
+		}
+	}
+	if late := spans[3]; len(late.events) != 1 || late.events[0].attrs["exception.message"].String() != NotFound("it went away").Error() {
+		t.Errorf("the late 404 was not recorded as the log records it: %+v", late.events)
+	}
+}
+
 func TestServerSpanForAnEventStream(t *testing.T) {
 	t.Parallel()
 	opts, tracer := tracedOptions()

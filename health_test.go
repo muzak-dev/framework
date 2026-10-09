@@ -758,6 +758,16 @@ func TestHealthBuildErrors(t *testing.T) {
 		{"frontend mount", func(o *AppOptions) { o.Health.ReadinessPath = "/app/readyz" }, func(a *App) {
 			a.Frontend("/app", FrontendOptions{FS: fstest.MapFS{"index.html": {Data: []byte("x")}}})
 		}, "lies under the frontend mounted at \"/app\""},
+		// A frontend or a handler at the root answers only what nothing else
+		// does, except its own root, which a probe at "/" would take from it:
+		// the home page of a single page application answered with
+		// {"status":"ok"}.
+		{"root of a frontend at the root", func(o *AppOptions) { o.Health.LivenessPath = "/" }, func(a *App) {
+			a.Frontend("/", FrontendOptions{FS: fstest.MapFS{"index.html": {Data: []byte("x")}}})
+		}, "lies under the frontend mounted at \"/\""},
+		{"root of a handler at the root", func(o *AppOptions) { o.Health.ReadinessPath = "/" }, func(a *App) {
+			a.Mount("/", http.NotFoundHandler())
+		}, "lies under the handler mounted at \"/\""},
 		{"openapi path", func(o *AppOptions) { o.Health.LivenessPath = "/openapi.json" }, nil, "OpenAPI document"},
 		{"docs path", func(o *AppOptions) { o.Health.LivenessPath = "/docs" }, nil, "documentation UI"},
 		{"under docs", func(o *AppOptions) { o.Health.LivenessPath = "/docs/livez" }, nil, "documentation UI"},
@@ -814,6 +824,16 @@ func TestHealthPathsThatDoNotCollide(t *testing.T) {
 		opts := healthOptions(HealthOptions{LivenessPath: "/docs"})
 		opts.DocsUI = nil
 		mustBuild(t, New(opts))
+	})
+	t.Run("the root of an application nothing else answers there", func(t *testing.T) {
+		t.Parallel()
+		// What a load balancer that probes "/" by default needs.
+		app := New(healthOptions(HealthOptions{LivenessPath: "/"}))
+		app.Get("/users/{id}", okHandler)
+		app.Frontend("/app", frontend)
+		app.Mount("/legacy", http.NotFoundHandler())
+		mustBuild(t, app)
+		assertStatus(t, do(t, app, http.MethodGet, "/"), http.StatusOK)
 	})
 	t.Run("a sibling of a parameter route", func(t *testing.T) {
 		t.Parallel()

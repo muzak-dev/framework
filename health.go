@@ -249,15 +249,17 @@ func isHealthPathByte(c byte) bool {
 //
 // A frontend mounted at the root is the one exception. It answers whatever
 // nothing else does, exactly as it does for every route, so a health path
-// beneath it shadows nothing it was configured to serve.
+// beneath it shadows nothing it was configured to serve, except the root
+// itself: "/" is the frontend's own page, and a probe there is refused.
 func (a *App) healthPathTaken(field, p string) error {
 	var params radix.Params
 	if entry, found := a.tree.Lookup(p, &params); found {
 		switch {
-		case len(entry.methods) == 0 && entry.mount != nil && entry.mount.prefix == "":
+		case len(entry.methods) == 0 && entry.mount != nil && entry.mount.prefix == "" && p != "/":
 			// A handler mounted at the root answers only what nothing else
 			// does, as a frontend at the root does, so a probe answered ahead
-			// of routing takes nothing from it that was meant for it.
+			// of routing takes nothing from it that was meant for it. Its
+			// root is its own, as a frontend's is.
 		case len(entry.methods) == 0 && entry.mount != nil:
 			return fmt.Errorf("muzak: %s is %q, which lies under the handler mounted at %q; move one of the two",
 				field, p, entry.mount.template)
@@ -267,7 +269,7 @@ func (a *App) healthPathTaken(field, p string) error {
 		}
 	}
 	for _, mount := range a.frontends {
-		if _, under := mount.matches(p); under && mount.path != "" {
+		if _, under := mount.matches(p); under && (mount.path != "" || p == "/") {
 			return fmt.Errorf("muzak: %s is %q, which lies under the %s mounted at %q; move one of the two",
 				field, p, mount.kind, mount.mountPath())
 		}

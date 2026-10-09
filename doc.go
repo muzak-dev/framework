@@ -688,6 +688,47 @@
 // and a file with no extension is application/octet-stream rather than
 // whatever its first bytes resemble.
 //
+// # Responses other than JSON
+//
+// A handler's Out is encoded as JSON unless it is one of the types that say
+// otherwise, which the router recognises when the route is registered and the
+// document describes as what they send. [HTML] writes a page. [Bytes] writes a
+// body already in memory under the media type it names, and [Stream] copies
+// one that is read as it is sent, closing its body exactly once on every path
+// the request can take, a HEAD, an error returned beside it and a client that
+// went away included. [Produces] lists their media types in the document,
+// which otherwise says application/octet-stream:
+//
+//	r.Get("/reports/{id}.csv", handlers.Report, muzak.Produces("text/csv"))
+//
+// [FileResponse] serves one file from an [io/fs.FS] with
+// [net/http.ServeContent], so ranges and the conditional headers work, after
+// refusing any name that would leave the filesystem, name a dotfile, or mean
+// something else to Windows. The name is all it checks: serve a directory on
+// disk through the FS of an [os.Root], which a symbolic link cannot lead out
+// of, rather than [os.DirFS], which follows one anywhere. Each of the three is
+// sent with "X-Content-Type-Options: nosniff", a content type a handler names
+// is refused with a 500 rather than sent when it is not a media type, and a
+// filename offered for saving is cleaned before it reaches
+// Content-Disposition.
+//
+// [Redirect] sends the client elsewhere, and by default only to a path on this
+// origin: an absolute URL must name a host listed with [RedirectHosts], or be
+// marked External by a handler that built it itself. A target a browser or a
+// decoding proxy would read as another host, "//evil.com" and every encoded,
+// dotted or Unicode spelling of it, fails the request with a 500 instead, and
+// is logged without the target.
+//
+// [AutoETag] tags a JSON, HTML or Bytes response to a GET or HEAD with a hash
+// of its body, and answers a request that already holds the body with 304 Not
+// Modified, carrying only the headers a cache needs:
+//
+//	app := muzak.New(opts, muzak.AutoETag())
+//
+// It composes with [Compress], which weakens the tag of what it compresses,
+// and with a guarded route, whose 304 stays private. A route that does not
+// declare it pays nothing for it.
+//
 // # What is generated
 //
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs

@@ -813,6 +813,59 @@
 // instance names the request rather than its path. The default envelope
 // remains the default.
 //
+// # Authentication that enforces what it documents
+//
+// A security scheme built by [JWTBearer] or [APIKeyVerifier] is written into
+// the OpenAPI document like any other, and is also enforced: a route whose
+// [WithSecurity] names it refuses a request without a valid credential before
+// its guards, providers and handler run, and hands the verified principal to
+// the rest of the route, so the document and the behaviour are one
+// declaration and cannot drift apart:
+//
+//	app := muzak.New(muzak.AppOptions{
+//		SecuritySchemes: map[string]muzak.SecurityScheme{
+//			"oidc": muzak.JWTBearer(muzak.JWTOptions{
+//				Issuers:    []string{"https://login.example.com/"},
+//				Audience:   "https://api.example.com",
+//				Algorithms: []string{"RS256"},
+//				JWKS:       muzak.JWKSOptions{URL: "https://login.example.com/.well-known/jwks.json"},
+//			}),
+//		},
+//	})
+//
+//	type MeIn struct {
+//		Claims muzak.Dep[*muzak.Claims]
+//	}
+//
+//	r := muzak.NewRouter(muzak.WithSecurity(muzak.Require("oidc", "profile")))
+//	r.Get("/me", func(ctx *muzak.Context, in MeIn) (Me, error) {
+//		return Me{Subject: in.Claims.Get().Subject}, nil
+//	})
+//
+// A token is verified against an explicit list of algorithms, never "none",
+// with a key of the algorithm's own kind that its kid selects, so an RSA
+// public key is never an HMAC secret and a token cannot pick its key; its
+// issuer, audience and dates are checked with a bounded leeway; and a token
+// that names its own key with jku, jwk, x5u or x5c, or asks for an extension
+// with crit, is refused. Every bound is explicit: the token's length, its
+// base64url, which must be strict, the size and depth of its JSON, which may
+// not repeat a member, and the keys a signature is tried against. A key set
+// is fetched over https through the SSRF-safe [Client], cached within the
+// bounds its Cache-Control allows, refreshed in the background while the
+// application runs, and fetched again for an unknown kid at most once per
+// interval, however many such tokens arrive. A failed fetch keeps the last
+// set.
+//
+// A refusal is 401 with an RFC 6750 challenge, or 403 with insufficient_scope
+// when a valid credential lacks a scope [Require] names, rendered by the error
+// renderer, and it says nothing about which check failed. A key is compared
+// in constant time against digests, and neither a token nor a key is ever
+// logged or echoed. [ClaimsAs] decodes a token's custom claims into a type of
+// the application's own, and [ResourceMetadata] publishes the RFC 9728
+// document an OAuth client discovers the API's authorization server by. A
+// route that names only descriptive schemes is documented and not enforced,
+// exactly as before, and pays nothing.
+//
 // # What is generated
 //
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs
@@ -891,9 +944,10 @@
 //
 // They are emitted as components.securitySchemes and a security list on each
 // operation that declared one, which is what gives the documentation UI
-// something to offer under Authorize. They describe and nothing more: a scheme
-// is never consulted while a request is served, so a route that names one is
-// only protected by the guard it also has. An application that declares none
+// something to offer under Authorize. A descriptive scheme describes and
+// nothing more: it is never consulted while a request is served, so a route
+// that names one is only protected by the guard it also has. A verifying one
+// enforces as well; see "Authentication that enforces what it documents". An application that declares none
 // emits none, and a scheme, a scope or a requirement that cannot be described is
 // reported when the application is built.
 //

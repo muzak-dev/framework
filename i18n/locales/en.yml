@@ -169,6 +169,8 @@ en:
       412: "A precondition given in the request failed."
       413: "The request body is larger than this route accepts."
       415: "The request body is in a media type this route cannot read."
+      # A request refused because AppOptions.AllowedHosts does not list its host.
+      421: "This server does not serve the requested host."
       422: "The request was understood but could not be processed."
       429: "Too many requests have been sent."
       500: "The server could not complete the request."

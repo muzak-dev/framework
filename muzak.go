@@ -245,6 +245,54 @@ type AppOptions struct {
 	// which is where request metrics are recorded. Nil, the default, costs
 	// nothing; see [RequestObserver].
 	Observer RequestObserver
+
+	// AllowedHosts lists the hosts the application answers to, and refuses a
+	// request for any other with 421 Misdirected Request, rendered by the
+	// error renderer and logged, before anything else runs for it: no route,
+	// no mount, no documentation and no middleware installed with [App.Use].
+	// It is the defence against a forged Host header, which a client writes
+	// freely: a password reset link built from it, a cache keyed on it, a
+	// redirect naming it or a DNS rebinding attack against a service on a
+	// private address all start there.
+	//
+	//	AllowedHosts: []string{"example.com", "*.example.com", "localhost:8080"}
+	//
+	// An entry is a host name, an IPv4 address or an IPv6 address in
+	// brackets, with an optional port, and is compared without regard to the
+	// case of ASCII letters. An entry with no port allows any port, and one
+	// with a port allows that port only, so a request that names no port
+	// matches only an entry that names none. A single leading "*." allows
+	// every subdomain, of one label or more, but not the domain itself, which
+	// is listed on its own when it is served too. A trailing dot on the
+	// request's host, the fully qualified spelling, is ignored. An
+	// internationalized name is written in its punycode (xn--) form, which is
+	// what a client sends. X-Forwarded-Host and every other forwarding header
+	// are ignored; behind a proxy, list the Host the proxy passes on. An
+	// entry that can never match, with a scheme, a path, credentials, a "*"
+	// anywhere but the start, whitespace or a character outside ASCII, is a
+	// build error.
+	//
+	// Unset, the default, no check is made and it costs nothing.
+	AllowedHosts []string
+
+	// RedirectHTTPS, when set, answers a request that arrived over plain HTTP
+	// with a redirect to the same host, path and query over https, 301 for
+	// GET and HEAD and 308 for every other method; see [RedirectHTTPSOptions].
+	//
+	// A request is plain HTTP when it did not arrive over TLS, unless the
+	// peer it came from is a proxy [ClientIPOptions.TrustedProxies] names and
+	// that proxy says the client used https, in X-Forwarded-Proto, or in the
+	// proto parameter of Forwarded when that is [ClientIPOptions.Header].
+	// From any other peer the claim is ignored. A request for an ACME HTTP-01
+	// challenge, "/.well-known/acme-challenge/" followed by a token, is never
+	// redirected, so a certificate authority can reach it. The redirect sends
+	// no Strict-Transport-Security; [SecurityHeaders] sends it on responses
+	// served over TLS.
+	//
+	// The redirect names only a host the application vouches for, so it needs
+	// AllowedHosts or [RedirectHTTPSOptions.Host]; with neither it is a build
+	// error. It is nil by default, which redirects nothing.
+	RedirectHTTPS *RedirectHTTPSOptions
 }
 
 // App is a Muzak application: a root router plus the server, middleware,
@@ -304,6 +352,14 @@ type App struct {
 	// of them until its deadline, because a handler that is still streaming is
 	// a handler that has not returned.
 	streams liveRegistry[*sseStream]
+
+	// edge is the host allowlist and HTTPS redirect, built with the other
+	// checks and nil when neither is configured. edgeExempt exempts a request
+	// from both, and is nil, exempting nothing, until a feature that must be
+	// reachable whatever the Host and scheme, such as a health probe, sets it
+	// before the handler is assembled. See allowedhosts.go.
+	edge       Middleware
+	edgeExempt func(*http.Request) bool
 
 	buildOnce sync.Once
 	buildErr  error
@@ -638,7 +694,8 @@ func (a *App) build() {
 		return len(y.path) - len(x.path)
 	})
 	a.linkNestedMounts()
-	// Handler mounts; see interop.go.
+	// Handler mounts, the host allowlist and the HTTPS redirect; see
+	// interop.go.
 	a.buildInterop(state)
 	a.validateOperations(state)
 
@@ -760,6 +817,12 @@ func (a *App) buildHandler(cors Middleware) http.Handler {
 	}
 	if cors != nil {
 		handler = cors(handler)
+	}
+	if a.edge != nil {
+		// Inside the access log and the request identifier, so a refused host
+		// or a redirect is recorded like any response, and outside everything
+		// else, so nothing runs for a request that is refused or redirected.
+		handler = a.edge(handler)
 	}
 	for i := len(a.middleware) - 1; i >= 0; i-- {
 		handler = a.middleware[i](handler)

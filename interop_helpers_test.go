@@ -9,7 +9,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
+
+	"muzak.dev/framework/i18n"
 )
 
 // mountCall is what a mounted handler saw of one request.
@@ -110,6 +113,38 @@ func rawExchange(t *testing.T, addr, request string) (*http.Response, string) {
 	defer res.Body.Close()
 	body, _ := io.ReadAll(res.Body)
 	return res, string(body)
+}
+
+// interopSpanish translates the sentences and titles the interop features
+// produce, written with escapes as every locale fixture in this repository's
+// source is.
+const interopSpanish = `
+es:
+  muzak:
+    http:
+      404: "No se encontr\u00f3 el recurso solicitado."
+      421: "Este servidor no atiende el host solicitado."
+    status:
+      404: "No encontrado"
+      421: "Solicitud mal dirigida"
+      422: "Entidad no procesable"
+    validation:
+      summary: "La solicitud no pudo ser validada."
+`
+
+// interopStore chains interopSpanish in front of the locale the framework
+// ships.
+func interopStore(t *testing.T) *i18n.Store {
+	t.Helper()
+	own, err := i18n.Load(fstest.MapFS{"locales/es.yml": &fstest.MapFile{Data: []byte(interopSpanish)}}, "locales")
+	if err != nil {
+		t.Fatalf("loading the Spanish locale: %v", err)
+	}
+	store, err := i18n.New(i18n.StoreOptions{Backend: i18n.NewChain(own.Backend(), i18n.Builtin().Backend())})
+	if err != nil {
+		t.Fatalf("chaining the stores: %v", err)
+	}
+	return store
 }
 
 // rawGet is rawExchange for a GET of target with the given Host and extra

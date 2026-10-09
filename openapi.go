@@ -262,6 +262,9 @@ type Response struct {
 	// Content maps media types to their schemas, and is absent for responses
 	// with no body.
 	Content map[string]MediaType `json:"content,omitzero"`
+	// Headers describes the headers the response carries, such as the
+	// Location of a redirect, and is absent when none is described.
+	Headers map[string]*ResponseHeader `json:"headers,omitzero"`
 }
 
 // Components holds the reusable schemas an operation refers to by name.
@@ -288,6 +291,9 @@ type Schema struct {
 	// ContentEncoding names the encoding a string carries binary data in,
 	// which is "base64" for a byte slice or array in a JSON body.
 	ContentEncoding string `json:"contentEncoding,omitzero"`
+	// ContentMediaType names the media type of the bytes a string stands
+	// for, as it does for the body of a [Bytes], [Stream] or [FileResponse].
+	ContentMediaType string `json:"contentMediaType,omitzero"`
 	// Title names the schema in generated documentation.
 	Title string `json:"title,omitzero"`
 	// Description explains the value, taken from its doc struct tag.
@@ -581,10 +587,7 @@ func (a *App) operationFor(rt *Route, builder *schemaBuilder) *Operation {
 			Content:     builder.eventStreamContent(rt.outType),
 		}
 	default:
-		op.Responses[strconv.Itoa(rt.Status)] = &Response{
-			Description: orDefault(http.StatusText(rt.Status), "Success"),
-			Content:     builder.responseContent(rt.outType),
-		}
+		op.Responses[strconv.Itoa(rt.Status)] = builder.successResponse(rt)
 	}
 	if len(rt.plan.params) > 0 || rt.plan.body != nil || rt.plan.multipart {
 		op.Responses[strconv.Itoa(http.StatusUnprocessableEntity)] = builder.errorResponse("The request could not be validated.")
@@ -1490,6 +1493,9 @@ func (b *schemaBuilder) responseContent(t reflect.Type) map[string]MediaType {
 	if t == htmlType {
 		return map[string]MediaType{"text/html": {Schema: &Schema{Type: "string"}}}
 	}
+	if content, typed := typedContent(t); typed {
+		return content
+	}
 	return map[string]MediaType{"application/json": {Schema: b.schemaFor(t)}}
 }
 
@@ -1526,6 +1532,7 @@ func (b *schemaBuilder) declaredResponse(doc responseDoc) *Response {
 	return &Response{
 		Description: description,
 		Content:     b.responseContent(doc.model),
+		Headers:     typedHeaders(doc.model),
 	}
 }
 

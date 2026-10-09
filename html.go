@@ -32,6 +32,9 @@ type HTML string
 func (c *Context) writeHTML(status int, document HTML) error {
 	header := c.w.Header()
 	setIfAbsent(header, "Content-Type", "text/html; charset=utf-8")
+	if c.notModifiedString(status, string(document)) {
+		return nil
+	}
 	header.Set("Content-Length", strconv.Itoa(len(document)))
 	c.w.WriteHeader(status)
 	_, err := io.WriteString(c.w, string(document))

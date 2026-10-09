@@ -1309,6 +1309,11 @@ var responseBufferPool = sync.Pool{
 // success with an error; every branch below settles them before its first
 // write. With none pending, settling is a length check.
 func (c *Context) writeResponse(v any) error {
+	// Bytes, Stream, Redirect and FileResponse are written as they are; see
+	// responses.go.
+	if typed, err := c.writeTyped(v); typed {
+		return err
+	}
 	if c.w.written {
 		// The handler wrote the response itself, which is a supported way to
 		// stream; there is nothing left to encode.
@@ -1337,7 +1342,7 @@ func (c *Context) writeResponse(v any) error {
 		}
 	}()
 
-	if err := json.MarshalWrite(buf, v, durationJSON); err != nil {
+	if err := json.MarshalWrite(buf, v, c.jsonOptions(status)); err != nil {
 		return fmt.Errorf("muzak: encoding the response of %s %s failed: %w", c.r.Method, c.route.pathOrRequest(c.r), err)
 	}
 	if err := c.settle(nil); err != nil {
@@ -1345,6 +1350,9 @@ func (c *Context) writeResponse(v any) error {
 	}
 	header := c.w.Header()
 	setIfAbsent(header, "Content-Type", "application/json; charset=utf-8")
+	if c.notModifiedBytes(status, buf.Bytes()) {
+		return nil
+	}
 	header.Set("Content-Length", strconv.Itoa(buf.Len()))
 	c.w.WriteHeader(status)
 	_, err := c.w.Write(buf.Bytes())

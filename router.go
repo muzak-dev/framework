@@ -103,6 +103,10 @@ type routerConfig struct {
 	securitySet        bool
 	// timeout is what [Timeout] declared; see [Route.resolveTimeout].
 	timeout time.Duration
+
+	// output is what the router declares about its routes' responses; see
+	// responses.go.
+	output outputOptions
 }
 
 // routeConfig accumulates the settings declared on a single route.
@@ -137,6 +141,10 @@ type routeConfig struct {
 	securitySet        bool
 	// timeout is what [Timeout] declared; see [Route.resolveTimeout].
 	timeout time.Duration
+
+	// output is what the route declares about its response; see
+	// responses.go.
+	output outputOptions
 }
 
 // WithPrefix mounts a router under a path prefix.
@@ -554,6 +562,10 @@ type Route struct {
 	// configuration its event streams are built with.
 	sse *sseConfig
 
+	// output is how the route's response is written, resolved from its Out
+	// type and the response options above it; see responses.go.
+	output routeOutput
+
 	// cfg is the configuration declared directly on the route, retained until
 	// the application is built and the inherited configuration is known.
 	cfg      routeConfig
@@ -861,6 +873,11 @@ func register[In, Out any](r *Router, method, path string, h Handler[In, Out], o
 		}
 		out, err := h(c, in)
 		if err != nil {
+			if rt.output.mayStream {
+				// A Stream returned beside an error is never written, and
+				// its Body would otherwise never be closed.
+				closeStreamOutput(any(out))
+			}
 			return err
 		}
 		// Recorded before the response is written, because the tasks the
@@ -900,6 +917,7 @@ type inherited struct {
 	security              []SecurityRequirement
 	securitySet           bool
 	timeout               time.Duration
+	output                outputOptions
 }
 
 // merge layers a router's own configuration on top of what it inherited,
@@ -931,6 +949,7 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		security:              in.security,
 		securitySet:           in.securitySet,
 		timeout:               in.timeout,
+		output:                in.output.merge(cfg.output),
 	}
 	if cfg.timeout != 0 {
 		out.timeout = cfg.timeout
@@ -1075,6 +1094,9 @@ func (rt *Route) resolve(in inherited) error {
 	}
 	if rt.Status != clampStatus(rt.Status) {
 		return fmt.Errorf("muzak: %s %s: declared status %d is not a valid HTTP status code", rt.Method, rt.Path, cfg.status)
+	}
+	if err := rt.resolveOutput(in.output); err != nil {
+		return err
 	}
 	for _, doc := range rt.responses {
 		// A documented outcome becomes a key in the OpenAPI document, so a

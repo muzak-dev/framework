@@ -38,7 +38,9 @@ const (
 // The document is untrusted input as far as reading it goes: it may be at
 // most 16 MiB, and nest at most 128 levels, and anything larger or deeper is
 // refused before it is decoded, so a hostile file costs a bounded amount to
-// read and to compare.
+// read and to compare. The names an error quotes from it have every character
+// a terminal would act on escaped, as [WriteChanges] escapes them, since the
+// error is printed by a failing test.
 func ReadDocument(r io.Reader) (*Document, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxDocumentBytes+1))
 	if err != nil {
@@ -75,7 +77,7 @@ func checkDocumentDepth(data []byte) error {
 		}
 		if dec.StackDepth() > maxDocumentDepth {
 			return fmt.Errorf("muzak: the OpenAPI document nests deeper than %d levels at %s, which is more than a document is read at",
-				maxDocumentDepth, dec.StackPointer())
+				maxDocumentDepth, printableReport(string(dec.StackPointer())))
 		}
 	}
 }
@@ -204,7 +206,7 @@ func checkDocument(d *Document) error {
 			return fmt.Errorf("muzak: the OpenAPI document has the path %q, which does not start with a slash", path)
 		}
 		if d.Paths[path] == nil {
-			return fmt.Errorf("muzak: the OpenAPI document has a null path item at %s", location)
+			return fmt.Errorf("muzak: the OpenAPI document has a null path item at %s", printableReport(location))
 		}
 		for _, op := range pathOperations(d.Paths[path]) {
 			if op.op == nil {
@@ -230,10 +232,10 @@ var parameterLocations = []string{"cookie", "header", "path", "query"}
 func (d documentCheck) operation(location string, op *Operation) error {
 	for _, p := range op.Parameters {
 		if !slices.Contains(parameterLocations, p.In) {
-			return fmt.Errorf("muzak: the OpenAPI document has a parameter %q at %s read from %q, which is not where OpenAPI reads one from", p.Name, location, p.In)
+			return fmt.Errorf("muzak: the OpenAPI document has a parameter %q at %s read from %q, which is not where OpenAPI reads one from", p.Name, printableReport(location), p.In)
 		}
 		if p.Name == "" {
-			return fmt.Errorf("muzak: the OpenAPI document has a %s parameter with no name at %s", p.In, location)
+			return fmt.Errorf("muzak: the OpenAPI document has a %s parameter with no name at %s", p.In, printableReport(location))
 		}
 		if err := d.optionalSchema(location+"/parameters/"+p.In+"/"+pointerToken(p.Name)+"/schema", p.Schema); err != nil {
 			return err
@@ -247,10 +249,10 @@ func (d documentCheck) operation(location string, op *Operation) error {
 	for _, status := range slices.Sorted(maps.Keys(op.Responses)) {
 		at := location + "/responses/" + pointerToken(status)
 		if !isStatusKey(status) {
-			return fmt.Errorf("muzak: the OpenAPI document has a response keyed %q at %s, which is neither a status code, a range such as 4XX, nor default", status, location)
+			return fmt.Errorf("muzak: the OpenAPI document has a response keyed %q at %s, which is neither a status code, a range such as 4XX, nor default", status, printableReport(location))
 		}
 		if op.Responses[status] == nil {
-			return fmt.Errorf("muzak: the OpenAPI document has a null response at %s", at)
+			return fmt.Errorf("muzak: the OpenAPI document has a null response at %s", printableReport(at))
 		}
 		if err := d.content(at+"/content", op.Responses[status].Content); err != nil {
 			return err
@@ -296,12 +298,12 @@ func (d documentCheck) optionalSchema(location string, s *Schema) error {
 // before decoding, so the recursion is too.
 func (d documentCheck) schema(location string, s *Schema) error {
 	if s == nil {
-		return fmt.Errorf("muzak: the OpenAPI document has a null schema at %s", location)
+		return fmt.Errorf("muzak: the OpenAPI document has a null schema at %s", printableReport(location))
 	}
 	if s.Ref != "" {
 		name, target := refTarget(d.schemas, s.Ref)
 		if target == nil || strings.Contains(name, "/") {
-			return fmt.Errorf("muzak: the OpenAPI document refers to %q at %s, which is not a schema in its own components", s.Ref, location)
+			return fmt.Errorf("muzak: the OpenAPI document refers to %q at %s, which is not a schema in its own components", s.Ref, printableReport(location))
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(s.Properties)) {

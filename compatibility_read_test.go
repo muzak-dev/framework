@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 )
 
 // minimalDocument is the smallest document ReadDocument accepts, with room for
@@ -171,6 +173,41 @@ func TestReadDocumentDepthLimit(t *testing.T) {
 	deepValue := minimalDocument(`{"enum":[` + strings.Repeat("[", maxDocumentDepth) + strings.Repeat("]", maxDocumentDepth) + `]}`)
 	if _, err := ReadDocument(strings.NewReader(deepValue)); err == nil || !strings.Contains(err.Error(), "nests deeper") {
 		t.Fatalf("a deeply nested enum value = %v", err)
+	}
+}
+
+// TestReadDocumentErrorsEscapeDocumentText refuses documents whose names hold
+// a terminal escape sequence, at every place an error quotes where it found
+// the problem. The error reaches a terminal through a failing test, so a
+// baseline someone else wrote must not be able to rewrite what it prints.
+func TestReadDocumentErrorsEscapeDocumentText(t *testing.T) {
+	t.Parallel()
+	const evil = `\u001b]0;owned\u0007\u001b[2J\u009b31m`
+	path := func(item string) string {
+		return `{"openapi":"3.1.0","info":{"title":"t","version":"1"},"paths":{"/` + evil + `":` + item + `}}`
+	}
+	operation := func(op string) string { return path(`{"get":` + op + `}`) }
+	for name, input := range map[string]string{
+		"null path item":    path(`null`),
+		"parameter source":  operation(`{"operationId":"x","parameters":[{"name":"q","in":"body","schema":{}}],"responses":{}}`),
+		"unnamed parameter": operation(`{"operationId":"x","parameters":[{"name":"","in":"query","schema":{}}],"responses":{}}`),
+		"status key":        operation(`{"operationId":"x","responses":{"ok":{"description":""}}}`),
+		"null response":     operation(`{"operationId":"x","responses":{"200":null}}`),
+		"dangling ref":      operation(`{"operationId":"x","parameters":[{"name":"q","in":"query","schema":{"$ref":"#/x"}}],"responses":{}}`),
+		"null schema":       minimalDocument(`{"properties":{"` + evil + `":null}}`),
+		"depth":             minimalDocument(`{"properties":{"` + evil + `":` + strings.Repeat(`{"items":`, maxDocumentDepth) + `{}` + strings.Repeat(`}`, maxDocumentDepth) + `}}`),
+	} {
+		_, err := ReadDocument(strings.NewReader(input))
+		if err == nil {
+			t.Errorf("%s: ReadDocument accepted the document", name)
+			continue
+		}
+		for _, r := range err.Error() {
+			if r == utf8.RuneError || !unicode.IsPrint(r) {
+				t.Errorf("%s: the error holds %U unescaped: %q", name, r, err)
+				break
+			}
+		}
 	}
 }
 

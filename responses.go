@@ -83,7 +83,8 @@ type Bytes struct {
 // Muzak cannot interrupt a Read that blocks. A Body whose Read can wait, an
 // [io.Pipe] fed by a goroutine for instance, should end when the request's
 // [Context.Context] is done; a body from an outbound request made with that
-// context already does.
+// context already does. A goroutine feeding the body keeps that context, and
+// never the *Context, which is reused once the handler returns.
 type Stream struct {
 	// ContentType is the media type the body is sent as, checked as
 	// [Bytes.ContentType] is. Empty means application/octet-stream.

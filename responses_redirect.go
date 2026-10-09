@@ -161,7 +161,7 @@ func validHostName(s string) bool {
 		}
 		for i := 0; i < len(label); i++ {
 			c := label[i]
-			if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-') {
+			if upper := 'A' <= c && c <= 'Z'; !upper && !isLowerAlnum(c) && c != '-' {
 				return false
 			}
 		}
@@ -391,16 +391,20 @@ func defaultPort(scheme string) string {
 // it, which tells "javascript:" apart from a relative path such as "a:b"
 // that has no scheme at all.
 func validScheme(s string) bool {
-	if s == "" || !('a' <= s[0] && s[0] <= 'z') {
+	if s == "" || s[0] < 'a' || s[0] > 'z' {
 		return false
 	}
 	for i := 1; i < len(s); i++ {
-		c := s[i]
-		if !('a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '+' || c == '-' || c == '.') {
+		if c := s[i]; !isLowerAlnum(c) && c != '+' && c != '-' && c != '.' {
 			return false
 		}
 	}
 	return true
+}
+
+// isLowerAlnum reports whether c is a lower-case ASCII letter or a digit.
+func isLowerAlnum(c byte) bool {
+	return ('a' <= c && c <= 'z') || ('0' <= c && c <= '9')
 }
 
 // isURIChar reports whether c may appear in a URI reference as RFC 3986

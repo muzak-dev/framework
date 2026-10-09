@@ -840,6 +840,12 @@ const maxPropagatedID = 256
 // logs of both services can be joined on it, and it leaves a header the caller
 // set alone.
 //
+// When the application traces requests (see [AppOptions.Tracing]) it also
+// writes the W3C trace context of the current span, through
+// [InjectTraceContext], so the service called records its work as a child of
+// this one; a traceparent the caller set is left alone, with its tracestate.
+// A request that is not traced sends no trace context at all.
+//
 // An identifier that is not something to put in a header, because it holds a
 // control character or is implausibly long, is left out rather than failing
 // the call, since the call matters more than the correlation.
@@ -856,8 +862,11 @@ func DefaultPropagate(ctx context.Context, h http.Header) {
 			h.Set(HeaderRequestID, id)
 		}
 	}
-	// Trace context is propagated here as well once the application traces
-	// requests, which is the one place every outgoing call passes through.
+	// Trace context goes the same way: here is the one place every outgoing
+	// call passes through, and a caller's own traceparent stands.
+	if h.Get(HeaderTraceparent) == "" {
+		InjectTraceContext(ctx, h)
+	}
 }
 
 // isHeaderSafe reports whether a value can be written into a header as it is:

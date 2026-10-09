@@ -393,10 +393,15 @@ func TestClientCancellationEndsTheWaitBetweenAttempts(t *testing.T) {
 	t.Parallel()
 	server := statusServer(t, http.Header{"Retry-After": {"5"}}, 503)
 	client, network := newTestClient(t, ClientOptions{})
-	client.retry.wait = sleepContext
-	network.serve("api.example.com", publicA, "80", server.Server)
 	ctx, cancel := context.WithCancel(t.Context())
-	time.AfterFunc(50*time.Millisecond, cancel)
+	// The cancellation is timed from the start of the wait, not of the call:
+	// on a loaded machine the first attempt alone took longer than a timer
+	// started with the call, which then cancelled it before it was sent.
+	client.retry.wait = func(ctx context.Context, d time.Duration) error {
+		time.AfterFunc(50*time.Millisecond, cancel)
+		return sleepContext(ctx, d)
+	}
+	network.serve("api.example.com", publicA, "80", server.Server)
 	start := time.Now()
 	_, err := client.Do(mustRequest(t, ctx, http.MethodGet, "http://api.example.com/"))
 	if !errors.Is(err, context.Canceled) {

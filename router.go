@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -100,6 +101,8 @@ type routerConfig struct {
 	skipRateLimit      bool
 	security           []SecurityRequirement
 	securitySet        bool
+	// timeout is what [Timeout] declared; see [Route.resolveTimeout].
+	timeout time.Duration
 }
 
 // routeConfig accumulates the settings declared on a single route.
@@ -132,6 +135,8 @@ type routeConfig struct {
 	skipRateLimit      bool
 	security           []SecurityRequirement
 	securitySet        bool
+	// timeout is what [Timeout] declared; see [Route.resolveTimeout].
+	timeout time.Duration
 }
 
 // WithPrefix mounts a router under a path prefix.
@@ -533,6 +538,9 @@ type Route struct {
 	rateLimitOpts RateLimitOptions
 	skipRateLimit bool
 
+	// timeout is the deadline [Timeout] gives the route, and zero for none.
+	timeout time.Duration
+
 	inType  reflect.Type
 	outType reflect.Type
 	plan    *bindPlan
@@ -888,6 +896,7 @@ type inherited struct {
 	skipRateLimit         bool
 	security              []SecurityRequirement
 	securitySet           bool
+	timeout               time.Duration
 }
 
 // merge layers a router's own configuration on top of what it inherited,
@@ -918,6 +927,10 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		skipRateLimit:         in.skipRateLimit || cfg.skipRateLimit,
 		security:              in.security,
 		securitySet:           in.securitySet,
+		timeout:               in.timeout,
+	}
+	if cfg.timeout != 0 {
+		out.timeout = cfg.timeout
 	}
 	if cfg.securitySet {
 		out.security, out.securitySet = cfg.security, true
@@ -1127,6 +1140,9 @@ func (rt *Route) resolve(in inherited) error {
 		return err
 	}
 	rt.plan = plan
+	if err := rt.resolveTimeout(in); err != nil {
+		return err
+	}
 	if rt.websocket != nil {
 		return rt.resolveWebSocket(in)
 	}

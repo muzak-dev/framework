@@ -144,6 +144,8 @@ func (c *Context) ResponseWriter() http.ResponseWriter { return c.w }
 // timeout. A long-lived response should be an event stream or a WebSocket
 // route, whose own context and connection are ended when shutdown begins, or
 // should watch a channel of its own that the application closes at that point.
+//
+// On a route declared with [Timeout] it also carries the route's deadline.
 func (c *Context) Context() context.Context { return c.r.Context() }
 
 // Logger returns the application's logger with the request attached: every

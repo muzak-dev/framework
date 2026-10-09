@@ -877,22 +877,29 @@ func (a *App) run(c *Context, route *Route) {
 			return
 		}
 	}
+	if route.timeout > 0 {
+		// After the rate limit and the refusals above, which are the
+		// server's own decisions, and before everything the route itself
+		// runs, so that a guard, a provider and the binder all see the
+		// deadline the handler is held to.
+		defer c.startDeadline(route.timeout)()
+	}
 	// Before the dependencies, so a guard verifying a signature over the bytes
 	// sees them, and after the rate limit above, so a client past its budget is
 	// refused without the server buffering a body on its behalf.
 	if route.captureBody {
 		if err := captureRequestBody(c, route); err != nil {
-			a.fail(c, err)
+			a.fail(c, route.timedOut(c, err))
 			return
 		}
 	}
 	if err := route.resolveDependencies(c); err != nil {
-		a.fail(c, err)
+		a.fail(c, route.timedOut(c, err))
 		return
 	}
 	if limits != nil && limits.afterDependencies {
 		if err := limits.check(c); err != nil {
-			a.fail(c, err)
+			a.fail(c, route.timedOut(c, err))
 			return
 		}
 	}
@@ -905,7 +912,7 @@ func (a *App) run(c *Context, route *Route) {
 		setIfAbsent(c.w.Header(), "Cache-Control", privateCacheControl)
 	}
 	if err := route.invoke(c); err != nil {
-		a.fail(c, err)
+		a.fail(c, route.timedOut(c, err))
 	}
 }
 

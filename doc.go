@@ -1060,6 +1060,27 @@
 // testclient.AssertCompatible does all of it against a baseline kept in the
 // repository, and records a new baseline when MUZAK_UPDATE_OPENAPI=1 is set.
 //
+// # The muzak command
+//
+// The command in muzak.dev/framework/cmd/muzak works on a project from the
+// outside. muzak new creates one laid out the way the framework's example is,
+// muzak dev builds and runs it and restarts it whenever a source changes,
+// muzak routes lists the operations a document describes, muzak diff compares
+// two documents with [CompareDocuments] and exits non-zero on the changes a CI
+// step should refuse, and muzak ts writes the declarations the tsgen package
+// generates:
+//
+//	go install muzak.dev/framework/cmd/muzak@latest
+//
+//	muzak new shop -module example.com/shop
+//	muzak diff -fail-on breaking baseline.json current.json
+//
+// It belongs to this module, so the command installed at a version is the one
+// that matches the framework of that version, and the project it creates
+// requires that version. It uses the standard library alone, like the rest of
+// the module, and escapes everything it prints from a document for the
+// terminal.
+//
 // # Errors
 //
 // Every failure renders as one envelope, carrying a machine-readable code, a

@@ -147,7 +147,7 @@ func (s *cookieSealer) seal(record []byte) (string, error) {
 // is refused unread, and anything that survives is decrypted at most once per
 // configured secret, each attempt linear in its length.
 func (s *cookieSealer) open(value string) ([]byte, bool) {
-	if len(value) > maxCookieBytes || len(value) < cookieEncoding.EncodedLen(cookieOverhead+recordHeaderSize) || !isBase64URL(value) {
+	if len(value) > maxCookieBytes || len(value) < cookieEncoding.EncodedLen(cookieOverhead+recordHeaderSize) || !onlyBase64URL(value) {
 		return nil, false
 	}
 	raw, err := cookieEncoding.DecodeString(value)
@@ -168,10 +168,10 @@ func (s *cookieSealer) open(value string) ([]byte, bool) {
 	return nil, false
 }
 
-// isBase64URL reports whether s holds only the base64url alphabet. The
+// onlyBase64URL reports whether s holds only the base64url alphabet. The
 // decoder skips line breaks wherever they appear, which would let one cookie
 // be spelled many ways; nothing this package writes contains one.
-func isBase64URL(s string) bool {
+func onlyBase64URL(s string) bool {
 	for i := range len(s) {
 		switch b := s[i]; {
 		case 'A' <= b && b <= 'Z', 'a' <= b && b <= 'z', '0' <= b && b <= '9', b == '-', b == '_':

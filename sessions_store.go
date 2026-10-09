@@ -77,7 +77,7 @@ func newSessionID() (id, key string) {
 // anything that is not one this package could have issued. It is linear in a
 // value of fixed length, and anything longer is refused unread.
 func parseSessionID(value string) ([]byte, bool) {
-	if len(value) != cookieEncoding.EncodedLen(sessionIDBytes) || !isBase64URL(value) {
+	if len(value) != cookieEncoding.EncodedLen(sessionIDBytes) || !onlyBase64URL(value) {
 		return nil, false
 	}
 	raw, err := cookieEncoding.DecodeString(value)

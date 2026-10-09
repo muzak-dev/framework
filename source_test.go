@@ -163,7 +163,7 @@ func walkProject(t *testing.T, visit func(name, content string)) {
 			return err
 		}
 		if entry.IsDir() {
-			if skipDir(entry.Name()) {
+			if skipDir(entry.Name()) || (path != root && isOtherCheckout(path)) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -200,6 +200,16 @@ func skipDir(name string) bool {
 		return true
 	}
 	return false
+}
+
+// isOtherCheckout reports whether a directory inside the repository is a
+// checkout of its own, a git worktree or a nested clone, which carries a .git
+// entry. Its files are another working copy's, possibly mid-change, and not
+// this module's: checking them made this module's suite fail on work that was
+// not part of it.
+func isOtherCheckout(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 // checkedExtension reports whether a file's contents are subject to the rules

@@ -412,6 +412,7 @@ func (a *App) buildDocument() *Document {
 		Paths:   make(map[string]*PathItem),
 	}
 	builder := newSchemaBuilder()
+	builder.problems = a.opts.ProblemDetails != nil
 	var tags []string
 
 	// The request bodies are described after everything else. What a body
@@ -1362,6 +1363,10 @@ type schemaBuilder struct {
 	claimed   map[string]bool
 	originals map[string]*Schema
 	variants  map[string][]string
+
+	// problems describes every error response as an RFC 9457 [Problem], for
+	// an application with [AppOptions.ProblemDetails] set; see problem.go.
+	problems bool
 }
 
 // newSchemaBuilder returns an empty builder.
@@ -1536,8 +1541,17 @@ func (b *schemaBuilder) declaredResponse(doc responseDoc) *Response {
 	}
 }
 
-// errorResponse describes a failure carrying the standard error envelope.
+// errorResponse describes a failure carrying the standard error envelope, or
+// an RFC 9457 problem when the application renders errors as problems.
 func (b *schemaBuilder) errorResponse(description string) *Response {
+	if b.problems {
+		return &Response{
+			Description: description,
+			Content: map[string]MediaType{
+				ProblemContentType: {Schema: b.schemaFor(reflect.TypeFor[Problem]())},
+			},
+		}
+	}
 	return &Response{
 		Description: description,
 		Content: map[string]MediaType{

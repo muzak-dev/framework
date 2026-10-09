@@ -196,6 +196,13 @@ func RequestID(opts RequestIDOptions) Middleware {
 // http.ErrAbortHandler is re-panicked rather than swallowed, because net/http
 // uses it to abort a response deliberately.
 func Recovery(logger *slog.Logger) Middleware {
+	return recovery(logger, writeMinimalError)
+}
+
+// recovery is [Recovery] writing its 500 with write, which is how an
+// application rendering problem details answers a panic outside a route in the
+// same format as every other error; see problem.go.
+func recovery(logger *slog.Logger, write func(w http.ResponseWriter, requestID string)) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Wrapping here is what lets the deferred function tell whether the
@@ -220,7 +227,7 @@ func Recovery(logger *slog.Logger) Middleware {
 					slog.String("path", truncateForMessage(r.URL.Path)),
 					slog.String(RequestIDKey, id),
 					slog.String("stack", string(debug.Stack())))
-				writeMinimalError(rw, id)
+				write(rw, id)
 			}()
 			next.ServeHTTP(rw, r)
 		})

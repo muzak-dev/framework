@@ -293,6 +293,18 @@ type AppOptions struct {
 	// AllowedHosts or [RedirectHTTPSOptions.Host]; with neither it is a build
 	// error. It is nil by default, which redirects nothing.
 	RedirectHTTPS *RedirectHTTPSOptions
+
+	// ProblemDetails, when set, makes RFC 9457 problem details the error
+	// format: every error is answered with a [Problem] sent as
+	// application/problem+json, and the OpenAPI document describes every
+	// error response that way. It is nil by default, which keeps the
+	// [ErrorResponse] envelope.
+	//
+	// It installs [ProblemDetails] as the error renderer, unless
+	// ErrorRenderer is set as well, in which case that renderer is used and
+	// is expected to be one built on ProblemDetails, since the document will
+	// say every error is a problem.
+	ProblemDetails *ProblemOptions
 }
 
 // App is a Muzak application: a root router plus the server, middleware,
@@ -463,6 +475,9 @@ func (o AppOptions) withDefaults() AppOptions {
 	}
 	if o.ErrorRenderer == nil {
 		o.ErrorRenderer = DefaultErrorRenderer
+		if o.ProblemDetails != nil {
+			o.ErrorRenderer = ProblemDetails(*o.ProblemDetails)
+		}
 	}
 	if o.DocsPath == "" {
 		o.DocsPath = "/docs"
@@ -493,7 +508,7 @@ func (a *App) installDefaultMiddleware() {
 	if !a.opts.DisableSecurityHeaders {
 		a.middleware = append(a.middleware, SecurityHeaders())
 	}
-	a.middleware = append(a.middleware, Recovery(Scoped(a.logger, ScopeServer)))
+	a.middleware = append(a.middleware, recovery(Scoped(a.logger, ScopeServer), a.writeMinimalError))
 	// Probes are answered here, before anything a probe has no use for and
 	// anything that could refuse it; see HealthOptions.
 	if a.opts.Health.Enabled {
@@ -694,8 +709,8 @@ func (a *App) build() {
 		return len(y.path) - len(x.path)
 	})
 	a.linkNestedMounts()
-	// Handler mounts, the host allowlist and the HTTPS redirect; see
-	// interop.go.
+	// Handler mounts, the host allowlist, the HTTPS redirect and problem
+	// details; see interop.go.
 	a.buildInterop(state)
 	a.validateOperations(state)
 
@@ -1172,7 +1187,7 @@ func (a *App) fail(c *Context, err error) {
 		// to the fixed envelope so the client still receives valid JSON.
 		a.logger.ErrorContext(c.Context(), "muzak: the error renderer produced an unserializable body",
 			slog.String("error", writeErr.Error()))
-		writeMinimalError(c.w, c.RequestID())
+		a.writeMinimalError(c.w, c.RequestID())
 	}
 }
 

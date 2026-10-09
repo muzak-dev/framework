@@ -466,6 +466,11 @@ func (p *callPlan) encode(v reflect.Value, cfg *callConfig) (*encodedRequest, er
 			}
 			out.header[c.name] = []string{value}
 		default:
+			// The binder reads the first cookie of a name, and a list from it
+			// as a list of one, so a second entry would be lost.
+			if len(texts) > 1 {
+				return nil, refuse(p.method, p.path, "the cookie %q holds %d values, and a cookie carries one", c.name, len(texts))
+			}
 			cookie, err := p.cookieValue(c, texts[0])
 			if err != nil {
 				return nil, err

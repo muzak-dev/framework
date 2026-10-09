@@ -263,6 +263,23 @@ func TestEndpointReportsEveryReservedHeader(t *testing.T) {
 	}
 }
 
+func TestEndpointSendsACookieListOfOneAndRefusesMore(t *testing.T) {
+	t.Parallel()
+	type in struct {
+		C []string `cookie:"c"`
+	}
+	ep := NewEndpoint[in, in](http.MethodGet, "/cookies")
+	client := endpointServer(t, func(app *App) {
+		app.Implement(ep, func(_ *Context, v in) (in, error) { return v, nil })
+	})
+	got, err := ep.Call(context.Background(), client, in{C: []string{"one"}})
+	if err != nil || len(got.C) != 1 || got.C[0] != "one" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	_, err = ep.Call(context.Background(), client, in{C: []string{"one", "two"}})
+	assertRefused(t, err, `cookie "c" holds 2 values`)
+}
+
 func TestEndpointLeavesAnAcceptTheInputBindsAsItWasSent(t *testing.T) {
 	t.Parallel()
 	type in struct {

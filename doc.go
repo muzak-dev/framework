@@ -866,6 +866,58 @@
 // route that names only descriptive schemes is documented and not enforced,
 // exactly as before, and pays nothing.
 //
+// # Sessions and cross-origin requests
+//
+// [AppOptions.Sessions] gives every request a session, read the first time a
+// handler, guard or provider calls [Context.Session], so a request that never
+// asks pays nothing:
+//
+//	app := muzak.New(muzak.AppOptions{
+//		Sessions:              &muzak.SessionOptions{Secrets: settings.SessionSecrets},
+//		CrossOriginProtection: &muzak.CrossOriginOptions{},
+//	})
+//
+//	func Login(ctx *muzak.Context, in LoginIn) (LoginOut, error) {
+//		// ... check the password ...
+//		s := ctx.Session()
+//		if err := s.Regenerate(); err != nil { // always, on sign-in
+//			return LoginOut{}, err
+//		}
+//		return LoginOut{}, s.Set("user", user.ID)
+//	}
+//
+//	id, ok := muzak.SessionGet[int64](ctx.Session(), "user")
+//
+// By default the session lives in the cookie itself, encrypted and
+// authenticated with AES-256-GCM under keys derived from the secrets, the
+// first of which encrypts and all of which decrypt. A [SessionStore], such as
+// the bounded [MemorySessionStore], keeps it on the server instead, so that
+// [Session.Destroy] revokes every copy, and the cookie carries a random
+// 256-bit identifier the store only ever sees a digest of. The idle timeout
+// and the lifetime are kept inside the encrypted or stored record, never in
+// the cookie's attributes. The cookie is HttpOnly, Secure, SameSite=Lax and
+// named "__Host-session", a prefix that stops a sibling subdomain or a plain
+// HTTP page from planting or shadowing it. A cookie that was tampered with,
+// truncated, replayed under another name or has expired reads as no session.
+//
+// The session is written once: after the handler and every release, before
+// the response, and only when the request succeeded with a status below 400
+// and the session changed or is due for renewal. [Session.Save] writes it at
+// once, for a change to keep whatever follows. [Session.Regenerate] must be
+// called when a user signs in, or an identifier an attacker planted becomes
+// the victim's session.
+//
+// A session cookie is sent with requests other pages make, so sessions
+// cannot be configured without [AppOptions.CrossOriginProtection]. It is
+// net/http's [http.CrossOriginProtection]: a request other than GET, HEAD
+// or OPTIONS that a browser says came from another origin, in Sec-Fetch-Site
+// or by an Origin that does not name the host, is refused with 403,
+// classified "cross_origin_request" and rendered by the error renderer,
+// before any middleware, guard or handler runs. Origins listed in
+// [CrossOriginOptions.TrustedOrigins] are let through; an origin CORS allows
+// is not trusted by that alone. A WebSocket handshake is a GET, and is left
+// to [WSOptions.AllowedOrigins].
+//
 // # What is generated
 //
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs

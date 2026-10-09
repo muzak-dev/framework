@@ -212,6 +212,20 @@ type ClientOptions struct {
 	// It is called once per call to Do, with the request's context and a copy
 	// of its header, and what it adds is checked like any other header.
 	Propagate func(ctx context.Context, h http.Header)
+
+	// BaseURL is the root the typed endpoints of one service are called
+	// under by [Endpoint.Call], such as "http://users.internal:8080/api": an
+	// endpoint declared at "/users/{id}" is sent to
+	// "http://users.internal:8080/api/users/42". It names the service a
+	// client is for, which is why it belongs here rather than on every call,
+	// and it is where the prefix the service mounts its routers under goes.
+	// [Client.Do] and the JSON helpers take absolute URLs and never read it.
+	//
+	// It must be an absolute http or https URL with a host and nothing after
+	// its path: a query, a fragment or user information panics in NewClient,
+	// because each would be sent with every call and none is what a base
+	// means. Leave it empty for a client that calls no endpoint.
+	BaseURL string
 }
 
 // RetryBudget bounds how many retries a [Client] spends in proportion to the
@@ -281,6 +295,10 @@ type Client struct {
 	retry     *retryPolicy
 	breakers  *breakerSet
 	propagate func(ctx context.Context, h http.Header)
+
+	// baseURL is [ClientOptions.BaseURL] parsed, and nil when none was given;
+	// see endpoint_call.go.
+	baseURL *url.URL
 }
 
 // NewClient builds a [Client].
@@ -326,6 +344,7 @@ func NewClient(opts ClientOptions) *Client {
 		sensitive:        clientSensitiveHeaders(opts.SensitiveHeaders),
 		retry:            newRetryPolicy(opts),
 		propagate:        opts.Propagate,
+		baseURL:          clientBaseURL(opts.BaseURL),
 	}
 	if c.maxResponseBytes <= 0 {
 		c.maxResponseBytes = DefaultClientMaxResponseBytes
@@ -741,7 +760,9 @@ func (e *redirectRefusal) Error() string { return e.message }
 // host the chain passed through cannot send it back with the credentials to a
 // path of its choosing.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
-	if c.maxRedirects < 0 {
+	// An endpoint whose output is a Redirect asks for the redirect itself;
+	// see endpoint_call.go.
+	if c.maxRedirects < 0 || keepsRedirect(req) {
 		return http.ErrUseLastResponse
 	}
 	if len(via) > c.maxRedirects {

@@ -6,7 +6,6 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -39,6 +38,18 @@ type RemoteError struct {
 	// with care, and do not pass it on to a client of your own as it is.
 	Body []byte
 
+	// Code, Message, Details and RequestID are read from Body when it is an
+	// error envelope a Muzak application writes, the default [ErrorResponse]
+	// or an RFC 9457 [Problem], and are empty otherwise; see
+	// endpoint_remote.go for how a body is judged. Code is what to branch on.
+	// Message and the issues in Details are the remote server's text, bounded
+	// in size and count but otherwise as it sent them, so the same care
+	// applies to them as to Body.
+	Code      string
+	Message   string
+	Details   []ErrorDetail
+	RequestID string
+
 	method string
 	origin string
 }
@@ -47,6 +58,11 @@ type RemoteError struct {
 // the status, and leaves the body out, since the body is the remote server's
 // text and an error message is read by whoever reads the log.
 func (e *RemoteError) Error() string {
+	if e.Code != "" && isPlainCode(e.Code) {
+		// The code is the one part of the body worth a place in a log line,
+		// and it is admitted only as a plain identifier; see isPlainCode.
+		return fmt.Sprintf("muzak: %s %s answered with status %d (%s)", e.method, e.origin, e.StatusCode, e.Code)
+	}
 	return fmt.Sprintf("muzak: %s %s answered with status %d", e.method, e.origin, e.StatusCode)
 }
 
@@ -81,8 +97,7 @@ func (c *Client) DoJSON[T any](req *http.Request) (T, error) {
 	defer func() { _ = resp.Body.Close() }()
 	method, origin := clientMethod(resp.Request), clientOrigin(resp.Request.URL)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRemoteErrorBody))
-		return out, &RemoteError{StatusCode: resp.StatusCode, Header: resp.Header, Body: body, method: method, origin: origin}
+		return out, newRemoteError(resp, method, origin)
 	}
 	if !responseHasBody(resp) {
 		return out, nil

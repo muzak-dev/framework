@@ -151,7 +151,8 @@ func Require(scheme string, scopes ...string) SecurityRequirement {
 // Whether it is also enforced depends on the schemes it names. A verifying
 // scheme, one built by [JWTBearer] or [APIKeyVerifier], is enforced: the route
 // refuses a request that does not satisfy the requirements before its guards,
-// its providers or its handler run, with 401 and a WWW-Authenticate challenge
+// its providers or its handler run, and before a body [CaptureBody] keeps is
+// read, with 401 and a WWW-Authenticate challenge
 // when no valid credential was presented and 403 when one was but lacks a
 // required scope, and hands the verified principal, a *[Claims] or an
 // *[APIKeyPrincipal], to [From], [TryFrom] and [Dep]. The scopes a requirement

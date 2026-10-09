@@ -1085,6 +1085,15 @@ func (a *App) run(c *Context, route *Route) {
 		// deadline the handler is held to.
 		defer c.startDeadline(route.timeout)()
 	}
+	// The route's verifying security needs nothing from the body, so it is
+	// judged before the body is captured: a request without a valid credential
+	// is refused before the server reads a byte of its body on its behalf.
+	if route.gate != nil {
+		if err := route.gate(c); err != nil {
+			a.fail(c, route.timedOut(c, err))
+			return
+		}
+	}
 	// Before the dependencies, so a guard verifying a signature over the bytes
 	// sees them, and after the rate limit above, so a client past its budget is
 	// refused without the server buffering a body on its behalf.
@@ -1122,8 +1131,9 @@ func (a *App) run(c *Context, route *Route) {
 const privateCacheControl = "private, no-cache"
 
 // isGuarded reports whether the route runs any guard or request-scoped
-// provider, declared on it or inherited from a router or the application. A
-// singleton alone does not count; see [answersPerClient].
+// provider, declared on it or inherited from a router or the application, or
+// enforces a verifying security scheme. A singleton alone does not count; see
+// [answersPerClient].
 //
 // Such a response is presumed to depend on who asked: a guard decides whether
 // this client may see it and a provider typically resolves the client's own
@@ -1135,7 +1145,7 @@ const privateCacheControl = "private, no-cache"
 // "no-cache, no-transform", which this would otherwise displace, and a
 // WebSocket upgrade is never cached, so both are left to their own headers.
 func (rt *Route) isGuarded() bool {
-	return answersPerClient(rt.guards, rt.providers)
+	return rt.gate != nil || answersPerClient(rt.guards, rt.providers)
 }
 
 // recoverRoute turns a panic inside a handler or a dependency into the normal

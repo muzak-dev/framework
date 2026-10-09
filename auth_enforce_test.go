@@ -257,6 +257,50 @@ func TestEnforcementRunsBeforeGuardsAndProviders(t *testing.T) {
 	}
 }
 
+// TestEnforcementRunsBeforeTheBodyIsCaptured checks that a route which
+// captures its body for a signature guard refuses a request without a valid
+// credential before reading any of the body: a stranger cannot make the server
+// read and buffer a body as large as the limit allows on a route that will
+// refuse it anyway.
+func TestEnforcementRunsBeforeTheBodyIsCaptured(t *testing.T) {
+	opts := quietOptions()
+	opts.SecuritySchemes = enforcementSchemes()
+	app := New(opts)
+	app.Post("/hook", func(ctx *Context, _ struct{}) (meOut, error) {
+		body, _ := ctx.RawBody()
+		return meOut{Subject: string(body)}, nil
+	}, WithSecurity(Require("jwt")), CaptureBody())
+	mustBuild(t, app)
+
+	send := func(token string) (*httptest.ResponseRecorder, int64) {
+		body := &countingReader{Reader: strings.NewReader(strings.Repeat("x", 256<<10))}
+		req := httptest.NewRequest(http.MethodPost, "/hook", body)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		return doRequest(t, app, req), body.n.Load()
+	}
+	for name, token := range map[string]string{
+		"no token":     "",
+		"forged token": signJWT(t, "RS256", testRSAKeyOther(), "", nil),
+	} {
+		rec, read := send(token)
+		assertStatus(t, rec, http.StatusUnauthorized)
+		if read != 0 {
+			t.Errorf("%s: %d bytes of the body were read before the request was refused", name, read)
+		}
+	}
+	rec, read := send(signJWT(t, "RS256", testRSAKey(), "", nil))
+	assertStatus(t, rec, http.StatusOK)
+	if read != 256<<10 {
+		t.Fatalf("an admitted request had %d bytes of its body read, want all %d", read, 256<<10)
+	}
+	var out meOut
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || len(out.Subject) != 256<<10 {
+		t.Fatalf("the handler did not see the captured body: %v", err)
+	}
+}
+
 // TestEnforcementPublicExempts checks Public opts a route out of a router's
 // verifying requirement, and that the router's other routes stay enforced.
 func TestEnforcementPublicExempts(t *testing.T) {

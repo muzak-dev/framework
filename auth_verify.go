@@ -13,10 +13,11 @@ import (
 // This file is where a verifying security scheme stops describing and starts
 // refusing. When the application is built, every route, mount and file mount
 // whose WithSecurity names a scheme built by [JWTBearer] or [APIKeyVerifier]
-// is given a gate: a guard placed ahead of every other, which admits a request
-// only when one of the route's requirements is met, and hands the verified
-// principal to the rest of the route. A route that names only descriptive
-// schemes gets no gate and pays nothing.
+// is given a gate: a guard placed ahead of every other, and on a route ahead
+// of the body capture too, which admits a request only when one of the
+// route's requirements is met, and hands the verified principal to the rest of
+// the route. A route that names only descriptive schemes gets no gate and pays
+// nothing.
 
 // verifierSpec is what a verifying constructor attaches to the
 // [SecurityScheme] it returns, and is nil on every other scheme. It is
@@ -316,7 +317,8 @@ func (a *App) buildAuth(state *buildState) {
 			state.errs = append(state.errs, errs...)
 		}
 		if gate != nil {
-			rt.guards = append([]Guard{gate.guard()}, rt.guards...)
+			// Run by [App.run] ahead of the body capture and the guards.
+			rt.gate = gate.guard()
 		}
 		state.errs = append(state.errs, checkPrincipalDeps(rt, gate)...)
 	}

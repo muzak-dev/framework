@@ -455,7 +455,8 @@ func AllowUnknownFields() SharedOption {
 // Capture happens before dependencies resolve, so a guard sees the bytes and can
 // reject an unsigned request before anything expensive runs. It happens after
 // the rate limit is counted, so a client past its budget is refused without the
-// server buffering anything on its behalf.
+// server buffering anything on its behalf, and after a verifying scheme the
+// route names in [WithSecurity] has admitted the request, for the same reason.
 //
 // The body is bounded by the route's own [MaxBodySize] and needs no second
 // limit. One over it is refused with 413 here rather than truncated: a truncated
@@ -540,6 +541,10 @@ type Route struct {
 	// and are never read while a request is served.
 	security    []SecurityRequirement
 	securitySet bool
+	// gate enforces the route's verifying security schemes, and is nil on a
+	// route that names none; see auth_verify.go. It is kept apart from the
+	// guards because it runs before the body is captured, which they cannot.
+	gate Guard
 
 	// rateLimit is the route's resolved request policy, and is nil for a route
 	// that is not rate limited. rateLimitOpts is the resolved configuration it

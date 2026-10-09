@@ -826,13 +826,6 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		a.fail(c, noRouteError(r))
 		return
 	}
-	// Published for instrumentation, into the holder installed on the way in.
-	// Middleware above keeps the request it was handed, so a new context made
-	// here would never reach it; writing through the holder does.
-	if holder, ok := r.Context().Value(routeContextKey{}).(*routeHolder); ok {
-		holder.template = route.Path
-	}
-
 	a.run(c, route)
 }
 
@@ -904,6 +897,15 @@ func (a *App) dispatchFallback(c *Context, entry *pathEntry) {
 func (a *App) run(c *Context, route *Route) {
 	c.route = route
 	c.status = route.Status
+	// Published for instrumentation, into the holder installed on the way in.
+	// Middleware above keeps the request it was handed, so a new context made
+	// here would never reach it; writing through the holder does. It is done
+	// here rather than in dispatch so that a HEAD answered by a GET route is
+	// named after that route too, in the access log, the span and the
+	// observer alike.
+	if holder, ok := c.r.Context().Value(routeContextKey{}).(*routeHolder); ok {
+		holder.template = route.Path
+	}
 	if err := unescapeParams(&c.params); err != nil {
 		// coverage: net/http normalises the request URL before a handler runs,
 		// so EscapedPath never yields an escape that PathUnescape rejects. The

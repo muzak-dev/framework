@@ -54,6 +54,40 @@ func TestRouteFromContextGivesTheTemplateNotThePath(t *testing.T) {
 	}
 }
 
+// TestRouteFromContextNamesAHeadAnsweredByAGetRoute is the regression test for
+// a HEAD request answered by a GET route, which reached the route without its
+// template being published, so the access log, a span and a metric all saw a
+// request to no route at all.
+func TestRouteFromContextNamesAHeadAnsweredByAGetRoute(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu       sync.Mutex
+		template string
+		matched  bool
+	)
+	app := New(quietOptions())
+	app.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r)
+			mu.Lock()
+			template, matched = RouteFromContext(r.Context())
+			mu.Unlock()
+		})
+	})
+	app.Get("/items/{id}", func(ctx *Context, _ Empty) (map[string]string, error) {
+		return map[string]string{"ok": "yes"}, nil
+	})
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, http.MethodHead, "/items/42", ""), http.StatusOK)
+	mu.Lock()
+	defer mu.Unlock()
+	if !matched || template != "/items/{id}" {
+		t.Errorf("route = %q (matched %v), want /items/{id}", template, matched)
+	}
+}
+
 // TestRouteFromContextReportsNothingForAMiss keeps a 404 counted as a 404
 // rather than as traffic to a route named "".
 func TestRouteFromContextReportsNothingForAMiss(t *testing.T) {

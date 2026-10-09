@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -180,6 +181,52 @@ func TestStreamLongerThanItsLengthIsAFailure(t *testing.T) {
 	body.waitClosed(t)
 	body.assertClosedOnce(t)
 	waitForLog(t, logs, "failed after")
+}
+
+// Compress replaces the declared Content-Length, so net/http no longer cuts a
+// body that runs past it, and a Stream of a mebibyte declared as 2000 bytes
+// was read to its end and sent whole, compressed, as a response that looked
+// complete. The body is held to its Length by the copy itself: no more than
+// one byte past it is read, and the response fails.
+func TestStreamLongerThanItsLengthFailsUnderCompression(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger(t)
+	opts := quietOptions()
+	opts.Logger = logger
+	const length = 2000
+	source := &countingReader{Reader: strings.NewReader(strings.Repeat("y", 1<<20))}
+	body := newRecordingBody(source)
+	app := New(opts)
+	app.Use(Compress(CompressionOptions{}))
+	app.Get("/x", func(ctx *Context, _ Empty) (Stream, error) {
+		return Stream{ContentType: "text/plain", Body: body, Length: length}, nil
+	})
+	res, err := newWireServer(t, app).try(http.MethodGet, "/x", "Accept-Encoding", "gzip")
+	if !failedTransfer(res, err) {
+		plain := res.Data
+		if reader, gzErr := gzip.NewReader(bytes.NewReader(res.Data)); gzErr == nil {
+			plain, _ = io.ReadAll(reader)
+		}
+		t.Errorf("the response completed with %d bytes of body, want the transfer to fail past the %d declared", len(plain), length)
+	}
+	body.waitClosed(t)
+	body.assertClosedOnce(t)
+	if read := source.n.Load(); read > length+1 {
+		t.Errorf("read %d bytes of the body, want no more than one past its Length of %d", read, length)
+	}
+	waitForLog(t, logs, "ran past the 2000 bytes its Length declared")
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	io.Reader
+	n atomic.Int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.n.Add(int64(n))
+	return n, err
 }
 
 // A panic while the body is read is recovered as any handler panic is, and the

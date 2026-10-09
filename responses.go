@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -76,9 +77,9 @@ type Bytes struct {
 //
 // The status follows [Status] and [Context.SetStatus]; 204 and 304 send no
 // body. Once the header is sent the response cannot be turned into an error,
-// so a Body that fails part way, or that ends before the Length it declared,
-// is logged and the connection aborted: the client sees a failed transfer
-// rather than a body that ends cleanly and looks complete.
+// so a Body that fails part way, or that ends before the Length it declared
+// or runs past it, is logged and the connection aborted: the client sees a
+// failed transfer rather than a body that ends cleanly and looks complete.
 //
 // Muzak cannot interrupt a Read that blocks. A Body whose Read can wait, an
 // [io.Pipe] fed by a goroutine for instance, should end when the request's
@@ -430,7 +431,15 @@ func (c *Context) sendBody(status int, body io.Reader, length int64) error {
 	}
 	buf := streamBuffers.Get().(*[]byte)
 	defer streamBuffers.Put(buf)
-	n, err := io.CopyBuffer(c.w, readerOnly{body}, *buf)
+	var source io.Reader = readerOnly{body}
+	if length > 0 && length < math.MaxInt64 {
+		// Held to its length here rather than left to net/http, which refuses
+		// a write past a Content-Length only while the header still carries
+		// one: [Compress] removes it, and a body that ran on was then read to
+		// its end and sent whole. One byte past the length is enough to know.
+		source = io.LimitReader(source, length+1)
+	}
+	n, err := io.CopyBuffer(c.w, source, *buf)
 	if err != nil {
 		return fmt.Errorf("muzak: the body of %s %s failed after %d bytes: %w",
 			c.r.Method, c.route.pathOrRequest(c.r), n, err)
@@ -438,6 +447,10 @@ func (c *Context) sendBody(status int, body io.Reader, length int64) error {
 	if length > 0 && n < length {
 		return fmt.Errorf("muzak: the body of %s %s ended after %d of the %d bytes its Length declared",
 			c.r.Method, c.route.pathOrRequest(c.r), n, length)
+	}
+	if length > 0 && n > length {
+		return fmt.Errorf("muzak: the body of %s %s ran past the %d bytes its Length declared",
+			c.r.Method, c.route.pathOrRequest(c.r), length)
 	}
 	return nil
 }

@@ -1,0 +1,4 @@
+Usage: muzak help [command]
+
+Help prints what a command does and the flags it takes, or, with no command
+named, the list of commands. "muzak <command> -h" prints the same.

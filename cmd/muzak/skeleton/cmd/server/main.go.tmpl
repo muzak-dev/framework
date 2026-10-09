@@ -1,0 +1,38 @@
+// Command server runs {{.Name}}.
+//
+// This file only composes: routers are mounted and the server runs. Every
+// piece of behaviour lives in a package of its own:
+//
+//	schemas/    the request and response models the API exposes
+//	handlers/   the functions that answer requests
+//	routers/    which handler answers which path
+//
+// Run it and open http://localhost:8080/openapi.json:
+//
+//	go run ./cmd/server
+package main
+
+import (
+	"log"
+
+	"muzak.dev/framework"
+
+	"{{.Module}}/routers"
+)
+
+func main() {
+	app := muzak.New(muzak.AppOptions{
+		Title:   {{printf "%q" .Name}},
+		Version: "0.1.0",
+		Addr:    ":8080",
+	})
+
+	app.Include(routers.Hello())
+
+	// RunSignals serves until SIGINT or SIGTERM, then lets the requests in
+	// flight finish before it returns, which is also how muzak dev restarts
+	// the server when a file changes.
+	if err := app.RunSignals(); err != nil {
+		log.Fatal(err)
+	}
+}

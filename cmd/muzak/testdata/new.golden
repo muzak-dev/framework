@@ -1,0 +1,18 @@
+Created shop, module example.com/shop:
+
+  .gitignore
+  README.md
+  cmd/server/main.go
+  go.mod
+  handlers/hello.go
+  handlers/hello_test.go
+  routers/hello.go
+  routers/routers.go
+  schemas/hello.go
+
+Next:
+
+  cd shop
+  go mod tidy
+  go test ./...
+  muzak dev

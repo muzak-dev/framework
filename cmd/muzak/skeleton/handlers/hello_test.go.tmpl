@@ -1,0 +1,47 @@
+package handlers_test
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+
+	"muzak.dev/framework"
+	"muzak.dev/framework/testclient"
+
+	"{{.Module}}/routers"
+)
+
+// buildApp composes the application as cmd/server does, with its log
+// quietened, so a test exercises the same routers, handlers and rules.
+func buildApp() *muzak.App {
+	app := muzak.New(muzak.AppOptions{
+		Title:         {{printf "%q" .Name}},
+		LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone},
+	})
+	app.Include(routers.Hello())
+	return app
+}
+
+func TestHello(t *testing.T) {
+	client := testclient.New(t, buildApp())
+
+	client.Get("/hello", testclient.Query("name", "Ada")).
+		AssertStatus(http.StatusOK).
+		AssertJSON(`{"message":"Hello, Ada!"}`)
+}
+
+func TestHelloGreetsTheWorldByDefault(t *testing.T) {
+	client := testclient.New(t, buildApp())
+
+	client.Get("/hello").
+		AssertStatus(http.StatusOK).
+		AssertJSON(`{"message":"Hello, world!"}`)
+}
+
+func TestHelloRefusesANameTooLongToPrint(t *testing.T) {
+	client := testclient.New(t, buildApp())
+
+	client.Get("/hello", testclient.Query("name", strings.Repeat("a", 41))).
+		AssertStatus(http.StatusUnprocessableEntity).
+		AssertErrorCode("validation_error")
+}

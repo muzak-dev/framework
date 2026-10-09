@@ -1,0 +1,23 @@
+// Package schemas holds the request and response models the API exposes. The
+// OpenAPI document is generated from them, so a field, a doc tag or a rule
+// written here is also what the documentation says.
+package schemas
+
+import "muzak.dev/framework"
+
+// HelloParams binds the input of the hello route.
+type HelloParams struct {
+	// Name is who to greet.
+	Name string `query:"name" doc:"Who to greet" default:"world"`
+}
+
+// Validate keeps the name to something worth printing.
+func (in *HelloParams) Validate(v *muzak.Validation) {
+	v.String(&in.Name).Trim().NotBlank().MaxLen(40).NoControl()
+}
+
+// HelloOut is the response of the hello route.
+type HelloOut struct {
+	// Message is the greeting.
+	Message string `json:"message" doc:"The greeting"`
+}

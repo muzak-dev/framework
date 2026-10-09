@@ -1,0 +1,19 @@
+Usage: muzak new <dir> [-module path]
+
+New creates a project in dir: a go.mod requiring this version of the
+framework, a server in cmd/server, a route in routers, its handler in handlers,
+its models in schemas, a test that serves the application with testclient, a
+.gitignore and a README.
+
+The module path defaults to the name of dir. The directory is created, or may
+already exist if it is empty; anything else in the way is refused rather than
+written over. Nothing is written outside dir, even through a symbolic link
+placed inside it while it is being written, and if writing fails part way,
+everything new wrote is removed again.
+
+Afterwards, run "go mod tidy" in dir to download the framework and record its
+checksum, and "muzak dev" to run the server.
+
+Flags:
+  -module path
+    	the module path, such as example.com/shop (default: the name of dir)

@@ -1,0 +1,13 @@
+Muzak is the command line for Muzak applications.
+
+Usage:
+
+  muzak <command> [arguments]
+
+The commands are:
+
+  new       create a project laid out the way the framework's example is
+  version   print the version of muzak and of the framework it scaffolds
+  help      print help about a command
+
+Run "muzak help <command>" for more about a command.

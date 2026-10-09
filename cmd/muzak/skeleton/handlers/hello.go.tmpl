@@ -1,0 +1,15 @@
+// Package handlers holds the functions that answer requests. Each one reads a
+// model from schemas and returns one, and knows nothing about the path it is
+// served at or what guards it.
+package handlers
+
+import (
+	"muzak.dev/framework"
+
+	"{{.Module}}/schemas"
+)
+
+// Hello greets whoever the request names.
+func Hello(_ *muzak.Context, in schemas.HelloParams) (schemas.HelloOut, error) {
+	return schemas.HelloOut{Message: "Hello, " + in.Name + "!"}, nil
+}

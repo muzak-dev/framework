@@ -1,0 +1,47 @@
+# {{.Name}}
+
+A service built on [Muzak](https://muzak.dev).
+
+## Running it
+
+```bash
+go mod tidy
+go run ./cmd/server
+```
+
+Then call it, and read the OpenAPI document it describes itself with:
+
+```bash
+curl 'http://localhost:8080/hello?name=you'
+curl http://localhost:8080/openapi.json
+```
+
+While you work on it, `muzak dev` builds and runs the server, and rebuilds and
+restarts it whenever a Go file changes:
+
+```bash
+muzak dev
+```
+
+## Testing it
+
+```bash
+go test ./...
+```
+
+The tests serve the application in-process with `muzak.dev/framework/testclient`,
+so a request goes through routing, binding, validation and error rendering just
+as it does in production.
+
+## Layout
+
+```
+cmd/server/   composition, and nothing else
+schemas/      the request and response models the API exposes
+handlers/     the functions that answer requests
+routers/      which handler answers which path
+```
+
+The dependencies point one way: routers know handlers, handlers know schemas,
+and only `cmd/server` knows the routers, so each package can be tested on its
+own. See https://muzak.dev/docs for the rest.

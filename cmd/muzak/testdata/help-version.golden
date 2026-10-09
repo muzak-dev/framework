@@ -1,0 +1,5 @@
+Usage: muzak version
+
+Version prints the framework version this muzak belongs to, which is the
+version a project muzak new creates requires, and the Go toolchain and platform
+it was built for.

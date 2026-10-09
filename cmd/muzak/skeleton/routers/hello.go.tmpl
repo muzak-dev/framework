@@ -1,0 +1,17 @@
+package routers
+
+import (
+	"muzak.dev/framework"
+
+	"{{.Module}}/handlers"
+)
+
+// Hello returns the router that greets people.
+func Hello() *muzak.Router {
+	r := muzak.NewRouter(muzak.WithTags("hello"))
+
+	r.Get("/hello", handlers.Hello,
+		muzak.Summary("Greet someone"))
+
+	return r
+}

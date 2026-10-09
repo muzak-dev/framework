@@ -272,6 +272,12 @@ const (
 	// tests hold at no more than 8; the budget leaves four times that.
 	compareBaseBudget    = 1 << 16
 	compareBudgetPerNode = 32
+	// compareBytesPerStep is how many bytes of text, such as a name, a
+	// pattern or the JSON of an enum value, one step pays for reading. A
+	// document Muzak generates holds little text per schema, so honest
+	// comparisons hardly notice it; a schema holding megabytes is charged
+	// for them each time it is read. See [docComparer.facts].
+	compareBytesPerStep = 256
 	// compareMaxDepth bounds how deeply schemas written inline are walked into
 	// at one position. A document read by [ReadDocument] cannot nest deeper
 	// than this; a Document built in Go with a cycle of pointers can.
@@ -306,8 +312,10 @@ type docComparer struct {
 	pairs map[schemaPair]bool
 	queue []schemaPair
 	// admitsNull keeps whether each schema met so far admits null; see
-	// [docComparer.partAdmitsNull].
-	admitsNull map[*Schema]bool
+	// [docComparer.partAdmitsNull]. schemaFacts keeps what each schema met so
+	// far says; see [docComparer.facts].
+	admitsNull  map[*Schema]bool
+	schemaFacts map[*Schema]*schemaFacts
 
 	// budget is what is left of the steps the comparison may take, and depth
 	// how deep the current walk into inline schemas is.
@@ -323,14 +331,15 @@ func newDocComparer(before, after *Document) *docComparer {
 	if after == nil {
 		after = &Document{}
 	}
-	c := &docComparer{old: before, cur: after, pairs: map[schemaPair]bool{}, admitsNull: map[*Schema]bool{}}
+	c := &docComparer{old: before, cur: after, pairs: map[schemaPair]bool{}, admitsNull: map[*Schema]bool{},
+		schemaFacts: map[*Schema]*schemaFacts{}}
 	if before.Components != nil {
 		c.oldSchemas, c.oldSchemes = before.Components.Schemas, before.Components.SecuritySchemes
 	}
 	if after.Components != nil {
 		c.curSchemas, c.curSchemes = after.Components.Schemas, after.Components.SecuritySchemes
 	}
-	c.budget = compareBaseBudget + compareBudgetPerNode*(countDocumentNodes(before)+countDocumentNodes(after))
+	c.budget = compareBaseBudget + compareBudgetPerNode*(c.countNodes(before)+c.countNodes(after))
 	return c
 }
 
@@ -519,11 +528,17 @@ func schemeIdentity(s SecurityScheme) string {
 
 // countDocumentNodes counts the schemas, operations, parameters and responses
 // a document holds, which is what the budget of a comparison is proportional
-// to. A schema held by several positions, or one a Document built in Go
-// reaches again through a cycle of pointers, is counted once; the walk keeps a
-// stack of its own rather than recursing, so a document of any depth is
-// counted in constant stack.
+// to, each schema weighed by what reading it costs. A schema held by several
+// positions, or one a Document built in Go reaches again through a cycle of
+// pointers, is counted once; the walk keeps a stack of its own rather than
+// recursing, so a document of any depth is counted in constant stack.
 func countDocumentNodes(d *Document) int {
+	return (&docComparer{schemaFacts: map[*Schema]*schemaFacts{}}).countNodes(d)
+}
+
+// countNodes is [countDocumentNodes], keeping what it learns of each schema
+// for the comparison.
+func (c *docComparer) countNodes(d *Document) int {
 	seen := map[*Schema]bool{}
 	var stack []*Schema
 	push := func(s *Schema) {
@@ -566,7 +581,7 @@ func countDocumentNodes(d *Document) int {
 	for len(stack) > 0 {
 		s := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		count++
+		count += c.facts(s).cost
 		for _, property := range s.Properties {
 			push(property)
 		}

@@ -51,6 +51,9 @@ func (c *docComparer) compareParts(location string, old, cur []*Schema, dir apiD
 		oldName, oldNull, oldRef := pureReference(c.oldSchemas, old[0])
 		curName, curNull, curRef := pureReference(c.curSchemas, cur[0])
 		if oldRef && curRef {
+			if !c.spend(c.readCost(old[0]) + c.readCost(cur[0])) {
+				return
+			}
 			c.compareNullable(location, oldNull, curNull, dir)
 			c.compareAnnotations(location, old, cur, dir)
 			c.enqueue(oldName, curName, dir, textual)
@@ -58,6 +61,65 @@ func (c *docComparer) compareParts(location string, old, cur []*Schema, dir apiD
 		}
 	}
 	c.compareViews(location, c.view(c.oldSchemas, old), c.view(c.curSchemas, cur), dir, textual)
+}
+
+// schemaFacts is what a comparison reads from one schema every time a position
+// reaches it, worked out the first time: the canonical JSON of its enum values
+// other than null and of its default, and what reading the schema costs.
+type schemaFacts struct {
+	enum       []string
+	def        string
+	hasDefault bool
+	cost       int
+}
+
+// facts returns the facts of a schema, working them out the first time.
+//
+// Reading a schema costs a step, one more for each value, member, required
+// name and alternative it lists, and one for every compareBytesPerStep bytes
+// of the text in them, which is what reading it again at another position
+// takes. A comparison charges that every time it reads the schema, and a
+// document's budget is the sum of it over its schemas, so that a schema many
+// positions reach through allOf, or beside a rule of their own, costs its size
+// each time rather than one step, and a large one reached everywhere ends the
+// comparison at its bound rather than taking time quadratic in the documents.
+func (c *docComparer) facts(s *Schema) *schemaFacts {
+	if known, ok := c.schemaFacts[s]; ok {
+		return known
+	}
+	f := &schemaFacts{}
+	text := len(s.Ref) + len(s.Format) + len(s.Pattern) + len(s.ContentEncoding)
+	for _, value := range s.Enum {
+		if value != nil {
+			canonical := canonicalValue(value)
+			f.enum = append(f.enum, canonical)
+			text += len(canonical)
+		}
+	}
+	if s.Default != nil {
+		f.def, f.hasDefault = canonicalValue(s.Default), true
+		text += len(f.def)
+	}
+	for _, name := range s.Required {
+		text += len(name)
+	}
+	for name := range s.Properties {
+		text += len(name)
+	}
+	f.cost = 1 + len(s.Enum) + len(s.Required) + len(s.Properties) + len(s.AnyOf) + len(s.AllOf) + text/compareBytesPerStep
+	c.schemaFacts[s] = f
+	return f
+}
+
+// readCost is what reading a position that holds nothing but a reference
+// costs: the schema there and, when it is a choice between a schema and null,
+// that schema too.
+func (c *docComparer) readCost(s *Schema) int {
+	cost := c.facts(s).cost
+	if inner, wrapped := nullableCore(s); wrapped {
+		cost += c.facts(inner).cost
+	}
+	return cost
 }
 
 // enqueue queues a pair of components for comparison, unless it already was
@@ -296,7 +358,7 @@ func (c *docComparer) view(schemas map[string]*Schema, nodes []*Schema) schemaVi
 			c.incomplete = true
 			return
 		}
-		if !c.spend(1) {
+		if !c.spend(c.facts(s).cost) {
 			return
 		}
 		seen[s] = true
@@ -345,17 +407,15 @@ func (v schemaView) types(textual bool) jsonTypes {
 // enum returns the values other than null the view is limited to, by their
 // canonical JSON, and whether it is limited at all. Null is left to
 // nullability, which is compared on its own.
-func (v schemaView) enum() (map[string]bool, bool) {
+func (c *docComparer) enum(v schemaView) (map[string]bool, bool) {
 	var allowed map[string]bool
 	for _, part := range v.parts {
 		if part.Enum == nil {
 			continue
 		}
 		values := map[string]bool{}
-		for _, value := range part.Enum {
-			if value != nil {
-				values[canonicalValue(value)] = true
-			}
+		for _, value := range c.facts(part).enum {
+			values[value] = true
 		}
 		if allowed == nil {
 			allowed = values
@@ -611,8 +671,8 @@ func (c *docComparer) compareNullable(location string, old, cur bool, dir apiDir
 // leaves the value out, which a client may have relied on; in a response it is
 // documentation.
 func (c *docComparer) compareAnnotations(location string, old, cur []*Schema, dir apiDirection) {
-	oldDefault, oldHas := firstDefault(old)
-	curDefault, curHas := firstDefault(cur)
+	oldDefault, oldHas := c.firstDefault(old)
+	curDefault, curHas := c.firstDefault(cur)
 	severity := dir.pick(PossiblyBreaking, Compatible)
 	switch {
 	case !oldHas && curHas:
@@ -633,10 +693,10 @@ func (c *docComparer) compareAnnotations(location string, old, cur []*Schema, di
 }
 
 // firstDefault returns the first default the parts give, as canonical JSON.
-func firstDefault(parts []*Schema) (string, bool) {
+func (c *docComparer) firstDefault(parts []*Schema) (string, bool) {
 	for _, part := range parts {
 		if part.Default != nil {
-			return canonicalValue(part.Default), true
+			return c.facts(part).def, true
 		}
 	}
 	return "", false
@@ -668,8 +728,8 @@ func (c *docComparer) compareTypes(location string, old, cur jsonTypes, dir apiD
 
 // compareEnums compares the values a position is limited to.
 func (c *docComparer) compareEnums(location string, old, cur schemaView, dir apiDirection) {
-	oldValues, oldLimited := old.enum()
-	curValues, curLimited := cur.enum()
+	oldValues, oldLimited := c.enum(old)
+	curValues, curLimited := c.enum(cur)
 	location += "/enum"
 	switch {
 	case !oldLimited && !curLimited:

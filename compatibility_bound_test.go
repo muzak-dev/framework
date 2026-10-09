@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -143,6 +144,63 @@ func TestExpensiveDocumentStopsAtItsBudget(t *testing.T) {
 		t.Errorf("an expensive comparison took %v", elapsed)
 	}
 	t.Logf("%d nodes, stopped after %d steps where the full comparison needs about %d", nodes, used, 4*members*positions)
+}
+
+// TestLargeSchemaReachedEverywhereStopsAtItsBudget builds documents in which
+// one component holds something large, a long enum, a long required list, a
+// long pattern, a large default or a long member name, and thousands of
+// positions reach it beside a rule of their own, so that each position reads
+// all of it again. That is quadratic in the documents however few steps the
+// positions themselves take, and took minutes for documents of a few hundred
+// kilobytes, so reading a schema is charged for what it holds, and the
+// comparison stops at its bound and says so.
+func TestLargeSchemaReachedEverywhereStopsAtItsBudget(t *testing.T) {
+	t.Parallel()
+	const positions = 2000
+	large := map[string]func() *Schema{
+		"enum": func() *Schema {
+			s := &Schema{Type: "string"}
+			for i := range 2000 {
+				s.Enum = append(s.Enum, "v"+strconv.Itoa(i))
+			}
+			return s
+		},
+		"required": func() *Schema {
+			return &Schema{Type: "object", Required: slices.Repeat([]string{"a"}, 2000)}
+		},
+		"pattern": func() *Schema { return &Schema{Type: "string", Pattern: strings.Repeat("a", 1<<20)} },
+		"default": func() *Schema {
+			list := make([]any, 20000)
+			for i := range list {
+				list[i] = float64(i)
+			}
+			return &Schema{Type: "array", Default: list}
+		},
+		"member name": func() *Schema {
+			return &Schema{Type: "object", Properties: map[string]*Schema{strings.Repeat("m", 1<<20): compatStr()}}
+		},
+	}
+	for kind, build := range large {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			doc := func() *Document {
+				body := &Schema{Type: "object", Properties: map[string]*Schema{}}
+				for i := range positions {
+					body.Properties["f"+strconv.Itoa(i)] = &Schema{Ref: componentPrefix + "Large", Description: "Rule beside it.", MinLength: compatPtr(0)}
+				}
+				return compatAnswerDoc(body, map[string]*Schema{"Large": build()})
+			}
+			old, cur := doc(), doc()
+			start := time.Now()
+			got, used, incomplete := stepsFor(old, cur)
+			if !incomplete || got[0].Kind != "comparison-incomplete" {
+				t.Errorf("a comparison that reads the large schema %d times finished in %d steps", 2*positions, used)
+			}
+			if elapsed := time.Since(start); elapsed > hangGuard {
+				t.Errorf("the comparison took %v", elapsed)
+			}
+		})
+	}
 }
 
 // TestChangeListIsBounded checks that two documents differing everywhere list

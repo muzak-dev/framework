@@ -65,7 +65,8 @@ type HTTPDoer interface {
 type JWKSOptions struct {
 	// URL is where the key set is published, often found as jwks_uri in the
 	// issuer's OpenID Connect discovery document. It must be https, except
-	// for a loopback address in a test.
+	// for a loopback address in a test, and so must any URL the client is
+	// redirected to: a key set that arrives over plain http is refused.
 	URL string
 
 	// Client fetches the key set. Nil builds one with [NewClient] and
@@ -465,6 +466,13 @@ func (j *jwksCache) download(ctx context.Context) (*keySet, time.Duration, error
 		return nil, 0, withoutURL(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if last := resp.Request; last != nil && last.URL != nil && !secureOrLoopback(last.URL) {
+		// The URL was checked when the application was built, but a client
+		// that follows redirects, as an *http.Client does, may have been sent
+		// from it down to plain http, where anyone on the path could have
+		// replaced the keys. The URL is left out, as above.
+		return nil, 0, errors.New("muzak: the key set was redirected to a plain http URL, where anyone on the path could replace it")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, 0, fmt.Errorf("muzak: the key set was answered with %d", resp.StatusCode)
 	}

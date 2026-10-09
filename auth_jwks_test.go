@@ -1,11 +1,14 @@
 package muzak
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -386,6 +389,68 @@ func TestJWKSDefaultClientRefusesPrivateNetworks(t *testing.T) {
 	opts.JWKS.Client = server.Client()
 	app = mustBuild(t, authApp(t, map[string]SecurityScheme{"jwt": testScheme(opts)}, Require("jwt")))
 	assertStatus(t, withBearer(t, app, http.MethodGet, "/me", signJWT(t, "RS256", testRSAKey(), "k1", nil)), http.StatusOK)
+}
+
+// redirectedDoer answers a fetch as a client that has followed a redirect
+// does: the response's Request is the last request sent, here to final.
+type redirectedDoer struct {
+	body  []byte
+	final string
+}
+
+func (d redirectedDoer) Do(req *http.Request) (*http.Response, error) {
+	last := req.Clone(req.Context())
+	u, err := url.Parse(d.final)
+	if err != nil {
+		return nil, err
+	}
+	last.URL = u
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(bytes.NewReader(d.body)),
+		Request:    last,
+	}, nil
+}
+
+// TestJWKSRefusesKeysRedirectedToPlainHTTP checks that keys are used only when
+// they arrived over https, wherever the client went to get them. An
+// *http.Client follows a redirect from the https URL configured down to plain
+// http, where anyone on the path could replace the keys with their own and
+// sign any token they liked.
+func TestJWKSRefusesKeysRedirectedToPlainHTTP(t *testing.T) {
+	body := mustJSON(t, map[string]any{"keys": []any{k1()}})
+	cases := []struct {
+		final string
+		want  int
+	}{
+		{"http://keys.example.net/jwks?tenant=secret", http.StatusServiceUnavailable},
+		{"https://keys.example.net/jwks", http.StatusOK},
+		{"http://127.0.0.1:8080/jwks", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.final, func(t *testing.T) {
+			logger, logs := captureLogger(t)
+			opts := jwksOptions("https://login.example.com/jwks")
+			opts.JWKS.Client = redirectedDoer{body: body, final: tc.final}
+			appOpts := quietOptions()
+			appOpts.Logger = logger
+			appOpts.SecuritySchemes = map[string]SecurityScheme{"jwt": testScheme(opts)}
+			app := New(appOpts)
+			app.Get("/me", me, WithSecurity(Require("jwt")))
+			mustBuild(t, app)
+			assertStatus(t, withBearer(t, app, http.MethodGet, "/me", signJWT(t, "RS256", testRSAKey(), "k1", nil)), tc.want)
+			if tc.want == http.StatusOK {
+				return
+			}
+			if !strings.Contains(logs.String(), "plain http") {
+				t.Fatalf("the refusal was not logged:\n%s", logs.String())
+			}
+			if strings.Contains(logs.String(), "secret") {
+				t.Fatalf("the log quotes the URL redirected to:\n%s", logs.String())
+			}
+		})
+	}
 }
 
 // TestJWKSOptionsAreChecked covers every JWKS option that cannot be used.

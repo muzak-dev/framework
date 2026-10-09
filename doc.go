@@ -857,6 +857,56 @@
 // are bounded, the address is not taken from a header anyone can write, and a
 // storage that stops answering stops traffic rather than stopping the limit.
 //
+// # Operations
+//
+// Three features serve an application that a platform runs, restarts and
+// routes traffic to, and each is off until it is asked for.
+//
+// [AppOptions.Health] serves a liveness endpoint, which answers 200 for as
+// long as the process serves, and a readiness endpoint, which answers 503
+// until the lifecycle components have started, then runs the configured
+// checks, and answers 503 again from the moment a shutdown begins.
+// [ServerOptions.DrainDelay] then keeps the listeners open, still serving,
+// long enough for a load balancer to notice:
+//
+//	app := muzak.New(muzak.AppOptions{
+//		Health: muzak.HealthOptions{
+//			Enabled: true,
+//			Checks:  []muzak.HealthCheck{{Name: "database", Check: db.PingContext}},
+//		},
+//		ServerOptions: muzak.ServerOptions{DrainDelay: 5 * time.Second},
+//	})
+//
+// Probes are answered ahead of routing, before the middleware installed with
+// [App.Use], the guards and the rate limit, none of which a probe could
+// satisfy. The checks run concurrently, each under its own timeout, and a
+// flood of probes runs them once per [HealthOptions.CacheInterval]. A body
+// never carries what a check returned; the log does.
+//
+// [Context.AfterResponse] registers work the client should not wait for. It
+// runs on a small bounded pool once the handler has returned nil, keeps the
+// request's values but not its cancellation, and is waited for by a shutdown
+// before the lifecycle components it may use are stopped. A full queue refuses
+// a task with [ErrBackgroundQueueFull] rather than making the request wait:
+//
+//	log := ctx.Logger()
+//	email := in.Email
+//	if err := ctx.AfterResponse(func(bg context.Context) {
+//		if err := mailer.SendWelcome(bg, email); err != nil {
+//			log.ErrorContext(bg, "welcome email failed", "error", err)
+//		}
+//	}); err != nil {
+//		log.Warn("welcome email not queued", "error", err)
+//	}
+//
+// [Timeout] gives a route, or every route of a router, a deadline on the
+// request's context. It is cooperative: no second goroutine runs on the
+// request's behalf, whatever honours the context gives up, a failure the
+// deadline caused is answered 503 with a Retry-After, and a handler that
+// ignores the deadline still has its success sent:
+//
+//	r.Get("/reports/{id}", buildReport, muzak.Timeout(2*time.Second))
+//
 // # Testing
 //
 // The muzak.dev/framework/testclient package serves an application in-process and issues

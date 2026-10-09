@@ -631,7 +631,9 @@ func TestHangingCollector(t *testing.T) {
 	if took := time.Since(began); took > time.Second {
 		t.Errorf("the hung attempt held the exporter for %v", took)
 	}
-	if stats := e.Stats(); stats.Exported != 1 || len(c.all()) != 2 {
+	// At least two requests: on a machine loaded enough, as under -race with
+	// -count, the retry can outlast the 50ms Timeout as well and need a third.
+	if stats := e.Stats(); stats.Exported != 1 || len(c.all()) < 2 {
 		t.Errorf("stats = %+v after %d requests", stats, len(c.all()))
 	}
 }

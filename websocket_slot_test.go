@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"bytes"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,17 +16,20 @@ import (
 // closed yet, which is the number of file descriptors a server is holding
 // regardless of what its own bookkeeping says. It also counts how many it
 // accepted in all, so that a connection already closed can be told from one
-// not yet accepted.
+// not yet accepted, and how many of the open ones were upgraded to a
+// WebSocket, which leaves out the refused ones the server has yet to close.
 type openCountListener struct {
 	net.Listener
-	open     atomic.Int64
-	accepted atomic.Int64
+	open         atomic.Int64
+	accepted     atomic.Int64
+	upgradedOpen atomic.Int64
 }
 
 type openCountConn struct {
 	net.Conn
-	once sync.Once
-	l    *openCountListener
+	once     sync.Once
+	upgraded atomic.Bool
+	l        *openCountListener
 }
 
 func (l *openCountListener) Accept() (net.Conn, error) {
@@ -38,8 +42,22 @@ func (l *openCountListener) Accept() (net.Conn, error) {
 	return &openCountConn{Conn: c, l: l}, nil
 }
 
+// Write marks a connection that is being upgraded, which is one whose
+// response is the 101 that switches protocols.
+func (c *openCountConn) Write(b []byte) (int, error) {
+	if bytes.HasPrefix(b, []byte("HTTP/1.1 101")) && c.upgraded.CompareAndSwap(false, true) {
+		c.l.upgradedOpen.Add(1)
+	}
+	return c.Conn.Write(b)
+}
+
 func (c *openCountConn) Close() error {
-	c.once.Do(func() { c.l.open.Add(-1) })
+	c.once.Do(func() {
+		c.l.open.Add(-1)
+		if c.upgraded.Load() {
+			c.l.upgradedOpen.Add(-1)
+		}
+	})
 	return c.Conn.Close()
 }
 
@@ -83,7 +101,10 @@ func TestWebSocketSlotIsHeldUntilTheSocketCloses(t *testing.T) {
 		// The handler returns, and the server waits for a close frame that
 		// this peer never sends.
 		conn.send(true, opText, []byte("bye"))
-		peak = max(peak, counted.open.Load())
+		// Only upgraded sockets are counted. A refused one holds no slot and
+		// is closed once the server reads this end's close, which a loaded
+		// machine can leave until several more have been refused.
+		peak = max(peak, counted.upgradedOpen.Load())
 	}
 	if peak > 5 {
 		t.Errorf("at most 4 connections may be open, and %d sockets were held at once", peak)
@@ -119,7 +140,7 @@ func TestWebSocketSlotIsHeldWhileACloseWaitsForAStalledWriter(t *testing.T) {
 		}
 		conn.send(true, opText, []byte("bye"))
 		time.Sleep(5 * time.Millisecond)
-		peak = max(peak, counted.open.Load())
+		peak = max(peak, counted.upgradedOpen.Load())
 	}
 	if peak > 4 {
 		t.Errorf("at most 3 connections may be open, and %d sockets were held at once", peak)

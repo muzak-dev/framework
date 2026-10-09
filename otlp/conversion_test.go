@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -138,7 +139,7 @@ func TestSpanBudget(t *testing.T) {
 	}
 	// With the budget all but spent, an event is dropped whole.
 	remaining := maxSpanBytes - s.size
-	s.SetAttributes(slog.String("z", strings.Repeat("z", remaining-len("z")-8)))
+	s.SetAttributes(slog.String("z", strings.Repeat("z", remaining-len("z")-valueOverhead-8)))
 	s.AddEvent("too late")
 	if s.droppedEvents != 1 || len(s.events) != 1 {
 		t.Errorf("events = %d dropped = %d, want the second dropped", len(s.events), s.droppedEvents)
@@ -157,6 +158,80 @@ func TestSpanBudget(t *testing.T) {
 	if s.size > maxSpanBytes || before == 0 {
 		t.Errorf("the span holds %d bytes, past the %d budget", s.size, maxSpanBytes)
 	}
+}
+
+// TestSpanBudgetCountsEveryValue checks that the size a span is held to counts
+// what each value it keeps costs, and not only its text: a list of numbers, of
+// empty strings or of nils has next to no text, and counted by its text alone a
+// span of them held many times the bound, and the queue many times what
+// QueueSize times the bound promises.
+func TestSpanBudgetCountsEveryValue(t *testing.T) {
+	t.Parallel()
+	if size := int(reflect.TypeFor[keyValue]().Size()); size > valueOverhead {
+		t.Fatalf("a keyValue is %d bytes, more than the %d counted for each value", size, valueOverhead)
+	}
+	e, err := New(Options{Endpoint: "http://c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := make([]any, maxListLength)
+	grid := make([]any, maxListLength)
+	for i := range grid {
+		grid[i] = row
+	}
+	s := newSpan(e, muzak.SpanStart{Name: "grid"})
+	for i := range maxAttributes {
+		s.SetAttributes(slog.Any(fmt.Sprintf("grid%d", i), grid), slog.Any(fmt.Sprintf("ints%d", i), make([]int, maxListLength)))
+	}
+	s.AddEvent("e", slog.Any("grid", grid))
+	held := 0
+	for _, kv := range s.attrs {
+		held += valuesIn(kv.value) * valueOverhead
+	}
+	for _, ev := range s.events {
+		for _, kv := range ev.attrs {
+			held += valuesIn(kv.value) * valueOverhead
+		}
+	}
+	if held > maxSpanBytes {
+		t.Errorf("the span holds %d values, %d bytes, past the %d budget", held/valueOverhead, held, maxSpanBytes)
+	}
+}
+
+// TestConversionStopsAtTheBudget checks that converting a value stops once it
+// is past what any span may hold, which it is then dropped for. A list of
+// lists that share their elements costs the application nothing to build, and
+// converted in full it is the list length to the power of the depth: 128 to
+// the third is two million values for an attribute that is then thrown away.
+func TestConversionStopsAtTheBudget(t *testing.T) {
+	t.Parallel()
+	nested := any(make([]any, maxListLength))
+	for range maxValueDepth - 2 {
+		level := make([]any, maxListLength)
+		for i := range level {
+			level[i] = nested
+		}
+		nested = level
+	}
+	kv, ok := convertAttr(slog.Any("nested", nested), 0)
+	if !ok || kv.size <= maxSpanBytes {
+		t.Fatalf("converted to %d bytes, want it past the %d budget so it is dropped", kv.size, maxSpanBytes)
+	}
+	if n := valuesIn(kv.value); n > 2*maxSpanBytes/valueOverhead {
+		t.Errorf("converted %d values of an attribute past the budget, want the work bounded by it", n)
+	}
+}
+
+// valuesIn counts the values a converted value holds, itself included.
+func valuesIn(v value) int {
+	n := 1
+	for _, element := range v.list {
+		n += valuesIn(element)
+	}
+	for _, kv := range v.kvs {
+		n += valuesIn(kv.value)
+	}
+	return n
 }
 
 // lookup returns a recorded string attribute.

@@ -31,6 +31,12 @@ const (
 	// maxSpanBytes bounds the estimated size of everything a span records,
 	// so that the queue's memory is bounded by QueueSize times this.
 	maxSpanBytes = 64 << 10
+	// valueOverhead is what each converted value is counted as costing
+	// beside the text or bytes it holds, which is at least what a keyValue
+	// takes on a 64-bit platform. Counted by its text alone, a list of
+	// numbers, of empty strings or of nils was all but free, and a span of
+	// them held many times maxSpanBytes.
+	valueOverhead = 144
 )
 
 // valueKind is which of the OTLP AnyValue fields a value fills.
@@ -192,7 +198,7 @@ func (s *span) AddEvent(name string, attrs ...slog.Attr) {
 		return
 	}
 	e := event{name: truncate(name, maxStringLength), time: at}
-	size := len(e.name) + 16
+	size := len(e.name) + valueOverhead
 	for _, a := range attrs {
 		kv, ok := convertAttr(a, 0)
 		if !ok {
@@ -259,10 +265,22 @@ func convertAttr(a slog.Attr, depth int) (keyValue, bool) {
 }
 
 // convertValue converts an attribute value into one OTLP can carry, returning
-// it with its estimated size. A string is cut to [maxStringLength], a list to
-// [maxListLength], and anything nested past [maxValueDepth] is replaced with
-// a string saying so.
+// it with its estimated size, [valueOverhead] included. A string is cut to
+// [maxStringLength], a list to [maxListLength], and anything nested past
+// [maxValueDepth] is replaced with a string saying so.
+//
+// A group or a list stops being converted once it is past [maxSpanBytes],
+// since no span can keep it: the work is then bounded by the budget rather
+// than by the list length to the power of the depth, which is what a list of
+// lists sharing their elements costs nothing to build and would otherwise
+// cost to convert.
 func convertValue(v slog.Value, depth int) (value, int) {
+	converted, size := convertPayload(v, depth)
+	return converted, valueOverhead + size
+}
+
+// convertPayload is [convertValue] without the overhead of the value itself.
+func convertPayload(v slog.Value, depth int) (value, int) {
 	v = v.Resolve()
 	switch v.Kind() {
 	case slog.KindString:
@@ -293,7 +311,7 @@ func convertValue(v slog.Value, depth int) (value, int) {
 		out := value{kind: kindKVList}
 		size := 0
 		for _, member := range v.Group() {
-			if len(out.kvs) >= maxListLength {
+			if len(out.kvs) >= maxListLength || size > maxSpanBytes {
 				break
 			}
 			if kv, ok := convertAttr(member, depth+1); ok {
@@ -349,6 +367,9 @@ func convertList[T any](list []T, depth int, toValue func(T) slog.Value) (value,
 	out := value{kind: kindArray}
 	size := 0
 	for _, element := range list[:min(len(list), maxListLength)] {
+		if size > maxSpanBytes {
+			break
+		}
 		v, n := convertValue(toValue(element), depth+1)
 		out.list = append(out.list, v)
 		size += n

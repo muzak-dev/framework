@@ -432,8 +432,11 @@ func TestAutoETagNotModifiedKeepsTheFrameworksVary(t *testing.T) {
 
 // A route that does not tag pays nothing for the feature: the request is not
 // read for If-None-Match and no allocation is added. It is not parallel,
-// because AllocsPerRun counts every allocation in the process.
+// because AllocsPerRun counts every allocation in the process, and it is
+// skipped under -race, where a pooled response buffer is sometimes rebuilt and
+// the two counts it compares differed by one at random.
 func TestAutoETagOffCostsNothing(t *testing.T) {
+	skipAllocationCountsUnderRace(t)
 	app := New(AppOptions{LoggerOptions: LoggerOptions{Format: LogFormatNone}, DisableAccessLog: true, DisableDocs: true})
 	app.Get("/plain", func(ctx *Context, _ Empty) (benchOut, error) { return benchOut{ID: "x"}, nil })
 	app.Get("/tagged", func(ctx *Context, _ Empty) (benchOut, error) { return benchOut{ID: "x"}, nil }, AutoETag())

@@ -198,7 +198,7 @@ func defaultRedirectStatus(method string) int {
 // writeRedirect writes a [Redirect].
 func (c *Context) writeRedirect(out Redirect) error {
 	if c.w.written {
-		return nil
+		return c.settle(nil)
 	}
 	status := out.Status
 	if status == 0 {
@@ -220,6 +220,12 @@ func (c *Context) writeRedirect(out Redirect) error {
 		// query, and the reason is what the operator needs.
 		return fmt.Errorf("muzak: %s %s returned a muzak.Redirect that was refused: %w",
 			c.r.Method, c.route.pathOrRequest(c.r), err)
+	}
+	// Released once the target has been accepted and before anything is
+	// written, so a refused target rolls back and a failed release can still
+	// change the answer; see [Context.settle].
+	if err := c.settle(nil); err != nil {
+		return err
 	}
 	c.w.Header().Set("Location", out.To)
 	c.w.WriteHeader(status)

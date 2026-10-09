@@ -309,10 +309,15 @@ func bodiless(status int) bool {
 // writeBytes writes a [Bytes] value.
 func (c *Context) writeBytes(out Bytes) error {
 	if c.w.written {
-		return nil
+		return c.settle(nil)
 	}
 	contentType, err := c.responseContentType(out.ContentType)
 	if err != nil {
+		return err
+	}
+	// Released once the response is known to be sendable and before anything
+	// is written; see [Context.settle].
+	if err := c.settle(nil); err != nil {
 		return err
 	}
 	status := clampStatus(c.status)
@@ -335,7 +340,7 @@ func (c *Context) writeBytes(out Bytes) error {
 func (c *Context) writeStream(out Stream) error {
 	defer closeBody(out.Body)
 	if c.w.written {
-		return nil
+		return c.settle(nil)
 	}
 	if out.Body == nil {
 		return fmt.Errorf("muzak: %s %s returned a muzak.Stream with no Body; return muzak.Bytes for a body that is empty",
@@ -343,6 +348,12 @@ func (c *Context) writeStream(out Stream) error {
 	}
 	contentType, err := c.responseContentType(out.ContentType)
 	if err != nil {
+		return err
+	}
+	// Released before the header goes out, so a failed release can still
+	// change the answer; a body that then fails part way aborts the response
+	// as any started response does. See [Context.settle].
+	if err := c.settle(nil); err != nil {
 		return err
 	}
 	status := clampStatus(c.status)

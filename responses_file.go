@@ -94,7 +94,7 @@ type FileResponse struct {
 // writeFile writes a [FileResponse].
 func (c *Context) writeFile(out FileResponse) error {
 	if c.w.written {
-		return nil
+		return c.settle(nil)
 	}
 	if out.FS == nil {
 		return fmt.Errorf("muzak: %s %s returned a muzak.FileResponse with no FS; set it to the filesystem the file is read from",
@@ -125,6 +125,12 @@ func (c *Context) writeFile(out FileResponse) error {
 		// that has an end: /dev/zero behind a link would be read for as long
 		// as the client cared to wait.
 		return NotFound("")
+	}
+	// Released once the file is known to be there and before anything is
+	// written, so a missing file rolls back and a failed release can still
+	// change the answer; see [Context.settle].
+	if err := c.settle(nil); err != nil {
+		return err
 	}
 	status := clampStatus(c.status)
 	if bodiless(status) {

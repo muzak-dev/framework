@@ -1,0 +1,22 @@
+Usage: muzak ts [-url URL | -file openapi.json] [-client] [-o out.ts]
+
+Ts writes the TypeScript declarations for the API a document describes, as
+the tsgen package does: an interface for every component schema, and the
+parameters, body, response and error types of every operation. With -client,
+a small client built on fetch is written too.
+
+The document is read from a file, from standard input with -file -, or from a
+running application with -url, fetched as muzak routes fetches it. The output
+goes to standard output, or to the file -o names, which is written to a
+temporary file beside it and renamed into place, so a frontend build watching
+it never reads half a file.
+
+Flags:
+  -client
+    	also write a client for the API, built on fetch
+  -file file
+    	read the document from this file, or from standard input when it is -
+  -o file
+    	write to this file rather than to standard output
+  -url URL
+    	fetch the document from this http or https URL, such as http://localhost:8080/openapi.json

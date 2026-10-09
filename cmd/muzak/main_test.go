@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // update rewrites the golden files instead of comparing with them.
@@ -65,7 +66,8 @@ func testConsole(dir string) (*console, *syncBuffer, *syncBuffer) {
 		signals: func() (<-chan os.Signal, func()) {
 			return make(chan os.Signal), func() {}
 		},
-		version: "v0.3.0",
+		version:      "v0.3.0",
+		fetchTimeout: 10 * time.Second,
 	}, stdout, stderr
 }
 
@@ -75,6 +77,12 @@ func runIn(t *testing.T, dir string, args ...string) result {
 	c, stdout, stderr := testConsole(dir)
 	code := run(context.Background(), args, c)
 	return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+// runWith runs a command line with a console the caller adjusted.
+func runWith(c *console, args ...string) result {
+	code := run(context.Background(), args, c)
+	return result{code: code, stdout: c.stdout.(*syncBuffer).String(), stderr: c.stderr.(*syncBuffer).String()}
 }
 
 // expect fails the test unless the command exited with code and its stderr
@@ -164,6 +172,7 @@ func TestUnknownCommandSuggestsTheNearestOne(t *testing.T) {
 	cases := map[string]string{
 		"nwe":                     `there is no command "nwe"; did you mean "new"\?`,
 		"HELP":                    `did you mean "help"\?`,
+		"rotues":                  `there is no command "rotues"; did you mean "routes"\?`,
 		"DEV":                     `did you mean "dev"\?`,
 		"version2":                `did you mean "version"\?`,
 		"deploy":                  `there is no command "deploy"\n`,
@@ -187,6 +196,7 @@ func TestUnknownFlagsAreUsageErrors(t *testing.T) {
 		r.expect(t, exitUsage, `muzak: `+cmd.name+`: flag provided but not defined: -nope`, `Run "muzak help `+cmd.name+`" for usage`)
 	}
 	runIn(t, t.TempDir(), "dev", "-poll", "soon").expect(t, exitUsage, `invalid value "soon" for flag -poll`)
+	runIn(t, t.TempDir(), "routes", "-file").expect(t, exitUsage, `flag needs an argument: -file`)
 	runIn(t, t.TempDir(), "new", "shop", "-module").expect(t, exitUsage, `flag needs an argument: -module`)
 	runIn(t, t.TempDir(), "new", "-\x1b[2J").expect(t, exitUsage, `flag provided but not defined: -\\x1b\[2J`)
 }
@@ -361,8 +371,12 @@ func TestErrorsDescribeThemselves(t *testing.T) {
 func TestAFailedWriteFailsTheCommand(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	writeDocument(t, dir, "openapi.json", documentOf(t, routesApp()))
 	for _, args := range [][]string{
 		{"version"},
+		{"routes", "-file", "openapi.json"},
+		{"diff", "openapi.json", "openapi.json"},
+		{"ts", "-file", "openapi.json"},
 		{"new", "written", "-module", "example.com/written"},
 	} {
 		runFailingStdout(t, dir, args...).expect(t, exitFailure, `the pipe is closed`)
@@ -405,8 +419,8 @@ func TestProcessConsoleIsTheProcess(t *testing.T) {
 	if c.stdout != os.Stdout || c.stderr != os.Stderr || c.stdin != os.Stdin || c.dir != "" {
 		t.Error("the process console does not read and write the process's own streams")
 	}
-	if !isReleaseVersion(c.version) {
-		t.Errorf("version %q", c.version)
+	if c.fetchTimeout != defaultFetchTimeout || !isReleaseVersion(c.version) {
+		t.Errorf("fetch timeout %s, version %q", c.fetchTimeout, c.version)
 	}
 	signals, stop := c.signals()
 	stop()

@@ -8,6 +8,9 @@ The commands are:
 
   new       create a project laid out the way the framework's example is
   dev       run an application, rebuilding and restarting it when a file changes
+  routes    list the operations an OpenAPI document describes
+  diff      report the changes between two OpenAPI documents that break clients
+  ts        write TypeScript declarations for an OpenAPI document
   version   print the version of muzak and of the framework it scaffolds
   help      print help about a command
 

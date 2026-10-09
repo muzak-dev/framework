@@ -1,0 +1,6 @@
+Breaking (1):
+  /paths/~1items/post: The operation POST /items is no longer served. [operation-removed]
+Possibly breaking (1):
+  /paths/~1items~1{id}: The path "/items/{id}", which was deprecated, is no longer served. [path-removed]
+Compatible (1):
+  /paths/~1users: The path "/users" is new. [path-added]

@@ -1,0 +1,24 @@
+Usage: muzak diff [-fail-on breaking|possibly|never] old.json new.json
+
+Diff compares two OpenAPI documents, judged from the side of a client written
+against the old one, and prints every change, grouped as breaking, possibly
+breaking and compatible, each with where it is in the old document and its
+kind. This is muzak.CompareDocuments and muzak.WriteChanges, so it reports
+exactly what testclient.AssertCompatible does in a test.
+
+Either document may be read from standard input by naming it -. Names in the
+report that come from the documents are escaped for the terminal.
+
+Exit status:
+
+  0  no change as serious as -fail-on names
+  1  at least one change that serious
+  2  the command line is wrong, or a document cannot be read
+
+-fail-on breaking, the default, fails on breaking changes; possibly also fails
+on possibly breaking ones; never always succeeds once both documents are
+read, for a report that only informs.
+
+Flags:
+  -fail-on level
+    	the least serious level of change that fails: breaking, possibly or never (default "breaking")

@@ -1,0 +1,6 @@
+METHOD  PATH         OPERATION           SUMMARY                      SECURITY
+GET     /health      get_health          -                            -
+GET     /items       get_items           List items                   none
+POST    /items       post_items          Create an item               oauth[items:write,items:read]
+GET     /items/{id}  get_items_by_id     Read an item                 bearer | bearer+key
+DELETE  /items/{id}  delete_items_by_id  (deprecated) Delete an item  oauth[items:write]

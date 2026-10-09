@@ -1,0 +1,23 @@
+Usage: muzak routes [-url URL | -file openapi.json]
+
+Routes prints a table of every operation the document describes: its method,
+its path, its operationId, its summary and the security requirements a client
+satisfies one of.
+
+A requirement lists the schemes a client satisfies together, joined by "+",
+each with the scopes it needs in brackets, and alternatives are separated by
+"|". "none" is an operation that says it needs no credentials, and "-" one
+that says nothing at all. A deprecated operation's summary is marked.
+
+The document is read from a file, from standard input with -file -, or from a
+running application with -url, such as the one muzak dev runs. Fetching
+connects to loopback and private addresses, since that is where a developer's
+own application listens, but never to a cloud metadata address; it gives up
+after 30 seconds and reads at most 16 MiB. Everything printed that comes from
+the document is escaped for the terminal.
+
+Flags:
+  -file file
+    	read the document from this file, or from standard input when it is -
+  -url URL
+    	fetch the document from this http or https URL, such as http://localhost:8080/openapi.json

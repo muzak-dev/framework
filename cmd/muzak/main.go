@@ -35,6 +35,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -62,10 +63,18 @@ type console struct {
 
 	// version is the framework version a new project requires.
 	version string
+	// fetchTimeout bounds fetching a document from -url, from the first byte
+	// sent to the last one read.
+	fetchTimeout time.Duration
 	// tempDir is where dev writes the binaries it builds. Empty means the
 	// system's temporary directory.
 	tempDir string
 }
+
+// defaultFetchTimeout bounds fetching a document. An application answers
+// /openapi.json from memory, so this is time for a slow network rather than
+// for a slow server.
+const defaultFetchTimeout = 30 * time.Second
 
 // processConsole is the console of this process.
 func processConsole() *console {
@@ -82,7 +91,8 @@ func processConsole() *console {
 			signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 			return ch, func() { signal.Stop(ch) }
 		},
-		version: frameworkVersion(info, ok),
+		version:      frameworkVersion(info, ok),
+		fetchTimeout: defaultFetchTimeout,
 	}
 }
 
@@ -120,7 +130,7 @@ type runner interface {
 }
 
 // commands lists every command, in the order "muzak help" prints them.
-var commands = []*command{newCmd, devCmd, versionCmd, helpCmd}
+var commands = []*command{newCmd, devCmd, routesCmd, diffCmd, tsCmd, versionCmd, helpCmd}
 
 // lookup finds a command by name.
 func lookup(name string) *command {

@@ -244,6 +244,42 @@ func TestLongLocationsAreChargedAndTheReportIsBounded(t *testing.T) {
 	})
 }
 
+// TestManySecurityAlternativesStopAtTheBudget compares an operation that
+// lists a hundred requirements of two thousand scopes each with one that
+// lists them again plus a scope, so that every requirement of one side is
+// checked against every requirement of the other, scope by scope. That costs
+// the product of the two lists times the scopes, and the comparison charges
+// it rather than one step per pair.
+func TestManySecurityAlternativesStopAtTheBudget(t *testing.T) {
+	t.Parallel()
+	scopes := make([]string, 2000)
+	for i := range scopes {
+		scopes[i] = "s" + strconv.Itoa(i)
+	}
+	doc := func(extra bool) *Document {
+		op := compatOp("op")
+		for range 100 {
+			requirement := scopes
+			if extra {
+				requirement = append(slices.Clone(scopes), "x")
+			}
+			op.Security = append(op.Security, SecurityRequirement{"oauth": requirement})
+		}
+		if extra {
+			op.Security[len(op.Security)-1] = SecurityRequirement{"oauth": scopes}
+		}
+		return compatDoc(map[string]*PathItem{"/a": {Get: op}}, nil)
+	}
+	start := time.Now()
+	got, used, incomplete := stepsFor(doc(false), doc(true))
+	if !incomplete || got[0].Kind != "comparison-incomplete" {
+		t.Errorf("checking 100 by 100 requirements of 2000 scopes finished in %d steps", used)
+	}
+	if elapsed := time.Since(start); elapsed > hangGuard {
+		t.Errorf("the comparison took %v", elapsed)
+	}
+}
+
 // TestChangeListIsBounded checks that two documents differing everywhere list
 // at most compareMaxChanges changes, and say the list is incomplete.
 func TestChangeListIsBounded(t *testing.T) {

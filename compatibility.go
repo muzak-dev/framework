@@ -545,7 +545,8 @@ func schemeIdentity(s SecurityScheme) string {
 
 // countDocumentNodes counts the schemas, operations, parameters and responses
 // a document holds, which is what the budget of a comparison is proportional
-// to, each schema weighed by what reading it costs. A schema held by several
+// to, each schema weighed by what reading it costs and each operation by its
+// security requirements. A schema held by several
 // positions, or one a Document built in Go reaches again through a cycle of
 // pointers, is counted once; the walk keeps a stack of its own rather than
 // recursing, so a document of any depth is counted in constant stack.
@@ -575,7 +576,7 @@ func (c *docComparer) countNodes(d *Document) int {
 			if op.op == nil {
 				continue
 			}
-			count++
+			count += requirementsCost(op.op.Security)
 			for i := range op.op.Parameters {
 				count++
 				push(op.op.Parameters[i].Schema)
@@ -897,6 +898,21 @@ func alternatives(requirements []SecurityRequirement, schemes map[string]Securit
 	return out
 }
 
+// requirementsCost is what checking one client against every requirement of
+// an operation costs: a step for each requirement, each scheme it names and
+// each scope it needs. An operation that lists none is checked against the one
+// requirement of no credentials.
+func requirementsCost(requirements []SecurityRequirement) int {
+	cost := 1
+	for _, requirement := range requirements {
+		cost++
+		for _, scopes := range requirement {
+			cost += 1 + len(scopes)
+		}
+	}
+	return cost
+}
+
 // describe names what a client satisfying an alternative presents.
 func (a securityAlternative) describe() string {
 	if a.names == "" {
@@ -931,7 +947,10 @@ func satisfies(have, need securityAlternative) bool {
 func (c *docComparer) compareSecurity(location string, old, cur []SecurityRequirement) {
 	before := alternatives(old, c.oldSchemes)
 	after := alternatives(cur, c.curSchemes)
-	if !c.spend(len(before) * len(after)) {
+	// Each alternative of one side is checked against every alternative of
+	// the other, scheme by scheme and scope by scope, which is what is
+	// charged: a list of many requirements of many scopes pays for all of it.
+	if !c.spend(len(before)*requirementsCost(cur) + len(after)*requirementsCost(old)) {
 		return
 	}
 	accepted := func(have securityAlternative, by []securityAlternative) bool {

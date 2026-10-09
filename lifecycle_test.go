@@ -100,30 +100,48 @@ func TestLifecycleStartsAndStops(t *testing.T) {
 	}
 }
 
+// Each component's Start waits until every component's Start has been entered,
+// which only happens if they run at the same time: started one after another,
+// the first would wait for the others for ever. Timing the start instead
+// compared one delay with three, and a loaded machine stretched one delay past
+// three.
 func TestLifecycleStartsInParallel(t *testing.T) {
 	t.Parallel()
-	const delay = 60 * time.Millisecond
-	components := []*recorder{
-		{name: "a", startDelay: delay},
-		{name: "b", startDelay: delay},
-		{name: "c", startDelay: delay},
+	const count = 3
+	var entered sync.WaitGroup
+	entered.Add(count)
+	all := make(chan struct{})
+	go func() {
+		entered.Wait()
+		close(all)
+	}()
+	start := func(ctx context.Context) error {
+		entered.Done()
+		select {
+		case <-all:
+			return nil
+		case <-time.After(lifecycleBarrierTimeout):
+			return errors.New("the other components never started alongside this one")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-	app := New(quietOptions(),
-		WithLifecycle(components[0], components[1], components[2]))
+	components := make([]Lifecycle, count)
+	for i := range components {
+		components[i] = NewLifecycle(string(rune('a'+i)), start, nil)
+	}
+	app := New(quietOptions(), WithLifecycle(components...))
 	mustBuild(t, app)
 
-	began := time.Now()
 	if err := app.StartLifecycle(context.Background()); err != nil {
-		t.Fatalf("StartLifecycle = %v", err)
-	}
-	elapsed := time.Since(began)
-
-	// Started sequentially this would take at least three delays. Allow ample
-	// slack so the test stays reliable on a loaded machine.
-	if elapsed >= 3*delay {
-		t.Errorf("start took %v, want roughly one delay of %v (components must start in parallel)", elapsed, delay)
+		t.Fatalf("StartLifecycle = %v (components must start in parallel)", err)
 	}
 }
+
+// lifecycleBarrierTimeout is how long a component in
+// TestLifecycleStartsInParallel waits for the others. It only has to be longer
+// than any scheduling delay, because a sequential start never ends the wait.
+const lifecycleBarrierTimeout = 5 * time.Second
 
 // TestLifecycleFailFastReleasesWhatStarted is the property the design exists
 // for: a failure must not leave a started component running.

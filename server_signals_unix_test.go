@@ -86,25 +86,34 @@ func TestRunSignalsSecondSignalEndsTheProcess(t *testing.T) {
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}
-	// Long enough for the first signal to start the drain and release the
-	// handler, which is what a second interrupt has to get past.
-	time.Sleep(500 * time.Millisecond)
-	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
-		t.Fatal(err)
-	}
-
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) {
-			t.Fatalf("the helper ended with %v, want it killed by the second signal", err)
+
+	// The first signal starts the drain and releases the handler a second one
+	// has to get past, at a moment the helper cannot report. A fixed wait for
+	// that moment was a guess a loaded machine could overrun, so the interrupt
+	// is repeated until the process ends instead: one swallowed during the
+	// drain is swallowed every time, and the drain lasts a minute.
+	again := time.NewTicker(100 * time.Millisecond)
+	defer again.Stop()
+	giveUp := time.After(10 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("the helper ended with %v, want it killed by the second signal", err)
+			}
+			if status, ok := exit.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGINT {
+				t.Errorf("the helper ended with %v, want it terminated by SIGINT", exit)
+			}
+			return
+		case <-again.C:
+			// It fails only once the process has ended, which the next
+			// round reports.
+			_ = cmd.Process.Signal(syscall.SIGINT)
+		case <-giveUp:
+			t.Fatal("a second SIGINT during the drain was swallowed")
 		}
-		if status, ok := exit.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGINT {
-			t.Errorf("the helper ended with %v, want it terminated by SIGINT", exit)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("a second SIGINT during the drain was swallowed")
 	}
 }

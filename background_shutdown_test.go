@@ -110,10 +110,22 @@ func TestShutdownIsBoundedByATaskThatIgnoresItsContext(t *testing.T) {
 	opts.ShutdownTimeout = 200 * time.Millisecond
 	release := make(chan struct{})
 	defer close(release)
-	app := taskApp(t, opts, func(context.Context) { <-release })
+	started := make(chan struct{})
+	app := taskApp(t, opts, func(context.Context) {
+		close(started)
+		<-release
+	})
 	addr, done := startServer(t, app)
 	if status, _, err := fetchOverTheWire(t, "http://"+addr+"/task"); err != nil || status != http.StatusOK {
 		t.Fatalf("GET /task = %d, %v", status, err)
+	}
+	// The task has to be running when the shutdown starts. One still queued
+	// when the deadline passes is dropped instead, which is reported
+	// differently, and a loaded machine did not always start it in time.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the task never started")
 	}
 	began := time.Now()
 	if err := app.Shutdown(context.Background()); err != nil {
@@ -205,6 +217,10 @@ func TestBackgroundTaskHandedOverAfterTheShutdownGaveUpIsDropped(t *testing.T) {
 }
 
 func TestBackgroundWorkersStartLazilyAndExitWhenIdle(t *testing.T) {
+	// The workers are counted across the process, so those of earlier tests
+	// that are still finishing are let go first, or they would be counted as
+	// this application's.
+	waitNoWorkers(t)
 	opts := quietOptions()
 	opts.Background = BackgroundOptions{Workers: 4}
 	release := make(chan struct{})
@@ -241,7 +257,10 @@ func TestNoGoroutineLeaksFromBackgroundTasks(t *testing.T) {
 	for range 3 {
 		opts := quietOptions()
 		opts.Addr = "127.0.0.1:0"
-		opts.ShutdownTimeout = 300 * time.Millisecond
+		// Long enough for the tasks to finish on a loaded machine. Past the
+		// deadline and its grace period a shutdown returns with tasks still
+		// running, by design, and that is not the leak looked for here.
+		opts.ShutdownTimeout = 5 * time.Second
 		app := taskApp(t, opts, func(ctx context.Context) {
 			select {
 			case <-time.After(50 * time.Millisecond):
@@ -261,9 +280,14 @@ func TestNoGoroutineLeaksFromBackgroundTasks(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Shutdown has returned, so nothing of the pool may still be running.
-		if n := workerFrames(); n != 0 {
+		// A worker leaves the pool's count as its last act under the lock and
+		// then returns, and a loaded machine can catch its goroutine between
+		// the two, so the count is what is held to zero at once and the
+		// goroutines are given the moment it takes them to return.
+		if n := poolAlive(app); n != 0 {
 			t.Fatalf("%d background workers survived Shutdown", n)
 		}
+		waitNoWorkers(t)
 	}
 	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
 	assertNoGoroutineLeaks(t)
@@ -341,6 +365,9 @@ func TestTaskRing(t *testing.T) {
 // without: the feature must cost a request that does not use it nothing.
 func TestBackgroundCostsNothingUnused(t *testing.T) {
 	skipAllocationCountsUnderRace(t)
+	// Workers are counted across the process; see
+	// TestBackgroundWorkersStartLazilyAndExitWhenIdle.
+	waitNoWorkers(t)
 	measure := func(opts AppOptions) float64 {
 		app := New(opts)
 		app.Get("/x", okHandler)

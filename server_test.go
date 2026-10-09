@@ -204,6 +204,7 @@ func TestShutdownIsIdempotentAndSafeBeforeStart(t *testing.T) {
 
 func TestGracefulShutdownWaitsForInFlightRequests(t *testing.T) {
 	t.Parallel()
+	arrived := make(chan struct{})
 	release := make(chan struct{})
 	finished := make(chan struct{})
 
@@ -211,6 +212,7 @@ func TestGracefulShutdownWaitsForInFlightRequests(t *testing.T) {
 	opts.Addr = "127.0.0.1:0"
 	app := New(opts)
 	app.Get("/slow", func(ctx *Context, _ Empty) (rtOut, error) {
+		close(arrived)
 		<-release
 		close(finished)
 		return rtOut{OK: true}, nil
@@ -232,8 +234,16 @@ func TestGracefulShutdownWaitsForInFlightRequests(t *testing.T) {
 		responses <- res.StatusCode
 	}()
 
-	// Give the request time to reach the handler, then ask for a shutdown.
-	time.Sleep(50 * time.Millisecond)
+	// Once the request is in the handler, ask for a shutdown. A fixed sleep
+	// here was sometimes over before a loaded machine had accepted the
+	// connection, and the shutdown then closed the listener under the request,
+	// which left the handler never running and this test waiting for ever.
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("the request never reached the handler")
+	}
 	cancel()
 	close(release)
 
@@ -258,7 +268,9 @@ func TestShutdownDeadlineClosesRemainingConnections(t *testing.T) {
 	opts.Logger = logger
 
 	app := New(opts)
+	arrived := make(chan struct{})
 	app.Get("/stuck", func(ctx *Context, _ Empty) (rtOut, error) {
+		close(arrived)
 		<-release
 		return rtOut{OK: true}, nil
 	})
@@ -275,7 +287,15 @@ func TestShutdownDeadlineClosesRemainingConnections(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	// The shutdown has to find the request in its handler, or there is no
+	// connection left for the deadline to close; a fixed sleep did not always
+	// give a loaded machine the time to accept it.
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("the request never reached the handler")
+	}
 	cancel()
 
 	<-done

@@ -66,7 +66,10 @@ func TestShutdownSpendsOneDeadline(t *testing.T) {
 	probe := newStopProbe(&active)
 	opts := quietOptions()
 	opts.Addr = "127.0.0.1:0"
-	opts.ShutdownTimeout = 500 * time.Millisecond
+	// Long enough that the slack allowed below for a loaded machine is most
+	// of one deadline and still short of the second a drain spending one
+	// deadline per stage would take.
+	opts.ShutdownTimeout = time.Second
 	opts.WebSocket = WSOptions{WriteTimeout: 5 * time.Second}
 	app := New(opts, WithLifecycle(probe.component()))
 
@@ -143,7 +146,7 @@ func TestShutdownSpendsOneDeadline(t *testing.T) {
 	took := time.Since(began)
 	<-done
 
-	if limit := opts.ShutdownTimeout + shutdownHandlerGrace + 400*time.Millisecond; took > limit {
+	if limit := opts.ShutdownTimeout + shutdownHandlerGrace + 700*time.Millisecond; took > limit {
 		t.Errorf("Shutdown took %v with ShutdownTimeout %v, want one deadline for the whole drain", took, opts.ShutdownTimeout)
 	}
 	if got := probe.activeAtEnd.Load(); got != 0 {
@@ -194,7 +197,9 @@ func TestShutdownBoundsAHandlerThatIgnoresEverything(t *testing.T) {
 	_ = app.Shutdown(context.Background())
 	took := time.Since(began)
 	<-done
-	if limit := opts.ShutdownTimeout + shutdownHandlerGrace + 400*time.Millisecond; took > limit {
+	// The handler would hold an unbounded shutdown for as long as the test
+	// runs, so the slack can be generous enough for a loaded machine.
+	if limit := opts.ShutdownTimeout + shutdownHandlerGrace + 2*time.Second; took > limit {
 		t.Errorf("Shutdown took %v, want it bounded by the deadline and the grace period", took)
 	}
 	if got := probe.activeAtEnd.Load(); got != 1 {

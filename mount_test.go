@@ -666,6 +666,8 @@ func TestStripPrefix(t *testing.T) {
 		{"/debug/pprof/", "/", "/"},
 		{"/debug/pprof//x", "//x", "//x"},
 		{"/debug/pprof/a%2Fb", "/a/b", "/a%2Fb"},
+		{"/debug/pprof/!x*(y)", "/!x*(y)", "/!x*(y)"},
+		{"/debug/pprof/%21x", "/!x", "/%21x"},
 		{"/debug/pprof/caf%C3%A9", "/caf\u00e9", "/caf%C3%A9"},
 		{"/%64ebug/pprof/goroutine?debug=2", "/goroutine", "/goroutine"},
 	} {

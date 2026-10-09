@@ -11,7 +11,8 @@ import (
 // checks what the handler would be given: a rooted path, whose escaped form
 // is the end of the one that arrived, and decodes to the path given.
 func FuzzMountStripPrefix(f *testing.F) {
-	for _, seed := range []string{"/a/b", "/a/b/", "/a/b/c%2Fd", "/%61/b//x", "/a", "/", "/a/b/%zz", "/a/b/caf%C3%A9"} {
+	// "///!" is the input that found a remainder respelled as "/%21".
+	for _, seed := range []string{"/a/b", "/a/b/", "/a/b/c%2Fd", "/%61/b//x", "/a", "/", "/a/b/%zz", "/a/b/caf%C3%A9", "///!", "/a/b/(x)*'y'"} {
 		f.Add(seed)
 	}
 	m := &mountPoint{prefix: "/a/b", segments: 2}

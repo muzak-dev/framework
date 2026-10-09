@@ -540,8 +540,12 @@ func (m *mountPoint) stripped(r *http.Request) *http.Request {
 	stripped := new(http.Request)
 	*stripped = *r
 	u := *r.URL
+	// The escaped form is kept wherever it is not the one net/url would write
+	// for the path, which is the rule url.URL keeps RawPath by, so that a
+	// remainder the client spelled "/a%2Fb" or "/!" keeps that spelling rather
+	// than becoming "/a/b" or "/%21".
 	u.Path, u.RawPath = path, ""
-	if path != rest {
+	if u.EscapedPath() != rest {
 		u.RawPath = rest
 	}
 	stripped.URL = &u

@@ -540,7 +540,7 @@ func (s *sseStream) send(frame sseFrame) error {
 		return err
 	}
 	if s.closing.Load() && !frame.final {
-		return errSSELifetime
+		return s.closed()
 	}
 
 	payload := ssePayloads.Get().(*[]byte)
@@ -556,13 +556,16 @@ func (s *sseStream) send(frame sseFrame) error {
 	if err := s.acquire(); err != nil {
 		return err
 	}
-	defer s.release()
 	// Writes go out in the order they take the semaphore, so what was queued
 	// behind the closing comment must not follow it: the check made before
 	// waiting is too early to catch a keepalive that was already waiting.
 	if s.closing.Load() && !frame.final {
-		return errSSELifetime
+		// The semaphore goes back before waiting, because the comment being
+		// waited for may need it.
+		s.release()
+		return s.closed()
 	}
+	defer s.release()
 
 	s.buf = frame.appendFields(s.buf[:0])
 	if frame.hasData || frame.hasText {
@@ -963,6 +966,20 @@ func (s *sseStream) expire() {
 	s.closing.Store(true)
 	_ = s.send(sseFrame{comment: sseLifetimeComment, final: true})
 	_ = s.fail(errSSELifetime)
+}
+
+// closed is what a send refused because the stream is closing reports, once
+// the closing comment is out and the stream has ended, which expire does
+// straight after writing it.
+//
+// The refusal is not reported sooner because of what a handler does with it:
+// it returns, and its stream is finished, which interrupts a write still in
+// progress. Told while the comment was being written, a handler that sends
+// continuously cut it off, and its client was left with a response that broke
+// off part way instead of the comment and a clean end.
+func (s *sseStream) closed() error {
+	<-s.ctx.Done()
+	return errSSELifetime
 }
 
 // monotonicStamp records a moment for a long-lived connection to measure an

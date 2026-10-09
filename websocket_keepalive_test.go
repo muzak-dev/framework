@@ -18,10 +18,15 @@ import (
 // hundred kilobytes a second.
 func TestWebSocketKeepaliveSparesAPeerStillSendingAMessage(t *testing.T) {
 	t.Parallel()
+	// The pong timeout is long beside the gaps between pieces, so that only a
+	// keepalive that ignores the pieces closes the connection. At 200ms against
+	// gaps of 10ms, a loaded machine sometimes held up the sender or the
+	// server's read for the whole timeout, and nothing arrived in it.
+	const pongTimeout = 800 * time.Millisecond
 	_, server := newWSTestApp(t, func(app *App) {
 		app.WS("/ws", wsEcho, WithWebSocket(WSOptions{
-			PingInterval: 50 * time.Millisecond,
-			PongTimeout:  200 * time.Millisecond,
+			PingInterval: pongTimeout / 4,
+			PongTimeout:  pongTimeout,
 			ReadTimeout:  wsTestTimeout,
 		}))
 	})
@@ -33,12 +38,12 @@ func TestWebSocketKeepaliveSparesAPeerStillSendingAMessage(t *testing.T) {
 	for i := range payload {
 		frame = append(frame, payload[i]^key[i%4])
 	}
-	// Sixty pieces a few milliseconds apart take several pong timeouts to
-	// send, and no gap between two of them comes near one.
+	// Sixty pieces a twentieth of a pong timeout apart take three pong
+	// timeouts to send, and no gap between two of them comes near one.
 	piece := len(frame)/60 + 1
 	for start := 0; start < len(frame); start += piece {
 		conn.sendRaw(frame[start:min(start+piece, len(frame))])
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(pongTimeout / 20)
 	}
 
 	for {

@@ -19,8 +19,12 @@ func TestWebSocketMaxLifetimeClosesAConnectionThatAnswersPings(t *testing.T) {
 			PongTimeout:  time.Second,
 		}))
 	})
-	conn := dialWS(t, server.URL, "/ws")
+	// The clock starts before the dial, because the lifetime starts during
+	// it: started once the handshake had been read, it missed however long a
+	// loaded machine took to hand the response over, and the connection
+	// looked to have been closed early.
 	start := time.Now()
+	conn := dialWS(t, server.URL, "/ws")
 
 	// The peer is a model citizen: it answers every ping, so the keepalive never
 	// closes it.

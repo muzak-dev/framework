@@ -159,10 +159,15 @@ func TestWSDialTimeoutsDoNotOutliveTheirOperation(t *testing.T) {
 	// A timeout enforced by closing the transport must be disarmed the moment
 	// its operation finishes. One left running would close a connection that
 	// is merely quiet, which is what most connections are most of the time.
+	//
+	// The timeouts still have to be long enough for the operations themselves:
+	// at 30ms a loaded machine sometimes paused a write for longer than that,
+	// and the timeout was right to end it. The quiet spell is three of them.
+	const timeout = 200 * time.Millisecond
 	_, server := echoApp(t)
 	conn := dialClient(t, server.URL+"/ws", WSDialOptions{
-		ReadTimeout:  30 * time.Millisecond,
-		WriteTimeout: 30 * time.Millisecond,
+		ReadTimeout:  timeout,
+		WriteTimeout: timeout,
 	})
 	for _, message := range []string{"first", "after a quiet spell"} {
 		if err := conn.WriteText(t.Context(), message); err != nil {
@@ -172,7 +177,7 @@ func TestWSDialTimeoutsDoNotOutliveTheirOperation(t *testing.T) {
 		if err != nil || got != message {
 			t.Fatalf("ReadText = %q, %v, want %q", got, err, message)
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(3 * timeout)
 	}
 }
 
@@ -211,18 +216,23 @@ func TestWSExpiry(t *testing.T) {
 		}
 	})
 
+	// The deadlines below are far enough off that the statement after an arm
+	// runs before they pass, which at 20ms a loaded machine did not always
+	// manage: the deadline fired first, and the expiry was right to run it.
+	const soon = 250 * time.Millisecond
+
 	t.Run("disarming stops it", func(t *testing.T) {
 		t.Parallel()
 		var expiry wsExpiry
 		var fired atomic.Bool
-		expiry.arm(time.Now().Add(20*time.Millisecond), func() { fired.Store(true) })
+		expiry.arm(time.Now().Add(soon), func() { fired.Store(true) })
 		if !expiry.disarm() {
 			t.Error("disarm did not report the armed timer")
 		}
 		if expiry.disarm() {
 			t.Error("a second disarm reported a timer, want none left")
 		}
-		time.Sleep(60 * time.Millisecond)
+		time.Sleep(2 * soon)
 		if fired.Load() {
 			t.Error("a disarmed deadline fired")
 		}
@@ -233,8 +243,8 @@ func TestWSExpiry(t *testing.T) {
 		var expiry wsExpiry
 		var first atomic.Bool
 		second := make(chan struct{})
-		expiry.arm(time.Now().Add(20*time.Millisecond), func() { first.Store(true) })
-		expiry.arm(time.Now().Add(40*time.Millisecond), func() { close(second) })
+		expiry.arm(time.Now().Add(soon), func() { first.Store(true) })
+		expiry.arm(time.Now().Add(2*soon), func() { close(second) })
 		select {
 		case <-second:
 		case <-time.After(wsTestTimeout):

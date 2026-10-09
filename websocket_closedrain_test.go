@@ -87,8 +87,17 @@ func finishClose(c *rawConn) error {
 	return err
 }
 
+// closeDrainGrace is the grace period of the tests that check a close frame
+// reaches a peer still sending. What they check is that the server reads on
+// until the peer is done rather than closing under it, and a peer finishing
+// its quarter of a megabyte ends the wait however long it is. The default of
+// 250ms was sometimes over first on a loaded machine, and the server then
+// closed with the peer's data unread, as it is meant to once the period is
+// up, and reset the connection.
+const closeDrainGrace = wsTestTimeout
+
 func TestWebSocketOversizedMessageDeliversItsCloseFrameToAPeerStillSending(t *testing.T) {
-	url := closeDrainApp(t, DefaultWSCloseGracePeriod)
+	url := closeDrainApp(t, closeDrainGrace)
 	key := []byte{1, 2, 3, 4}
 
 	const runs = 50
@@ -116,7 +125,7 @@ func TestWebSocketOversizedMessageDeliversItsCloseFrameToAPeerStillSending(t *te
 }
 
 func TestWebSocketEveryRefusalDeliversItsCloseFrameToAPeerStillSending(t *testing.T) {
-	url := closeDrainApp(t, DefaultWSCloseGracePeriod)
+	url := closeDrainApp(t, closeDrainGrace)
 	key := []byte{1, 2, 3, 4}
 
 	// An invalid text message is complete, so what follows it is a stream
@@ -186,7 +195,9 @@ func TestWebSocketRefusedPeerCannotHoldTheConnectionPastTheGracePeriod(t *testin
 		}
 		select {
 		case elapsed := <-cutOff:
-			if elapsed < grace/2 || elapsed > grace+time.Second {
+			// A write fails only once the reset is back, a write or two after
+			// the close, so the upper bound leaves a loaded machine room.
+			if elapsed < grace/2 || elapsed > grace+2*time.Second {
 				t.Errorf("the peer was cut off after %s, want it near the %s grace period", elapsed, grace)
 			}
 		case <-time.After(grace + 3*time.Second):
@@ -274,6 +285,12 @@ func TestWebSocketPeerThatNeverStopsIsCutOffAndCostsNothing(t *testing.T) {
 	}
 }
 
+// roundTripBound is how long a closing handshake that ends on the peer's
+// answer may take in the tests below: room for a few round trips on a loaded
+// machine running the race detector, and still far short of the ten second
+// grace period a server that waited it out would take.
+const roundTripBound = 3 * time.Second
+
 func TestWebSocketPeerThatAnswersTheCloseFrameEndsItAtOnce(t *testing.T) {
 	t.Parallel()
 	// A grace period this long would make any wait for the peer to go away
@@ -306,7 +323,7 @@ func TestWebSocketPeerThatAnswersTheCloseFrameEndsItAtOnce(t *testing.T) {
 			if _, _, _, err := c.tryRecv(); err == nil {
 				t.Fatal("the connection stayed open after the peer answered the close frame")
 			}
-			if elapsed := time.Since(start); elapsed > time.Second {
+			if elapsed := time.Since(start); elapsed > roundTripBound {
 				t.Errorf("the closing handshake took %s, want about a round trip", elapsed)
 			}
 		})
@@ -329,7 +346,7 @@ func TestWebSocketPeerThatAnswersTheCloseFrameEndsItAtOnce(t *testing.T) {
 		if _, _, _, err := c.tryRecv(); err == nil {
 			t.Fatal("the connection stayed open after the peer answered the close frame")
 		}
-		if elapsed := time.Since(start); elapsed > time.Second {
+		if elapsed := time.Since(start); elapsed > roundTripBound {
 			t.Errorf("the closing handshake took %s, want about a round trip", elapsed)
 		}
 	})
@@ -359,7 +376,7 @@ func TestWebSocketHalfClosesAfterItsCloseFrame(t *testing.T) {
 	if _, _, _, err := c.tryRecv(); !errors.Is(err, io.EOF) {
 		t.Fatalf("after the close frame: %v, want the end of the stream", err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > roundTripBound {
 		t.Errorf("the end of the stream took %s to arrive", elapsed)
 	}
 }

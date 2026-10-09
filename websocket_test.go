@@ -855,10 +855,15 @@ func TestWebSocketSurvivesTheListenerWriteTimeout(t *testing.T) {
 	// A hijacked connection keeps whatever deadline the listener set for one
 	// request, so a WebSocket that outlives the write timeout only works if
 	// the upgrade cleared it.
+	//
+	// The handshake itself still has to be read and answered inside the
+	// timeouts, which a loaded machine did not always manage in 40ms, so they
+	// are longer and the quiet spell below is three of them.
+	const timeout = 250 * time.Millisecond
 	opts := quietOptions()
 	opts.Addr = "127.0.0.1:0"
-	opts.ReadTimeout = 40 * time.Millisecond
-	opts.WriteTimeout = 40 * time.Millisecond
+	opts.ReadTimeout = timeout
+	opts.WriteTimeout = timeout
 	app := New(opts)
 	app.WS("/ws", wsEcho)
 
@@ -870,7 +875,7 @@ func TestWebSocketSurvivesTheListenerWriteTimeout(t *testing.T) {
 	conn := dialWS(t, "http://"+addr, "/ws")
 	conn.text("first")
 	conn.expectText("first")
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(3 * timeout)
 	conn.text("still here")
 	conn.expectText("still here")
 

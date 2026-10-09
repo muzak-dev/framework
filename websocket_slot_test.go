@@ -13,10 +13,13 @@ import (
 
 // openCountListener counts the connections it accepted that have not been
 // closed yet, which is the number of file descriptors a server is holding
-// regardless of what its own bookkeeping says.
+// regardless of what its own bookkeeping says. It also counts how many it
+// accepted in all, so that a connection already closed can be told from one
+// not yet accepted.
 type openCountListener struct {
 	net.Listener
-	open atomic.Int64
+	open     atomic.Int64
+	accepted atomic.Int64
 }
 
 type openCountConn struct {
@@ -31,6 +34,7 @@ func (l *openCountListener) Accept() (net.Conn, error) {
 		return nil, err
 	}
 	l.open.Add(1)
+	l.accepted.Add(1)
 	return &openCountConn{Conn: c, l: l}, nil
 }
 

@@ -9,11 +9,25 @@ import (
 // A handler that spends longer on each message than a ping and its timeout
 // together is not a peer that has gone quiet, and a peer that answers every
 // ping is not one either. The pongs wait in the socket for the next read.
+//
+// Every message is on its way before the handler reads the first. A read that
+// waits for the peer is the one place the keepalive does judge, and there an
+// honest peer still has to answer inside the timeout, which a client
+// descheduled on a loaded machine can miss: that would be the keepalive doing
+// its job, not the failure looked for here. Queued messages leave the handler
+// waiting on nothing, so the only silence it shows the keepalive is its own.
 func TestKeepaliveLeavesAHandlerThatReadsSlowlyAlone(t *testing.T) {
 	t.Parallel()
 	const interval, timeout = 20 * time.Millisecond, 30 * time.Millisecond
+	const messages = 5
+	queued := make(chan struct{})
 	_, server := newWSTestApp(t, func(app *App) {
 		app.WS("/ws", func(ctx *Context, _ Empty, conn *WSConn) error {
+			select {
+			case <-queued:
+			case <-ctx.Context().Done():
+				return nil
+			}
 			for {
 				message, err := conn.ReadText(ctx.Context())
 				if err != nil {
@@ -27,10 +41,13 @@ func TestKeepaliveLeavesAHandlerThatReadsSlowlyAlone(t *testing.T) {
 		}, WithWebSocket(WSOptions{PingInterval: interval, PongTimeout: timeout}))
 	})
 	conn := dialWS(t, server.URL, "/ws")
+	for i := range messages {
+		conn.text("message " + string(rune('a'+i)))
+	}
+	close(queued)
 
-	for i := range 5 {
+	for i := range messages {
 		want := "message " + string(rune('a'+i))
-		conn.text(want)
 		for {
 			_, opcode, payload := conn.recv()
 			switch opcode {

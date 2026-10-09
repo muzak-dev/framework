@@ -193,7 +193,9 @@ func TestWSConnCloseFrameCannotBeSentToASilentPeer(t *testing.T) {
 
 func TestWSConnCloseFrameWaitsForTheWriteHalf(t *testing.T) {
 	t.Parallel()
-	conn, client := newPipeConns(t, WSOptions{WriteTimeout: time.Second, CloseGracePeriod: -1})
+	// The write timeout bounds the wait being tested, so it is far beyond the
+	// moment the write half comes free, however late that runs.
+	conn, client := newPipeConns(t, WSOptions{WriteTimeout: wsTestTimeout, CloseGracePeriod: -1})
 	conn.writeSem <- struct{}{}
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -212,7 +214,11 @@ func TestWSConnCloseFrameWaitsForTheWriteHalf(t *testing.T) {
 
 func TestWSConnCloseGivesUpWhenTheConnectionIsAlreadyGone(t *testing.T) {
 	t.Parallel()
-	conn, _ := newPipeConns(t, WSOptions{WriteTimeout: 50 * time.Millisecond})
+	// The write timeout is the other way out of the wait, with an error of its
+	// own, so it is set far beyond the failure below. At 50ms a loaded machine
+	// that ran the failing goroutine late let the timeout win, which says
+	// nothing about whether the failure ends the wait.
+	conn, _ := newPipeConns(t, WSOptions{WriteTimeout: wsTestTimeout})
 	conn.writeSem <- struct{}{}
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -853,10 +859,10 @@ func TestWebSocketUpgradeRefusedAfterTheResponseStarted(t *testing.T) {
 func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 	t.Parallel()
 	// The response is made far larger than any socket will buffer and the
-	// client is made to look away until the write timeout has passed, so the
-	// handshake genuinely cannot be delivered. What matters is that the server
-	// gives up and closes rather than holding open a connection whose client
-	// will never hear back.
+	// client is made to look away until the server has closed the connection,
+	// so the handshake genuinely cannot be delivered. What matters is that the
+	// server gives up and closes rather than holding open a connection whose
+	// client will never hear back.
 	const padding = 4 << 20
 	const writeTimeout = 20 * time.Millisecond
 
@@ -869,8 +875,7 @@ func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 	})
 	app.WS("/ws", wsEcho, WithWebSocket(WSOptions{WriteTimeout: writeTimeout}))
 	mustBuild(t, app)
-	server := httptest.NewServer(app)
-	t.Cleanup(server.Close)
+	server, sockets := startCountedServer(t, app)
 
 	address := strings.TrimPrefix(server.URL, "http://")
 	conn, err := net.Dial("tcp", address)
@@ -888,12 +893,20 @@ func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 		t.Fatalf("sending the handshake: %v", err)
 	}
 
-	// Nothing is read until well after the server has given up on writing.
-	time.Sleep(10 * writeTimeout)
+	// Nothing is read until the server has closed its end. Sleeping for a
+	// multiple of the write timeout instead was not enough on a loaded machine,
+	// where building the padded response alone can outlast the sleep: the
+	// client then read before the deadline was even set, and the handshake
+	// went out after all.
+	waitFor(t, func() bool { return sockets.accepted.Load() == 1 && sockets.open.Load() == 0 },
+		"the server to give up on the handshake and close")
 	// Reading to the end returns only because the server closed the
-	// connection. A handshake that had somehow gone out would leave this
-	// blocked until the deadline set above, which is the failure to catch.
-	if _, err := io.ReadAll(conn); err != nil && !strings.Contains(err.Error(), "reset") {
+	// connection, with whatever part of the response the socket held. Only a
+	// timeout means it is still open. A reset is the server's close too, and
+	// is not matched by its text, which differs on Windows.
+	_, err = io.ReadAll(conn)
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
 		t.Fatalf("reading what came back: %v", err)
 	}
 }

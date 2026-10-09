@@ -75,6 +75,13 @@ type Bytes struct {
 // (which never reads it), when the handler returns an error beside it, and
 // when reading it panics. A handler must not close it itself.
 //
+// The route's [Acquire] releases run before the header is sent, so that a
+// commit that fails can still answer with an error, and so before Body is
+// read at all. A Body must therefore not read from what an Acquire provider
+// handed out, such as rows of the request's [Transaction], which by then has
+// been committed or rolled back; it opens what it reads itself and closes it
+// in its own Close.
+//
 // The status follows [Status] and [Context.SetStatus]; 204 and 304 send no
 // body. Once the header is sent the response cannot be turned into an error,
 // so a Body that fails part way, or that ends before the Length it declared

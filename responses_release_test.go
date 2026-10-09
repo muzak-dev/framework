@@ -122,3 +122,39 @@ func TestTypedResponsesSettleTheirReleases(t *testing.T) {
 		})
 	}
 }
+
+// A Stream's body is read only after the route's releases have run, which is
+// what lets a failing commit still turn the success into an error, and why a
+// body must not read from a value an Acquire provider hands out: by the time
+// it is read, that value has been released. The Stream documentation says so,
+// and this pins the order it describes.
+func TestStreamBodyIsReadAfterTheReleases(t *testing.T) {
+	t.Parallel()
+	log := newReleaseLog()
+	app := New(quietOptions())
+	app.Get("/x", func(*Context, Empty) (Stream, error) {
+		return Stream{ContentType: "text/plain", Body: &loggedBody{Reader: strings.NewReader("hello"), log: log}}, nil
+	}, acquireAs[relA](log, "a", nil))
+	mustBuild(t, app)
+	rec := do(t, app, http.MethodGet, "/x", "")
+	assertStatus(t, rec, http.StatusOK)
+	if rec.Body.String() != "hello" {
+		t.Errorf("body = %q, want hello", rec.Body.String())
+	}
+	assertEvents(t, log, "acquire a, release a, read body")
+}
+
+// loggedBody records its first read in a release log.
+type loggedBody struct {
+	io.Reader
+	log  *releaseLog
+	read bool
+}
+
+func (b *loggedBody) Read(p []byte) (int, error) {
+	if !b.read {
+		b.read = true
+		b.log.add("read body")
+	}
+	return b.Reader.Read(p)
+}

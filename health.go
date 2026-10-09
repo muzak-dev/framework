@@ -253,8 +253,18 @@ func isHealthPathByte(c byte) bool {
 func (a *App) healthPathTaken(field, p string) error {
 	var params radix.Params
 	if entry, found := a.tree.Lookup(p, &params); found {
-		return fmt.Errorf("muzak: %s is %q, which the route %s also answers; move one of the two",
-			field, p, describeEntry(a.entries, entry))
+		switch {
+		case len(entry.methods) == 0 && entry.mount != nil && entry.mount.prefix == "":
+			// A handler mounted at the root answers only what nothing else
+			// does, as a frontend at the root does, so a probe answered ahead
+			// of routing takes nothing from it that was meant for it.
+		case len(entry.methods) == 0 && entry.mount != nil:
+			return fmt.Errorf("muzak: %s is %q, which lies under the handler mounted at %q; move one of the two",
+				field, p, entry.mount.template)
+		default:
+			return fmt.Errorf("muzak: %s is %q, which the route %s also answers; move one of the two",
+				field, p, describeEntry(a.entries, entry))
+		}
 	}
 	for _, mount := range a.frontends {
 		if _, under := mount.matches(p); under && mount.path != "" {

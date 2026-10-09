@@ -130,6 +130,7 @@ var specialRanges = []addressRange{
 	{netip.MustParsePrefix("::/128"), "the unspecified address, which reaches the local host"},
 	{netip.MustParsePrefix("::1/128"), "the loopback address"},
 	{netip.MustParsePrefix("::/96"), "an IPv4-compatible address, a deprecated form"},
+	{netip.MustParsePrefix("64:ff9b:1::/48"), "a local-use NAT64 address, which reaches whatever IPv4 address this network's own translator maps it to"},
 	{netip.MustParsePrefix("100::/64"), "a discard-only address"},
 	{netip.MustParsePrefix("2001::/32"), "a Teredo tunnel address"},
 	{netip.MustParsePrefix("2001:2::/48"), "a benchmarking address"},
@@ -172,7 +173,7 @@ func classifyAddress(addr netip.Addr) (reason string, metadata bool) {
 			return r.reason, false
 		}
 	}
-	if addr.Is6() && !globalUnicast.Contains(addr) && !nat64WellKnown.Contains(addr) && !nat64LocalUse.Contains(addr) {
+	if addr.Is6() && !globalUnicast.Contains(addr) && !nat64WellKnown.Contains(addr) {
 		// Everything IANA has allocated for the public internet sits in
 		// 2000::/3. Listing the rest one block at a time would leave whatever
 		// is assigned next reachable until someone noticed.
@@ -182,8 +183,10 @@ func classifyAddress(addr netip.Addr) (reason string, metadata bool) {
 }
 
 // embeddedIPv4 returns the IPv4 address an IPv6 address carries, for the forms
-// that deliver to it: NAT64 under either of its well known prefixes, 6to4, and
-// the deprecated IPv4-compatible form. The second result names the form.
+// that deliver to it at a place the form fixes: NAT64 under its well known
+// prefix, 6to4, and the deprecated IPv4-compatible form. The second result
+// names the form. The local-use NAT64 block has no one place; see
+// [localUseNAT64].
 //
 // Teredo carries an IPv4 address too, but its block is refused outright: the
 // protocol is retired, and judging the address it hides would mean undoing
@@ -196,16 +199,45 @@ func embeddedIPv4(addr netip.Addr) (netip.Addr, string, bool) {
 	switch {
 	case nat64WellKnown.Contains(addr):
 		return netip.AddrFrom4([4]byte(b[12:16])), "a NAT64 address", true
-	case nat64LocalUse.Contains(addr):
-		// RFC 6052 places the IPv4 address of a /48 around the reserved
-		// octet at bits 64 to 71.
-		return netip.AddrFrom4([4]byte{b[6], b[7], b[9], b[10]}), "a NAT64 address", true
 	case sixToFour.Contains(addr):
 		return netip.AddrFrom4([4]byte(b[2:6])), "a 6to4 address", true
 	case ipv4Compatible.Contains(addr) && addr != netip.IPv6Unspecified() && addr != netip.IPv6Loopback():
 		return netip.AddrFrom4([4]byte(b[12:16])), "an IPv4-compatible address", true
 	}
 	return netip.Addr{}, "", false
+}
+
+// nat64LocalUseLayouts are the places an IPv4 address can sit in an address of
+// 64:ff9b:1::/48, the block RFC 8215 sets aside for a network's own
+// translator: one for each prefix length RFC 6052 lets the network choose
+// inside the block (48, 56, 64 and 96 bits), skipping the octet at bits 64 to
+// 71. Which one a translator uses is its own configuration, which the client
+// cannot see, so an address there is read every way it could be meant.
+var nat64LocalUseLayouts = [...][4]uint8{
+	{6, 7, 9, 10},
+	{7, 9, 10, 11},
+	{9, 10, 11, 12},
+	{12, 13, 14, 15},
+}
+
+// localUseNAT64 returns every IPv4 address an address in 64:ff9b:1::/48 may
+// be translated to, one for each of [nat64LocalUseLayouts], and false for an
+// address outside the block.
+//
+// Reading only the /48 layout let 64:ff9b:1:abcd::a9fe:a9fe, which a
+// translator with a /96 prefix delivers to 169.254.169.254, through as the
+// public 171.205.0.0. The block is refused as a private range is (see
+// [specialRanges]), and these readings are what keeps a metadata service and
+// a denied network refused through it when private ranges are allowed.
+func localUseNAT64(addr netip.Addr) (inner [len(nat64LocalUseLayouts)]netip.Addr, ok bool) {
+	if !nat64LocalUse.Contains(addr) {
+		return inner, false
+	}
+	b := addr.As16()
+	for i, at := range nat64LocalUseLayouts {
+		inner[i] = netip.AddrFrom4([4]byte{b[at[0]], b[at[1]], b[at[2]], b[at[3]]})
+	}
+	return inner, true
 }
 
 // addressPolicy is what a [Client] may connect to: the special-purpose ranges
@@ -261,6 +293,16 @@ func listed(prefixes []netip.Prefix, addr netip.Addr) bool {
 	return false
 }
 
+// listedAny reports whether any of a list of prefixes contains any of addrs.
+func listedAny(prefixes []netip.Prefix, addrs []netip.Addr) bool {
+	for _, addr := range addrs {
+		if listed(prefixes, addr) {
+			return true
+		}
+	}
+	return false
+}
+
 // check returns an [*AddressRefusedError] for an address the policy refuses,
 // naming host as the caller wrote it, and nil otherwise.
 func (p *addressPolicy) check(host string, addr netip.Addr) error {
@@ -279,11 +321,16 @@ func (p *addressPolicy) check(host string, addr netip.Addr) error {
 // would refuse it, a metadata service stays refused when private networks are
 // allowed, and only then do the special-purpose ranges apply. An address that
 // carries an IPv4 address inside it is judged by both, so that a NAT64 or 6to4
-// spelling of a refused address is refused with it.
+// spelling of a refused address is refused with it. A local-use NAT64 address,
+// whose IPv4 address could sit in any of several places, is denied or refused
+// as a metadata service when any reading of it would be, and allowed through
+// AllowedNetworks only by its own IPv6 address, since a reading an allowed
+// network contains may not be the one the translator uses.
 func (p *addressPolicy) refusal(host string, addr netip.Addr) *AddressRefusedError {
 	normal := addr.WithZone("").Unmap()
 	inner, form, embeds := embeddedIPv4(normal)
-	if listed(p.denied, normal) || (embeds && listed(p.denied, inner)) {
+	local, localUse := localUseNAT64(normal)
+	if listed(p.denied, normal) || (embeds && listed(p.denied, inner)) || (localUse && listedAny(p.denied, local[:])) {
 		return &AddressRefusedError{Host: host, Addr: normal, Reason: "listed in ClientOptions.DeniedNetworks", kind: refusedDenied}
 	}
 	if listed(p.allowed, normal) || (embeds && listed(p.allowed, inner)) {
@@ -294,6 +341,17 @@ func (p *addressPolicy) refusal(host string, addr netip.Addr) *AddressRefusedErr
 		if innerReason, innerMetadata := classifyAddress(inner); innerReason != "" {
 			reason = form + " reaching " + inner.String() + ", which is " + innerReason
 			metadata = metadata || innerMetadata
+		}
+	}
+	if localUse {
+		// The block's own reason stands unless a reading of it reaches a
+		// metadata service, which AllowPrivateNetworks does not open.
+		for _, candidate := range local {
+			if innerReason, innerMetadata := classifyAddress(candidate); innerMetadata {
+				reason = "a local-use NAT64 address that may reach " + candidate.String() + ", which is " + innerReason
+				metadata = true
+				break
+			}
 		}
 	}
 	switch {

@@ -573,6 +573,72 @@ func TestClassifyAddressCoversTheRegistries(t *testing.T) {
 	}
 }
 
+// 64:ff9b:1::/48 is the NAT64 block RFC 8215 sets aside for a network's own
+// translator, which may use a prefix of 48, 56, 64 or 96 bits inside it, and
+// RFC 6052 puts the IPv4 address somewhere else for each. The client read
+// every address there as though the prefix were 48 bits, so under a
+// translator configured with 64:ff9b:1:abcd::/96, the address that delivers
+// to 169.254.169.254 read as 171.205.0.0, a public address, and was let
+// through by default; one that delivers to a private address, or to one in
+// DeniedNetworks, went the same way, and AllowPrivateNetworks opened the
+// metadata service through it. The block is not globally reachable, so it is
+// refused as a private range is, and each layout is read for a metadata
+// service or a denied network that no setting but AllowedNetworks reaches.
+func TestClientJudgesLocalUseNAT64ByEveryLayout(t *testing.T) {
+	t.Parallel()
+	// 169.254.169.254 (a9fe:a9fe) placed as a translator with each prefix
+	// length would place it, and 10.0.0.1 and 8.8.8.8 as one with a /96 does.
+	metadata := []string{
+		"64:ff9b:1:a9fe:a9:fe00::",      // a /48 prefix
+		"64:ff9b:1:a9:fe:a9fe::",        // a /56 prefix
+		"64:ff9b:1::a9:fea9:fe00:0",     // a /64 prefix
+		"64:ff9b:1::a9fe:a9fe",          // a /96 prefix
+		"64:ff9b:1:abcd::a9fe:a9fe",     // a /96 prefix with a subnet of its own
+		"64:ff9b:1:abcd:a9:fea9:fe00:0", // a /64 prefix with a subnet of its own
+	}
+	private := []string{"64:ff9b:1:abcd::a00:1", "64:ff9b:1:abcd::7f00:1", "64:ff9b:1::808:808"}
+
+	strict := newAddressPolicy(ClientOptions{})
+	for _, target := range append(append([]string(nil), metadata...), private...) {
+		err := strict.check(target, netip.MustParseAddr(target))
+		var refused *AddressRefusedError
+		if !errors.As(err, &refused) || !strings.Contains(refused.Reason, "NAT64") {
+			t.Errorf("check(%s) = %v, want a local-use NAT64 address refused by default", target, err)
+		}
+	}
+
+	relaxed := newAddressPolicy(ClientOptions{AllowPrivateNetworks: true})
+	for _, target := range metadata {
+		err := relaxed.check(target, netip.MustParseAddr(target))
+		var refused *AddressRefusedError
+		if !errors.As(err, &refused) || refused.kind != refusedMetadata || !strings.Contains(err.Error(), "169.254.169.254") {
+			t.Errorf("check(%s) with AllowPrivateNetworks = %v, want a metadata refusal naming 169.254.169.254", target, err)
+		}
+	}
+	for _, target := range private {
+		if err := relaxed.check(target, netip.MustParseAddr(target)); err != nil {
+			t.Errorf("check(%s) with AllowPrivateNetworks = %v, want it allowed as a private range is", target, err)
+		}
+	}
+
+	denied := newAddressPolicy(ClientOptions{AllowPrivateNetworks: true,
+		DeniedNetworks: []netip.Prefix{netip.MustParsePrefix("8.8.8.0/24")}})
+	for _, target := range []string{"64:ff9b:1::808:808", "64:ff9b:1:abcd::808:808", "64:ff9b:1:808:8:800::"} {
+		err := denied.check(target, netip.MustParseAddr(target))
+		var refused *AddressRefusedError
+		if !errors.As(err, &refused) || refused.kind != refusedDenied {
+			t.Errorf("check(%s) = %v, want it refused by DeniedNetworks, which it may reach", target, err)
+		}
+	}
+
+	// Naming the IPv6 block itself is how a network that relies on its own
+	// translator reaches it.
+	allowed := newAddressPolicy(ClientOptions{AllowedNetworks: []netip.Prefix{netip.MustParsePrefix("64:ff9b:1:abcd::/96")}})
+	if err := allowed.check("x", netip.MustParseAddr("64:ff9b:1:abcd::808:808")); err != nil {
+		t.Errorf("check with the block in AllowedNetworks = %v, want it allowed", err)
+	}
+}
+
 func TestParseLegacyIPv4(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{

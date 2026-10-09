@@ -17,7 +17,7 @@ import (
 // as that address is; a host that a browser or the C resolver would read as an
 // IPv4 address is never let through as a name; and no IPv6 spelling of a
 // refused IPv4 address, mapped, NAT64, 6to4 or compatible, is allowed where
-// the address itself is not.
+// the address itself is not, nor any local-use NAT64 address by default.
 func FuzzClientAddressPolicy(f *testing.F) {
 	for _, vector := range ssrfVectors {
 		if host := strings.TrimSuffix(strings.TrimPrefix(vector.url, "http://"), "/"); host != "" {
@@ -101,6 +101,24 @@ func FuzzClientAddressPolicy(f *testing.F) {
 				}
 				if base.kind == refusedMetadata && form.kind != refusedMetadata {
 					t.Fatalf("%s is a metadata address but %s was refused as %v", v4, embedded, form.kind)
+				}
+			}
+		}
+		// A local-use NAT64 address may carry the IPv4 address in any of
+		// several places. Each is refused by default, and one that places a
+		// metadata address is refused as one whatever else is allowed.
+		for _, at := range nat64LocalUseLayouts {
+			ipv6 = netip.MustParseAddr("64:ff9b:1::").As16()
+			for i, octet := range [4]byte{a, b, c, d} {
+				ipv6[at[i]] = octet
+			}
+			embedded := netip.AddrFrom16(ipv6)
+			if refusedAs(t, strict.check(embedded.String(), embedded)) == nil {
+				t.Fatalf("%s, a local-use NAT64 address, is allowed by default", embedded)
+			}
+			if _, metadata := classifyAddress(v4); metadata {
+				if form := refusedAs(t, relaxed.check(embedded.String(), embedded)); form == nil || form.kind != refusedMetadata {
+					t.Fatalf("%s may reach the metadata address %s but was judged %v", embedded, v4, form)
 				}
 			}
 		}

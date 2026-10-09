@@ -1,0 +1,35 @@
+Usage: muzak dev [-pkg ./cmd/server] [-watch dir] [-poll 300ms] [-grace 5s] [-ext list] [-- arguments]
+
+Dev builds the package with go build, runs it, and watches the files under
+-watch. When one changes, it waits for the editing to settle, builds again,
+and, if the build succeeds, stops the running application and starts the new
+build. A build that fails prints what the compiler said and leaves the
+application that was running alone, so the server stays up while the mistake
+is fixed. Arguments after -- are passed to the application, which runs in the
+current directory, with this environment and no standard input.
+
+Changes are found by polling: every -poll, the tree is walked and each
+watched file's size and modification time compared, which works the same on
+every platform and file system. Only files with one of the -ext extensions
+are watched, so an application that writes a database, a log or an upload
+into its own directory does not restart itself, and directories whose name
+starts with a dot, node_modules, vendor and testdata are not walked. A tree
+with more than 10000 watched files is refused rather than polled slowly.
+
+Ctrl-C or SIGTERM stops dev. The application is sent the same signal and
+given -grace to shut down before it is killed. On Unix the application runs
+in a process group of its own and the signal goes to the whole group, so a
+process it started is stopped with it. On Windows there is no signal to send:
+the application is killed at once, and a process it started is left running.
+
+Flags:
+  -ext list
+    	the comma-separated list of extensions of the files whose change rebuilds the application (default "go,mod,sum,work,yaml,yml,env")
+  -grace duration
+    	how long a stopping application has before it is killed (default 5s)
+  -pkg package
+    	the package to build and run (default "./cmd/server")
+  -poll duration
+    	how often to look for changes (default 300ms)
+  -watch directory
+    	the directory to watch for changes (default ".")

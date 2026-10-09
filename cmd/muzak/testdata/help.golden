@@ -7,6 +7,7 @@ Usage:
 The commands are:
 
   new       create a project laid out the way the framework's example is
+  dev       run an application, rebuilding and restarting it when a file changes
   version   print the version of muzak and of the framework it scaffolds
   help      print help about a command
 

@@ -1,0 +1,100 @@
+//go:build unix
+
+package main
+
+import (
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// expectGone fails unless no process has the id, which also means it was
+// waited for: a process that exited and was not would still be found, as a
+// zombie.
+func expectGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("process %d is still there", pid)
+}
+
+// expectAlive fails unless a process has the id.
+func expectAlive(t *testing.T, pid int) {
+	t.Helper()
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Errorf("process %d is gone: %v", pid, err)
+	}
+}
+
+func TestDevStopsAGrandchildLeftByAnApplicationThatExited(t *testing.T) {
+	t.Parallel()
+	p := newProject(t)
+	// The application starts a grandchild, and then the test kills the
+	// application alone, as a crash would end it.
+	d := startDev(t, p, []string{"-pkg", ".", "-poll", "20ms"}, "FAKE_MODE=grandchild")
+	started := p.waitFor(t, `^start 1 (\d+) `)
+	grandchild := p.waitFor(t, `^grandchild (\d+)$`)
+	if err := syscall.Kill(pidOf(t, started[1]), syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	d.waitStderr(t, `the application exited \(signal: killed\); waiting for a change`)
+	expectGone(t, pidOf(t, grandchild[1]))
+}
+
+// TestDevStopsOnARealSignal runs this test binary as the muzak command, in a
+// process of its own, and signals that process, as a terminal or a process
+// manager would: the signal reaches dev through main, is forwarded to the
+// application, and dev exits once the application has stopped, leaving no
+// process and no build behind.
+func TestDevStopsOnARealSignal(t *testing.T) {
+	t.Parallel()
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			t.Parallel()
+			p := newProject(t)
+			cmd := exec.Command(os.Args[0], "dev", "-pkg", ".", "-poll", "20ms")
+			cmd.Dir = p.dir
+			cmd.Env = append(goEnv(), "MUZAK_TEST_RUN_MAIN=1", "FAKE_MARKER="+p.marker, "TMPDIR="+p.temp)
+			stderr := &syncBuffer{}
+			cmd.Stdout, cmd.Stderr = io.Discard, stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			exited := make(chan error, 1)
+			go func() { exited <- cmd.Wait() }()
+			t.Cleanup(func() {
+				_ = cmd.Process.Kill()
+				<-exited
+				exited <- nil
+			})
+			started := p.waitFor(t, `^start 1 (\d+) `)
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-exited:
+				exited <- err
+				if err != nil {
+					t.Errorf("muzak dev exited with %v\n%s", err, stderr)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatalf("muzak dev did not exit\n%s", stderr)
+			}
+			if !p.recorded(`^signal 1 ` + started[1] + ` ` + sig.String() + `$`) {
+				t.Errorf("the application did not receive %s:\n%s", sig, strings.Join(p.lines(), "\n"))
+			}
+			expectGone(t, pidOf(t, started[1]))
+			expectNoBuilds(t, p)
+		})
+	}
+}

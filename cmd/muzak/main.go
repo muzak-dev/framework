@@ -30,9 +30,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 )
 
 func main() {
@@ -52,19 +54,34 @@ type console struct {
 	dir string
 	// env is the environment every process a command starts runs with.
 	env []string
+	// signals subscribes to the interrupt and termination signals and returns
+	// the function that ends the subscription. Only dev subscribes: every
+	// other command is stopped by a signal the ordinary way, and an
+	// application dev runs has to be stopped by dev rather than abandoned.
+	signals func() (<-chan os.Signal, func())
 
 	// version is the framework version a new project requires.
 	version string
+	// tempDir is where dev writes the binaries it builds. Empty means the
+	// system's temporary directory.
+	tempDir string
 }
 
 // processConsole is the console of this process.
 func processConsole() *console {
 	info, ok := debug.ReadBuildInfo()
 	return &console{
-		stdin:   os.Stdin,
-		stdout:  os.Stdout,
-		stderr:  os.Stderr,
-		env:     os.Environ(),
+		stdin:  os.Stdin,
+		stdout: os.Stdout,
+		stderr: os.Stderr,
+		env:    os.Environ(),
+		signals: func() (<-chan os.Signal, func()) {
+			// Buffered, so a signal that arrives while dev is busy building is
+			// kept until it looks rather than dropped by the runtime.
+			ch := make(chan os.Signal, 2)
+			signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+			return ch, func() { signal.Stop(ch) }
+		},
 		version: frameworkVersion(info, ok),
 	}
 }
@@ -103,7 +120,7 @@ type runner interface {
 }
 
 // commands lists every command, in the order "muzak help" prints them.
-var commands = []*command{newCmd, versionCmd, helpCmd}
+var commands = []*command{newCmd, devCmd, versionCmd, helpCmd}
 
 // lookup finds a command by name.
 func lookup(name string) *command {

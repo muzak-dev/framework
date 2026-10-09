@@ -57,11 +57,14 @@ type result struct {
 func testConsole(dir string) (*console, *syncBuffer, *syncBuffer) {
 	stdout, stderr := &syncBuffer{}, &syncBuffer{}
 	return &console{
-		stdin:   strings.NewReader(""),
-		stdout:  stdout,
-		stderr:  stderr,
-		dir:     dir,
-		env:     os.Environ(),
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: stderr,
+		dir:    dir,
+		env:    os.Environ(),
+		signals: func() (<-chan os.Signal, func()) {
+			return make(chan os.Signal), func() {}
+		},
 		version: "v0.3.0",
 	}, stdout, stderr
 }
@@ -161,6 +164,7 @@ func TestUnknownCommandSuggestsTheNearestOne(t *testing.T) {
 	cases := map[string]string{
 		"nwe":                     `there is no command "nwe"; did you mean "new"\?`,
 		"HELP":                    `did you mean "help"\?`,
+		"DEV":                     `did you mean "dev"\?`,
 		"version2":                `did you mean "version"\?`,
 		"deploy":                  `there is no command "deploy"\n`,
 		"-x":                      `"-x" is a flag, and a command comes first`,
@@ -182,6 +186,7 @@ func TestUnknownFlagsAreUsageErrors(t *testing.T) {
 		r := runIn(t, t.TempDir(), cmd.name, "-nope")
 		r.expect(t, exitUsage, `muzak: `+cmd.name+`: flag provided but not defined: -nope`, `Run "muzak help `+cmd.name+`" for usage`)
 	}
+	runIn(t, t.TempDir(), "dev", "-poll", "soon").expect(t, exitUsage, `invalid value "soon" for flag -poll`)
 	runIn(t, t.TempDir(), "new", "shop", "-module").expect(t, exitUsage, `flag needs an argument: -module`)
 	runIn(t, t.TempDir(), "new", "-\x1b[2J").expect(t, exitUsage, `flag provided but not defined: -\\x1b\[2J`)
 }
@@ -402,5 +407,10 @@ func TestProcessConsoleIsTheProcess(t *testing.T) {
 	}
 	if !isReleaseVersion(c.version) {
 		t.Errorf("version %q", c.version)
+	}
+	signals, stop := c.signals()
+	stop()
+	if signals == nil {
+		t.Error("no signal channel")
 	}
 }

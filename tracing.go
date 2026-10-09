@@ -125,7 +125,11 @@ const (
 	// request. That is what a service reached directly from the internet
 	// wants: a client choosing its own trace identifier can attach its
 	// requests to someone else's trace, or decide for the service that every
-	// one of its requests is sampled.
+	// one of its requests is sampled. Behind a proxy it is only as good as the
+	// proxy: one that passes a client's traceparent on unchanged, as many load
+	// balancers do, passes the client's choice on with it, so such a proxy
+	// must replace or remove the header, or the service use
+	// [TraceParentIgnore].
 	TraceParentFromTrustedProxies
 	// TraceParentIgnore always starts a new trace.
 	TraceParentIgnore

@@ -72,7 +72,7 @@ func TestCallHeaderAddsWhatTheInputDoesNotBind(t *testing.T) {
 		{"Authorization", " padded", "begins or ends"},
 	} {
 		_, err := ep.Call(context.Background(), client, cookieIn{}, CallHeader(tc.name, tc.value))
-		assertRefused(t, err, tc.fragment)
+		assertCallRefused(t, err, tc.fragment)
 	}
 }
 

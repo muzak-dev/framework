@@ -77,7 +77,7 @@ func TestEndpointRefusesWhatARequestCannotCarry(t *testing.T) {
 		in := ok
 		tc.edit(&in)
 		_, err := ep.Call(context.Background(), client, in)
-		assertRefused(t, err, tc.fragments...)
+		assertCallRefused(t, err, tc.fragments...)
 		if strings.Contains(err.Error(), "SECRET") {
 			t.Errorf("%s: the refusal repeats the value: %v", tc.name, err)
 		}
@@ -103,9 +103,9 @@ func TestEndpointRefusesAPathParameterWithNoValue(t *testing.T) {
 	})
 	id := "x"
 	_, err := ep.Call(context.Background(), client, in{List: []string{"a"}})
-	assertRefused(t, err, `path parameter "id" holds 0 values`)
+	assertCallRefused(t, err, `path parameter "id" holds 0 values`)
 	_, err = ep.Call(context.Background(), client, in{ID: &id, List: []string{"a", "b"}})
-	assertRefused(t, err, `path parameter "list" holds 2 values`)
+	assertCallRefused(t, err, `path parameter "list" holds 2 values`)
 	if _, err := ep.Call(context.Background(), client, in{ID: &id, List: []string{"a"}}); err != nil {
 		t.Fatalf("Call: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestEndpointRefusesAValueItsTypeCannotWrite(t *testing.T) {
 	ep := NewEndpoint[in, Empty](http.MethodGet, "/x")
 	client := NewClient(ClientOptions{AllowPrivateNetworks: true, BaseURL: "http://127.0.0.1:1"})
 	_, err := ep.Call(context.Background(), client, in{})
-	assertRefused(t, err, `query parameter "v"`, "could not be written as text", "the type refuses")
+	assertCallRefused(t, err, `query parameter "v"`, "could not be written as text", "the type refuses")
 
 	// A number that is not finite is refused in the path and in a form as
 	// it is in the query.
@@ -237,12 +237,12 @@ func TestEndpointRefusesAValueItsTypeCannotWrite(t *testing.T) {
 		F float64 `path:"f"`
 	}
 	_, err = NewEndpoint[path, Empty](http.MethodGet, "/n/{f}").Call(context.Background(), client, path{F: math.NaN()})
-	assertRefused(t, err, `path parameter "f"`, "not a finite number")
+	assertCallRefused(t, err, `path parameter "f"`, "not a finite number")
 	type form struct {
 		F []float32 `form:"f"`
 	}
 	_, err = NewEndpoint[form, Empty](http.MethodPost, "/n").Call(context.Background(), client, form{F: []float32{float32(math.Inf(-1))}})
-	assertRefused(t, err, `entry 1 of the form parameter "f"`, "not a finite number")
+	assertCallRefused(t, err, `entry 1 of the form parameter "f"`, "not a finite number")
 }
 
 type reservedHeaderIn struct {
@@ -277,7 +277,7 @@ func TestEndpointSendsACookieListOfOneAndRefusesMore(t *testing.T) {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 	_, err = ep.Call(context.Background(), client, in{C: []string{"one", "two"}})
-	assertRefused(t, err, `cookie "c" holds 2 values`)
+	assertCallRefused(t, err, `cookie "c" holds 2 values`)
 }
 
 func TestEndpointLeavesAnAcceptTheInputBindsAsItWasSent(t *testing.T) {
@@ -327,7 +327,7 @@ func TestEndpointLeavesAUserAgentTheInputBindsAsItWasSent(t *testing.T) {
 	}
 	empty := ""
 	_, err = ep.Call(context.Background(), client, in{UA: &empty})
-	assertRefused(t, err, "User-Agent is empty")
+	assertCallRefused(t, err, "User-Agent is empty")
 }
 
 func TestEndpointMayBindContentTypeWithoutABody(t *testing.T) {

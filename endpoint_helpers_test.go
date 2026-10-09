@@ -59,9 +59,9 @@ func (c *capture[In]) last(t testing.TB) In {
 	return c.seen[len(c.seen)-1]
 }
 
-// assertRefused fails unless err is a refusal to send, whose message mentions
+// assertCallRefused fails unless err is a refusal to send, whose message mentions
 // every one of the fragments given.
-func assertRefused(t testing.TB, err error, fragments ...string) {
+func assertCallRefused(t testing.TB, err error, fragments ...string) {
 	t.Helper()
 	if !errors.Is(err, ErrCallRefused) {
 		t.Fatalf("want a refusal wrapping ErrCallRefused, got %v", err)

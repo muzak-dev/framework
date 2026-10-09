@@ -218,6 +218,51 @@ func TestServerSessionWriteDoesNotResurrect(t *testing.T) {
 	}
 }
 
+// TestServerSessionSavedAfterItEndedIsForgotten covers a request that saves
+// a session another request destroyed while it ran. The save writes nothing,
+// as the end of the request would, and what the request read of the session
+// goes with it: a value set afterwards begins a new session holding that
+// value alone. Kept, the values read would be written under a new identifier
+// by the next write, and the user who signed out would be signed back in.
+func TestServerSessionSavedAfterItEndedIsForgotten(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	loaded := make(chan struct{})
+	app, _, _, _ := serverSessionApp(t, func(app *App) {
+		app.Post("/slow-save", func(ctx *Context, _ Empty) (sessionOut, error) {
+			s := ctx.Session()
+			close(loaded)
+			<-release
+			if err := s.Set("seen", true); err != nil {
+				return sessionOut{}, err
+			}
+			if err := s.Save(); err != nil {
+				return sessionOut{}, err
+			}
+			if !s.IsNew() || s.Has("seen") {
+				t.Errorf("after a save that found the session gone, IsNew = %v and Has(seen) = %v", s.IsNew(), s.Has("seen"))
+			}
+			out := readSession(s)
+			return out, s.Set("after", 1)
+		})
+	})
+	cookie := mustSessionCookie(t, sessionRequest(t, app, "POST", "/write?value=signed-in"))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- sessionRequest(t, app, "POST", "/slow-save", cookie) }()
+	<-loaded
+	sessionRequest(t, app, "POST", "/destroy", cookie)
+	close(release)
+	rec := <-done
+	if out := decodeSessionOut(t, rec); out.Found {
+		t.Errorf("the session reads %+v after another request destroyed it", out)
+	}
+	if issued := sessionCookieOf(t, rec, "__Host-session"); issued != nil {
+		if out := decodeSessionOut(t, sessionRequest(t, app, "GET", "/read", issued)); out.Found {
+			t.Errorf("the session written after the destroy carries the destroyed session's value: %+v", out)
+		}
+	}
+}
+
 // TestServerSessionLoadFailure covers a store that cannot be read: the
 // request proceeds with an empty session that refuses changes, so the user's
 // real session is not overwritten by an empty one, the failure is logged

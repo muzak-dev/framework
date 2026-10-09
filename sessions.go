@@ -477,7 +477,10 @@ func (m *sessionManager) storeContext(c *Context, write bool) (context.Context, 
 // writes last decides what is kept, its cookie or its entry in the store.
 // Neither ever writes half of one. With a server-side store, a request that
 // finishes after another destroyed or regenerated the session finds it gone
-// and writes nothing, so it cannot bring the session back.
+// and writes nothing, so it cannot bring the session back. The same is true
+// of [Session.Save], after which the session reads as new and empty, so a
+// value set later in the request begins a new session holding nothing the
+// ended one held.
 //
 // A Session is not safe for concurrent use, and like the [Context] it came
 // from it must not be used once the handler has returned: from then on every
@@ -986,12 +989,23 @@ func (s *Session) persist(record []byte, ttl time.Duration, fresh bool) (string,
 		return "", false, fmt.Errorf("muzak: the session could not be saved: %w", err)
 	}
 	if !found {
-		s.id, s.stored = "", ""
-		s.isNew = true
-		s.changed = false
+		s.forget()
 		return "", false, nil
 	}
 	return s.id, true, nil
+}
+
+// forget leaves the session new and empty once it is known that another
+// request ended it while this one ran. What this request read of it goes
+// with it: kept, it would be written under a new identifier by the next
+// change this request made and saved, which brings back what a sign-out
+// removed.
+func (s *Session) forget() {
+	clear(s.data)
+	s.entries = 0
+	s.id, s.stored = "", ""
+	s.isNew = true
+	s.changed, s.regenerate = false, false
 }
 
 // end removes a session that has been emptied: the browser's cookie first, so

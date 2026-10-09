@@ -962,6 +962,8 @@ func (a *App) resolveRateLimiting(state *buildState) {
 	var shared RateLimitStorage
 
 	owners := a.rateLimitOwners(state.frontends)
+	// A handler mount counts its requests through a stand-in too; see mount.go.
+	owners = append(owners, mountRateLimitOwners(state.mounts)...)
 	if a.docsLimits != nil {
 		// The documentation counts its requests through a stand-in of its own,
 		// completed here like a mount's; see [App.resolveDocsRateLimit].

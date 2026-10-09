@@ -331,6 +331,7 @@ type buildState struct {
 	errs       []error
 	lifecycles []Lifecycle
 	frontends  []*frontend
+	mounts     []*mountPoint
 }
 
 // pathEntry holds every method served at one path template, so that a single
@@ -345,6 +346,9 @@ type buildState struct {
 type pathEntry struct {
 	methods map[string][]*Route
 	allow   string
+	// mount answers every method no route here registers, when the path is a
+	// mount's own or lies beneath one; see [Router.Mount].
+	mount *mountPoint
 }
 
 // New creates an application.
@@ -634,6 +638,8 @@ func (a *App) build() {
 		return len(y.path) - len(x.path)
 	})
 	a.linkNestedMounts()
+	// Handler mounts; see interop.go.
+	a.buildInterop(state)
 	a.validateOperations(state)
 
 	// Built with the other checks, not while the handler is assembled, so a
@@ -814,6 +820,11 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 
 	candidates, ok := entry.methods[r.Method]
 	if !ok {
+		if entry.mount != nil {
+			// A mounted handler answers what no route here does; see mount.go.
+			a.dispatchMount(c, entry)
+			return
+		}
 		a.dispatchFallback(c, entry)
 		return
 	}

@@ -107,6 +107,10 @@ type routerConfig struct {
 	// output is what the router declares about its routes' responses; see
 	// responses.go.
 	output outputOptions
+
+	// stripPrefix is set by [StripPrefix], which only [Router.Mount] reads;
+	// anywhere else it is reported as a build error. See mount.go.
+	stripPrefix bool
 }
 
 // routeConfig accumulates the settings declared on a single route.
@@ -658,6 +662,8 @@ type Router struct {
 	// built. From then on its configuration has been read for good, which is
 	// why a further registration is refused rather than quietly ignored.
 	mounted bool
+	// mounts are the handlers registered with [Router.Mount]; see mount.go.
+	mounts []*mountPoint
 }
 
 // mustBeOpen panics when the router has already been built into an
@@ -1042,6 +1048,7 @@ func (r *Router) finalize(in inherited, emit func(*Route) error, state *buildSta
 		}
 		state.frontends = append(state.frontends, mount)
 	}
+	r.finalizeMounts(cur, state)
 	for _, inc := range r.includes {
 		state.lifecycles = append(state.lifecycles, inc.cfg.lifecycles...)
 		merged := cur.merge(inc.cfg)

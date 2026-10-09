@@ -74,12 +74,31 @@ type ServerOptions struct {
 	IdleTimeout time.Duration
 	// ShutdownTimeout bounds how long [App.Shutdown] waits for in-flight
 	// requests, defaulting to [DefaultShutdownTimeout]. It is one deadline
-	// for the whole shutdown: WebSocket connections, event streams and
-	// ordinary requests are drained together within it, and the lifecycle
-	// components are then stopped with what it leaves, or with at least one
-	// second when the drain used all of it. A negative value waits for
-	// in-flight requests without limit.
+	// for the whole shutdown: the DrainDelay comes out of it first, then
+	// WebSocket connections, event streams and ordinary requests are drained
+	// together within it, then the background tasks of
+	// [Context.AfterResponse], and the lifecycle components are stopped with
+	// what it leaves, or with at least one second when the drain used all of
+	// it. A negative value waits for in-flight requests and background tasks
+	// without limit.
 	ShutdownTimeout time.Duration
+	// DrainDelay is how long a shutdown keeps serving, with readiness
+	// reporting unavailable, before it closes the listeners. It defaults to
+	// zero, which closes them at once.
+	//
+	// It exists for a platform that routes traffic through a load balancer
+	// which learns about a shutdown only by probing: Kubernetes removes a
+	// terminating pod from its Service while it sends SIGTERM, not before,
+	// and a load balancer polling [HealthOptions] readiness notices only on
+	// its next probe. Requests that arrive in the meantime would otherwise
+	// find the socket closed. Set it to the time those take, a few seconds
+	// for most, rather than adding a sleep to a preStop hook.
+	//
+	// The delay counts against ShutdownTimeout rather than being added to
+	// it, because the platform's grace period, which ShutdownTimeout is set
+	// below, counts it too; a DrainDelay that leaves no time to drain is a
+	// build error, and a negative one is as well.
+	DrainDelay time.Duration
 	// MaxHeaderBytes bounds the size of the request header block, defaulting
 	// to [DefaultMaxHeaderBytes].
 	MaxHeaderBytes int
@@ -117,7 +136,7 @@ func (o ServerOptions) validate() error {
 	case o.CertFile == "" && o.KeyFile != "":
 		return errors.New("muzak: ServerOptions.KeyFile is set without ServerOptions.CertFile; set both to serve HTTPS, or neither")
 	}
-	return nil
+	return o.validateDrainDelay()
 }
 
 // withDefaults fills in the unset timeouts and normalises the disabling
@@ -491,6 +510,7 @@ func (a *App) listen(ctx context.Context, runner *serverRunner) (net.Listener, e
 	// them for shutting down.
 	a.websockets.reopen()
 	a.streams.reopen()
+	a.reopenOperations()
 	// Components come up before the socket opens, so the first request can
 	// never reach a handler whose database pool is still dialling.
 	if err := a.StartLifecycle(runner.startCtx); err != nil {
@@ -619,11 +639,13 @@ func (a *App) servesTLS() bool {
 
 // Shutdown stops the server gracefully.
 //
-// It stops accepting new connections and waits for in-flight requests to
-// finish, then stops the lifecycle components. [ServerOptions.ShutdownTimeout]
-// is one deadline for all of it, counted from the call, and the ctx argument
-// can bring it forward; pass context.Background to use the configured timeout
-// alone.
+// It reports itself unavailable to readiness probes and waits
+// [ServerOptions.DrainDelay], stops accepting new connections and waits for
+// in-flight requests to finish, waits for the background tasks registered
+// with [Context.AfterResponse], then stops the lifecycle components.
+// [ServerOptions.ShutdownTimeout] is one deadline for all of it, counted from
+// the call, and the ctx argument can bring it forward; pass
+// context.Background to use the configured timeout alone.
 //
 // Within the deadline, WebSocket connections are told the server is going
 // away, event streams are ended, and ordinary requests are left to finish, all
@@ -632,7 +654,9 @@ func (a *App) servesTLS() bool {
 // notice and return. The lifecycle components are then stopped with a context
 // that expires at the deadline, or one second after they are asked to stop if
 // that is later. Shutdown therefore returns within ShutdownTimeout plus about
-// one second, unless a component's Stop ignores its context.
+// one second, unless a component's Stop ignores its context. Background tasks
+// still queued at the deadline are dropped, and those running have their
+// context cancelled and are given the same 100 milliseconds to return.
 //
 // A component is stopped only after every handler has returned, with one
 // exception: a handler that ignores both its request's context and its
@@ -703,6 +727,7 @@ func (a *App) drain(ctx context.Context, runner *serverRunner) error {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	a.beginDrain(ctx, log)
 
 	// The listeners are closed and ordinary requests drained while the
 	// long-lived responses below are ended, rather than after them, so that
@@ -750,6 +775,9 @@ func (a *App) drain(ctx context.Context, runner *serverRunner) error {
 		log.Warn(fmt.Sprintf("%d %s still running after the shutdown deadline and its grace period; stopping lifecycle components anyway",
 			running, plural(int(running), "handler")))
 	}
+	// After the handlers, which may still register tasks, and before the
+	// components, which the tasks may still be using.
+	a.drainBackground(ctx, log)
 	stopCtx, cancel := lifecycleStopContext(ctx)
 	defer cancel()
 	err = errors.Join(err, a.StopLifecycle(stopCtx))

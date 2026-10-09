@@ -43,8 +43,9 @@ type Lifecycle interface {
 	// drain, and the components are in use until it has finished.
 	Start(ctx context.Context) error
 	// Stop releases the resource. It is called once, after the HTTP server
-	// has finished draining in-flight requests, and is called even for a
-	// start-up that failed part way, for every component that did start.
+	// has finished draining in-flight requests and the background tasks of
+	// [Context.AfterResponse], and is called even for a start-up that failed
+	// part way, for every component that did start.
 	//
 	// During [App.Shutdown] the context expires with what is left of
 	// [ServerOptions.ShutdownTimeout], or one second after Stop is called if
@@ -470,6 +471,10 @@ func roundDuration(d time.Duration) time.Duration {
 
 // StartLifecycle brings up every registered lifecycle component.
 //
+// The readiness endpoint of [HealthOptions] answers 503 until it has
+// succeeded, and again once [App.StopLifecycle] is called, so an application
+// served by hand that wants to report itself ready calls it too.
+//
 // The run methods call it automatically, between building the application and
 // opening the listening socket, so a program that uses [App.Run] never needs
 // it. Call it directly when driving an application by hand, as a test does
@@ -485,7 +490,13 @@ func (a *App) StartLifecycle(ctx context.Context) error {
 	if err := a.Build(); err != nil {
 		return err
 	}
-	return a.lifecycle.Start(ctx)
+	if err := a.lifecycle.Start(ctx); err != nil {
+		return err
+	}
+	// Readiness waits for this, whether or not there was a component to
+	// start; see HealthOptions.
+	a.readiness.started.Store(true)
+	return nil
 }
 
 // StopLifecycle releases every lifecycle component that was started.
@@ -495,5 +506,6 @@ func (a *App) StartLifecycle(ctx context.Context) error {
 // still be using them. Calling it on an application whose components were
 // never started returns nil.
 func (a *App) StopLifecycle(ctx context.Context) error {
+	a.readiness.started.Store(false)
 	return a.lifecycle.Stop(ctx)
 }

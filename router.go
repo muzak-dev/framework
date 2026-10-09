@@ -863,6 +863,9 @@ func register[In, Out any](r *Router, method, path string, h Handler[In, Out], o
 		if err != nil {
 			return err
 		}
+		// Recorded before the response is written, because the tasks the
+		// handler registered depend on its own outcome; see AfterResponse.
+		c.handled = true
 		return c.writeResponse(out)
 	}
 	r.addRoute(rt)

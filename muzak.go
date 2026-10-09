@@ -225,6 +225,15 @@ type AppOptions struct {
 	// no middleware is installed and every message the framework produces reads
 	// exactly as it does without this feature existing. See [I18nOptions].
 	I18n I18nOptions
+
+	// Health serves the liveness and readiness endpoints a platform probes.
+	// The zero value serves neither; see [HealthOptions].
+	Health HealthOptions
+
+	// Background sizes the worker pool that runs the tasks handlers register
+	// with [Context.AfterResponse]. The zero value is a small pool that starts
+	// no goroutine until a task is registered; see [BackgroundOptions].
+	Background BackgroundOptions
 }
 
 // App is a Muzak application: a root router plus the server, middleware,
@@ -288,6 +297,13 @@ type App struct {
 	// a different goroutine than the one running the server, which is exactly
 	// what a caller asking for port ":0" has to do; see [runState].
 	server runState
+
+	// readiness is what the readiness endpoint reports before its checks,
+	// health answers the health endpoints and is nil when they are not
+	// enabled, and background runs the tasks of [Context.AfterResponse].
+	readiness  readinessState
+	health     *healthEndpoints
+	background *backgroundPool
 }
 
 // buildState collects everything discovered while walking the router tree, so
@@ -346,6 +362,7 @@ func New(opts AppOptions, routerOpts ...RouterOption) *App {
 		entries:     make(map[string]*pathEntry),
 	}
 	app.lifecycle = &lifecycleManager{logger: Scoped(logger, ScopeServer), stopTimeout: opts.ShutdownTimeout}
+	app.background = newBackgroundPool(opts.Background, Scoped(logger, ScopeServer))
 	app.clientIP, app.clientIPErr = newClientIPResolver(opts.ClientIP)
 	app.ctxPool.New = func() any { return new(Context) }
 	app.installDefaultMiddleware()
@@ -375,6 +392,8 @@ func (o AppOptions) withDefaults() AppOptions {
 	}
 	o.I18n = o.I18n.withDefaults()
 	o.ServerOptions = o.ServerOptions.withDefaults()
+	o.Health = o.Health.withDefaults()
+	o.Background = o.Background.withDefaults()
 	return o
 }
 
@@ -391,6 +410,11 @@ func (a *App) installDefaultMiddleware() {
 		a.middleware = append(a.middleware, SecurityHeaders())
 	}
 	a.middleware = append(a.middleware, Recovery(Scoped(a.logger, ScopeServer)))
+	// Probes are answered here, before anything a probe has no use for and
+	// anything that could refuse it; see HealthOptions.
+	if a.opts.Health.Enabled {
+		a.middleware = append(a.middleware, a.healthMiddleware)
+	}
 	if a.opts.I18n.enabled() {
 		a.middleware = append(a.middleware, Locale(a.opts.I18n))
 	}
@@ -400,7 +424,8 @@ func (a *App) installDefaultMiddleware() {
 }
 
 // Use installs middleware that runs for every request, including those for the
-// documentation UI and the OpenAPI document.
+// documentation UI and the OpenAPI document. The health endpoints are the
+// exception, answered before it; see [HealthOptions].
 //
 // Middleware installed here runs inside the built-in chain, so it already has
 // a request identifier available and is already covered by panic recovery. It
@@ -581,6 +606,7 @@ func (a *App) build() {
 		return len(y.path) - len(x.path)
 	})
 	a.linkNestedMounts()
+	a.validateOperations(state)
 
 	// Built with the other checks, not while the handler is assembled, so a
 	// policy that cannot be served is reported with them: after that point the
@@ -950,6 +976,9 @@ func (a *App) recoverRoute(c *Context) {
 	if recovered == http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
 		panic(recovered)
 	}
+	// Something panicked after all, if not the handler then while its
+	// response was written, so the tasks it registered do not run.
+	c.handled = false
 	a.logger.ErrorContext(c.Context(), "muzak: recovered from a panic in a handler",
 		slog.String("panic", panicValue(recovered)),
 		slog.String("method", c.r.Method),
@@ -1139,6 +1168,7 @@ func (a *App) acquire(w *responseWriter, r *http.Request) *Context {
 // for good, as large as the client cared to make them.
 func (a *App) release(c *Context) {
 	releaseUpload(c.r)
+	a.settleTasks(c)
 	c.reset()
 	a.ctxPool.Put(c)
 }

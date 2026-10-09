@@ -68,6 +68,12 @@ type Context struct {
 	// what tells the two apart from a request that carried no body at all.
 	rawBody         []byte
 	rawBodyCaptured bool
+
+	// tasks are what [Context.AfterResponse] registered, held until the
+	// request ends, and handled records that the handler returned nil, which
+	// is what decides whether they run.
+	tasks   []backgroundTask
+	handled bool
 }
 
 // depValue is one resolved value dependency, keyed by the concrete type the
@@ -354,4 +360,6 @@ func (c *Context) reset() {
 	// ever saw for the life of the process.
 	c.rawBody = nil
 	c.rawBodyCaptured = false
+	c.tasks = nil
+	c.handled = false
 }

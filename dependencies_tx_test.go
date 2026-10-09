@@ -271,6 +271,44 @@ func TestTransactionIsNotCommittedForAClientThatLeft(t *testing.T) {
 	}
 }
 
+// TestTransactionEndedByTheRouteDeadlineIsA503 is the regression test for a
+// handler that carried on past its route's Timeout and returned success after
+// database/sql had rolled the transaction back for the deadline. The commit
+// then failed with sql.ErrTxDone, which says nothing of the deadline, so the
+// client was answered an opaque 500 rather than the 503 and Retry-After that
+// Timeout promises for a failure its deadline caused, and the log blamed the
+// commit.
+func TestTransactionEndedByTheRouteDeadlineIsA503(t *testing.T) {
+	t.Parallel()
+	logger, logs := captureLogger(t)
+	opts := quietOptions()
+	opts.Logger = logger
+	fake := &fakeDB{}
+	app := New(opts)
+	app.Post("/orders", func(ctx *Context, in txIn) (relOut, error) {
+		if _, err := in.Tx.Get().ExecContext(ctx.Context(), "insert"); err != nil {
+			return relOut{}, err
+		}
+		<-ctx.Context().Done()
+		// database/sql rolls the transaction back on a goroutine of its own
+		// once its context ends; a handler that ignores the deadline returns
+		// after that has happened.
+		fake.waitFor(t, "begin, exec insert, rollback")
+		return relOut{Value: "placed"}, nil
+	}, Transaction(fake.open(t), nil), Timeout(20*time.Millisecond))
+	mustBuild(t, app)
+
+	rec := do(t, app, http.MethodPost, "/orders")
+	assertStatus(t, rec, http.StatusServiceUnavailable)
+	if got := rec.Header().Get(HeaderRetryAfter); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "rolled back before it could be committed") || !strings.Contains(out, "deadline") {
+		t.Errorf("the log does not say the deadline ended the transaction:\n%s", out)
+	}
+	fake.waitFor(t, "begin, exec insert, rollback")
+}
+
 // cancelKey carries a request's cancel function to its handler, standing in
 // for a client that disconnects while the handler runs.
 type cancelKey struct{}
@@ -314,10 +352,10 @@ func TestEndTransactionIgnoresATransactionAlreadyEnded(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if err := endTransaction(tx, errors.New("failed")); err != nil {
+	if err := endTransaction(t.Context(), tx, errors.New("failed")); err != nil {
 		t.Errorf("rolling back a finished transaction = %v, want nil", err)
 	}
-	if err := endTransaction(tx, nil); err == nil || !strings.Contains(err.Error(), "committing") {
+	if err := endTransaction(t.Context(), tx, nil); err == nil || !strings.Contains(err.Error(), "committing") {
 		t.Errorf("committing a finished transaction = %v, want the failure", err)
 	}
 }
@@ -332,7 +370,7 @@ func TestEndTransactionReportsAFailedRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := endTransaction(tx, errors.New("failed")); err == nil || !strings.Contains(err.Error(), "rolling back the request's transaction failed") {
+	if err := endTransaction(t.Context(), tx, errors.New("failed")); err == nil || !strings.Contains(err.Error(), "rolling back the request's transaction failed") {
 		t.Errorf("endTransaction = %v, want the rollback failure", err)
 	}
 }

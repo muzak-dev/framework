@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -34,7 +35,10 @@ import (
 // A commit that fails turns the response into a 500 whose cause is logged and
 // never sent, because the client must not be told that work it asked for was
 // done when it was not. A transaction that cannot be begun fails the request
-// the same way, before the handler runs.
+// the same way, before the handler runs. database/sql rolls the transaction
+// back itself when the request's context ends, so a handler that carries on
+// past a route's [Timeout] and succeeds has nothing left to commit, and is
+// answered with the 503 the deadline calls for.
 //
 // A transaction spanning an event stream or a WebSocket commits only if the
 // handler returns nil: a stream the client left, or a connection the peer
@@ -49,18 +53,19 @@ func Transaction(db *sql.DB, opts *sql.TxOptions) SharedOption {
 		p.invalid = errors.New("muzak: Transaction was given a nil *sql.DB")
 	}
 	p.resolve = acquiring(p.typ, func(c *Context) (*sql.Tx, Release, error) {
-		tx, err := db.BeginTx(c.Context(), opts)
+		ctx := c.Context()
+		tx, err := db.BeginTx(ctx, opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("muzak: beginning the request's transaction failed: %w", err)
 		}
-		return tx, func(failure error) error { return endTransaction(tx, failure) }, nil
+		return tx, func(failure error) error { return endTransaction(ctx, tx, failure) }, nil
 	})
 	return providerOption(p)
 }
 
 // endTransaction commits a transaction when failure is nil and rolls it back
-// otherwise.
-func endTransaction(tx *sql.Tx, failure error) error {
+// otherwise. ctx is the context the transaction was begun with.
+func endTransaction(ctx context.Context, tx *sql.Tx, failure error) error {
 	if failure != nil {
 		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
 			return fmt.Errorf("muzak: rolling back the request's transaction failed: %w", err)
@@ -68,6 +73,14 @@ func endTransaction(tx *sql.Tx, failure error) error {
 		return nil
 	}
 	if err := tx.Commit(); err != nil {
+		if errors.Is(err, sql.ErrTxDone) && ctx.Err() != nil {
+			// database/sql rolls a transaction back itself once the context
+			// it was begun with ends, and Commit then says only that the
+			// transaction is over. The reason is the request's: a deadline
+			// declared with Timeout, which this lets be answered as one, or
+			// the client leaving.
+			return fmt.Errorf("muzak: the request's transaction was rolled back before it could be committed, because the request's context ended: %w", ctx.Err())
+		}
 		return fmt.Errorf("muzak: committing the request's transaction failed: %w", err)
 	}
 	return nil

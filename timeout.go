@@ -45,7 +45,9 @@ import (
 // A deadline does not apply to an event stream or a WebSocket route, which
 // lasts as long as its connection: one declared directly on such a route is a
 // build error, and one inherited from a router is not applied to it. Bound
-// those with [SSEOptions.MaxLifetime] and [WSOptions.MaxLifetime].
+// those with [SSEOptions.MaxLifetime] and [WSOptions.MaxLifetime]. The same
+// holds for a handler served with [Router.Mount], which writes its own
+// response and may be streaming one.
 //
 // The deadline is not [ServerOptions.WriteTimeout], which still bounds how
 // long the response may take to write and closes the connection when it

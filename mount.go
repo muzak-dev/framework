@@ -138,7 +138,9 @@ type mountPoint struct {
 // removes the limit, which a streaming protocol such as a client-streaming RPC
 // needs; such a handler must then bound its own messages. Options that only
 // describe or bind a route, such as [WithTags] or [CaptureBody], have no
-// effect here.
+// effect here. A [Timeout] is not applied to the handler: one inherited from a
+// router is left out, as it is for an event stream, and one given to Mount is
+// a build error.
 //
 // # What the guards cover
 //
@@ -204,6 +206,12 @@ func (m *mountPoint) resolve(in inherited) error {
 	full := merged.prefix + strings.TrimSuffix(m.raw, "/")
 	if err := checkMountPrefix(full); err != nil {
 		return fmt.Errorf("muzak: mount at %q: %w", orDefault(full, "/"), err)
+	}
+	if m.cfg.timeout > 0 {
+		// Accepted, it would read as a bound on the handler while nothing
+		// applied it; see [Timeout].
+		return fmt.Errorf("muzak: mount at %q: Timeout cannot be declared on a mount, whose handler writes its own response; "+
+			"give the handler a deadline of its own, with http.TimeoutHandler for one", orDefault(full, "/"))
 	}
 	m.prefix = full
 	m.segments = strings.Count(full, "/")

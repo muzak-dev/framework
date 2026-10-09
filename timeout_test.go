@@ -251,6 +251,39 @@ func TestTimeoutNarrowerDeclarationWins(t *testing.T) {
 	}
 }
 
+// TestTimeoutOnAMount is the regression test for a Timeout given to
+// Router.Mount, which was accepted and never applied: the mounted handler
+// writes its own response and was never handed the deadline, while the
+// application read as though the handler were bounded by it.
+func TestTimeoutOnAMount(t *testing.T) {
+	t.Parallel()
+	app := New(quietOptions())
+	app.Mount("/legacy", &mountRecorder{}, Timeout(time.Second))
+	msg := buildError(t, app)
+	if want := `muzak: mount at "/legacy": Timeout cannot be declared on a mount`; !strings.Contains(msg, want) {
+		t.Errorf("build error %q does not mention %q", msg, want)
+	}
+
+	// A router's deadline is for the routes beneath it, and is not applied to
+	// a handler that shares the router, which may be serving a stream of its
+	// own; removing one is always allowed.
+	var deadlines atomic.Int32
+	handler := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if _, ok := r.Context().Deadline(); ok {
+			deadlines.Add(1)
+		}
+	})
+	app = New(quietOptions(), Timeout(time.Second))
+	app.Mount("/legacy", handler)
+	app.Mount("/removed", handler, Timeout(-1))
+	mustBuild(t, app)
+	assertStatus(t, do(t, app, http.MethodGet, "/legacy/x"), http.StatusOK)
+	assertStatus(t, do(t, app, http.MethodGet, "/removed/x"), http.StatusOK)
+	if n := deadlines.Load(); n != 0 {
+		t.Errorf("%d mounted handlers were handed a router's deadline", n)
+	}
+}
+
 func TestTimeoutOnStreamRoutes(t *testing.T) {
 	t.Parallel()
 	sse := func(ctx *Context, _ Empty, stream *SSEStream[string]) error { return nil }

@@ -203,6 +203,47 @@ func TestLargeSchemaReachedEverywhereStopsAtItsBudget(t *testing.T) {
 	}
 }
 
+// TestLongLocationsAreChargedAndTheReportIsBounded covers the text a
+// comparison builds rather than reads: every change inside an object is
+// located under the name of the member holding it, and every parameter under
+// its path, so a long name above many positions is copied once per position.
+// That copying is charged, and what the list of changes holds is bounded in
+// bytes as well as in changes, so a megabyte name above a few hundred changes
+// cannot make it hundreds of megabytes.
+func TestLongLocationsAreChargedAndTheReportIsBounded(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("n", 1<<20)
+	t.Run("changes under a long member name", func(t *testing.T) {
+		t.Parallel()
+		doc := func(kind string) *Document {
+			inner := &Schema{Type: "object", Properties: map[string]*Schema{}}
+			for i := range 500 {
+				inner.Properties["m"+strconv.Itoa(i)] = &Schema{Type: kind}
+			}
+			return compatAnswerDoc(&Schema{Type: "object", Properties: map[string]*Schema{long: inner}}, nil)
+		}
+		got, _, incomplete := stepsFor(doc("string"), doc("integer"))
+		size := 0
+		for _, change := range got {
+			size += len(change.Location) + len(change.Message) + len(change.Kind)
+		}
+		if !incomplete || size > compareMaxChangeBytes {
+			t.Errorf("the changes hold %d bytes (incomplete %v), want at most %d", size, incomplete, compareMaxChangeBytes)
+		}
+	})
+	t.Run("parameters under a long path", func(t *testing.T) {
+		t.Parallel()
+		op := compatOp("op")
+		for i := range 5000 {
+			op.Parameters = append(op.Parameters, Parameter{Name: "q" + strconv.Itoa(i), In: "query", Schema: compatStr()})
+		}
+		doc := compatDoc(map[string]*PathItem{"/" + long: {Get: op}}, nil)
+		if _, used, incomplete := stepsFor(doc, compatDoc(doc.Paths, nil)); !incomplete {
+			t.Errorf("comparing 5000 parameters located under a path of %d bytes finished in %d steps", len(long), used)
+		}
+	})
+}
+
 // TestChangeListIsBounded checks that two documents differing everywhere list
 // at most compareMaxChanges changes, and say the list is incomplete.
 func TestChangeListIsBounded(t *testing.T) {

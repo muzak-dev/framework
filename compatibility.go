@@ -206,9 +206,10 @@ func WriteChanges(w io.Writer, changes []APIChange) error {
 // comparison is linear in the size of the two documents whenever each
 // component corresponds to a fixed few in the other, as it does between two
 // versions of one application. It is also bounded outright, at a number of
-// steps proportional to their size and at 100,000 changes, which only a
-// document built to be expensive reaches, such as one whose single component
-// is compared against thousands of different ones; the result then holds a
+// steps proportional to their size, names and values included, and at 100,000
+// changes holding at most 64 MiB of text, which only a document built to be
+// expensive reaches, such as one whose single component is compared against
+// thousands of different ones; the result then holds a
 // breaking "comparison-incomplete" change rather than passing in silence, and
 // lists nothing it did not finish comparing.
 //
@@ -287,6 +288,11 @@ const (
 	// two documents describe different APIs; the bound keeps a document built
 	// to differ everywhere from costing memory in proportion to its steps.
 	compareMaxChanges = 100_000
+	// compareMaxChangeBytes bounds the text the changes of one comparison
+	// hold, their locations, kinds and messages together. It is far above
+	// what compareMaxChanges changes of a generated document take, and keeps
+	// a document with long names from making each change as long as they are.
+	compareMaxChangeBytes = 64 << 20
 )
 
 // schemaPair is one pair of components compared in one direction. textual is
@@ -318,10 +324,12 @@ type docComparer struct {
 	schemaFacts map[*Schema]*schemaFacts
 
 	// budget is what is left of the steps the comparison may take, and depth
-	// how deep the current walk into inline schemas is.
-	budget     int
-	depth      int
-	incomplete bool
+	// how deep the current walk into inline schemas is. changeBytes is the
+	// text the changes listed so far hold.
+	budget      int
+	depth       int
+	incomplete  bool
+	changeBytes int
 }
 
 func newDocComparer(before, after *Document) *docComparer {
@@ -389,7 +397,7 @@ func (c *docComparer) result() []APIChange {
 }
 
 // add records one change, unless the comparison already lists as many as it
-// may, in which case it stops.
+// may, or would hold more text than it may, in which case it stops.
 func (c *docComparer) add(severity ChangeSeverity, kind, location, message string) {
 	switch {
 	case c.incomplete:
@@ -397,11 +405,20 @@ func (c *docComparer) add(severity ChangeSeverity, kind, location, message strin
 		// on a view it stopped gathering half way, so nothing more is listed:
 		// a stopped comparison lists less than a full one, never something else.
 		return
-	case len(c.changes) >= compareMaxChanges:
+	case len(c.changes) >= compareMaxChanges, c.changeBytes+len(kind)+len(location)+len(message) > compareMaxChangeBytes:
 		c.incomplete, c.budget = true, 0
 		return
 	}
+	c.changeBytes += len(kind) + len(location) + len(message)
 	c.changes = append(c.changes, APIChange{Severity: severity, Kind: kind, Location: location, Message: message})
+}
+
+// step takes the steps that comparing one position under location costs: one,
+// and one for every compareBytesPerStep bytes of the location, which building
+// the location of what it holds copies. A long name above many positions is
+// so charged for each of them, rather than copied for free.
+func (c *docComparer) step(location string) bool {
+	return c.spend(1 + len(location)/compareBytesPerStep)
 }
 
 // pointerToken escapes one segment of a location as RFC 6901 does.
@@ -809,7 +826,7 @@ func (c *docComparer) comparePathItem(location, path string, old, cur *PathItem,
 
 // compareOperation compares one operation present in both documents.
 func (c *docComparer) compareOperation(location string, old, cur *Operation, renames map[string]string) {
-	if !c.spend(1) {
+	if !c.step(location) {
 		return
 	}
 	if old.OperationID != cur.OperationID {
@@ -988,7 +1005,7 @@ func (c *docComparer) compareParameters(location string, old, cur []Parameter, r
 		}
 	}
 	for _, key := range beforeKeys {
-		if !c.spend(1) {
+		if !c.step(location) {
 			return
 		}
 		p := before[key]
@@ -1012,6 +1029,9 @@ func (c *docComparer) compareParameters(location string, old, cur []Parameter, r
 	for _, key := range afterKeys {
 		if matched[key] {
 			continue
+		}
+		if !c.step(location) {
+			return
 		}
 		p := after[key]
 		at := location + "/" + pointerToken(p.In) + "/" + pointerToken(p.Name)
@@ -1067,6 +1087,9 @@ func (c *docComparer) compareRequestBody(location string, old, cur *RequestBody)
 		c.add(Compatible, "request-body-became-optional", location, "The request body is now optional.")
 	}
 	for _, media := range slices.Sorted(maps.Keys(old.Content)) {
+		if !c.step(location) {
+			return
+		}
 		at := location + "/content/" + pointerToken(media)
 		next, kept := cur.Content[media]
 		if !kept {
@@ -1076,7 +1099,7 @@ func (c *docComparer) compareRequestBody(location string, old, cur *RequestBody)
 		c.compareParts(at+"/schema", oneSchema(old.Content[media].Schema), oneSchema(next.Schema), towardServer, isFormMedia(media))
 	}
 	for _, media := range slices.Sorted(maps.Keys(cur.Content)) {
-		if _, existed := old.Content[media]; !existed {
+		if _, existed := old.Content[media]; !existed && c.step(location) {
 			c.add(Compatible, "request-media-type-added", location+"/content/"+pointerToken(media),
 				fmt.Sprintf("A request body of type %q is now accepted.", media))
 		}
@@ -1094,6 +1117,9 @@ func isSuccessStatus(status string) bool {
 // compareResponses compares the outcomes an operation documents.
 func (c *docComparer) compareResponses(location string, old, cur map[string]*Response) {
 	for _, status := range slices.Sorted(maps.Keys(old)) {
+		if !c.step(location) {
+			return
+		}
 		at := location + "/" + pointerToken(status)
 		next, kept := cur[status]
 		switch {
@@ -1110,6 +1136,9 @@ func (c *docComparer) compareResponses(location string, old, cur map[string]*Res
 		if _, existed := old[status]; existed {
 			continue
 		}
+		if !c.step(location) {
+			return
+		}
 		at := location + "/" + pointerToken(status)
 		if isSuccessStatus(status) {
 			c.add(PossiblyBreaking, "response-status-added", at,
@@ -1122,7 +1151,7 @@ func (c *docComparer) compareResponses(location string, old, cur map[string]*Res
 
 // compareResponse compares one outcome present in both documents.
 func (c *docComparer) compareResponse(location, status string, old, cur *Response) {
-	if !c.spend(1) {
+	if !c.step(location) {
 		return
 	}
 	var oldContent, curContent map[string]MediaType
@@ -1133,6 +1162,9 @@ func (c *docComparer) compareResponse(location, status string, old, cur *Respons
 		curContent = cur.Content
 	}
 	for _, media := range slices.Sorted(maps.Keys(oldContent)) {
+		if !c.step(location) {
+			return
+		}
 		at := location + "/content/" + pointerToken(media)
 		next, kept := curContent[media]
 		if !kept {
@@ -1143,7 +1175,7 @@ func (c *docComparer) compareResponse(location, status string, old, cur *Respons
 		c.compareParts(at+"/schema", oneSchema(oldContent[media].Schema), oneSchema(next.Schema), towardClient, false)
 	}
 	for _, media := range slices.Sorted(maps.Keys(curContent)) {
-		if _, existed := oldContent[media]; !existed {
+		if _, existed := oldContent[media]; !existed && c.step(location) {
 			c.add(Compatible, "response-media-type-added", location+"/content/"+pointerToken(media),
 				fmt.Sprintf("The %s response may now carry a body of type %q.", status, media))
 		}

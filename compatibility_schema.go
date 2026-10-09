@@ -38,7 +38,7 @@ func oneSchema(s *Schema) []*Schema {
 
 // compareParts compares what one position of each document holds.
 func (c *docComparer) compareParts(location string, old, cur []*Schema, dir apiDirection, textual bool) {
-	if !c.spend(1) {
+	if !c.step(location) {
 		return
 	}
 	if c.depth >= compareMaxDepth {
@@ -901,7 +901,7 @@ func (c *docComparer) compareObjects(location string, old, cur schemaView, dir a
 	}
 	slices.Sort(names)
 	for _, name := range names {
-		if !c.spend(1) {
+		if !c.step(location) {
 			return
 		}
 		at := location + "/properties/" + pointerToken(name)
@@ -999,7 +999,7 @@ func (c *docComparer) compareUnions(location string, old, cur []*Schema, dir api
 		}
 		oldAlternatives, curAlternatives := old[i].AnyOf, cur[i].AnyOf
 		for j := range max(len(oldAlternatives), len(curAlternatives)) {
-			if !c.spend(1) {
+			if !c.step(location) {
 				return
 			}
 			at := location + "/" + strconv.Itoa(j)

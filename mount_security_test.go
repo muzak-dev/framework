@@ -201,3 +201,42 @@ func TestMountCannotReachAGuardedFrontendByCase(t *testing.T) {
 	}
 	assertStatus(t, do(t, app, "GET", "/admin/secret.txt"), http.StatusUnauthorized)
 }
+
+// TestMountLeavesNoUploadedFilesBehind is the regression test for a handler
+// mounted with StripPrefix that parses a multipart body. It is handed a copy of
+// the request, so the form it parsed was set on that copy alone, and neither
+// net/http's cleanup nor the framework's, which see the requests they handled,
+// ever removed its temporary files: every upload left its parts on disk for
+// good, as large as the mount's body limit let a client make them.
+func TestMountLeavesNoUploadedFilesBehind(t *testing.T) {
+	t.Parallel()
+	for name, opts := range map[string][]RouterOption{
+		"as it is":          nil,
+		"with StripPrefix":  {StripPrefix()},
+		"when it panics":    {StripPrefix()},
+		"without a limit":   {StripPrefix(), MaxBodySize(-1)},
+		"behind a provider": {StripPrefix(), Needs(func(*Context) (relA, error) { return "a", nil })},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			spilled := &spilledFiles{}
+			app := New(quietOptions())
+			app.Mount("/legacy", http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				// A memory budget of zero puts every part in a temporary file,
+				// which is what a large upload does.
+				if err := r.ParseMultipartForm(0); err != nil {
+					t.Errorf("ParseMultipartForm: %v", err)
+					return
+				}
+				spilled.record(t, r)
+				if name == "when it panics" {
+					panic("the legacy handler fell over")
+				}
+			}), opts...)
+			mustBuild(t, app)
+			req := uploadRequest(t, "/legacy/upload", nil, part{field: "file", filename: "a.txt", content: "on disk"})
+			doRequest(t, app, req)
+			spilled.assertRemoved(t, 1)
+		})
+	}
+}

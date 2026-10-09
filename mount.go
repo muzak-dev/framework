@@ -454,6 +454,13 @@ func (a *App) serveMount(c *Context, m *mountPoint) {
 		a.fail(c, err)
 		return
 	}
+	if r != c.r {
+		// The handler is given a copy, so a multipart form it parses is set on
+		// the copy alone, where neither net/http's cleanup nor the one the
+		// request's Context runs would ever see its temporary files. Deferred,
+		// so a panic removes them too.
+		defer releaseUpload(r)
+	}
 	if m.private {
 		// As for a guarded route: set before the handler runs, so it covers a
 		// handler that writes its own body, and only if absent, so the

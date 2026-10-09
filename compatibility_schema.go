@@ -822,12 +822,14 @@ func (c *docComparer) comparePatterns(location string, old, cur []string, dir ap
 func (c *docComparer) compareBound(location, kind, label string, old, cur schemaBound, lower bool, dir apiDirection) {
 	tightened := cur.set && (!old.set || cur.stricter(old, lower))
 	relaxed := old.set && (!cur.set || old.stricter(cur, lower))
-	message := fmt.Sprintf("%s%s is now %s instead of %s.", dir.where(), label, cur, old)
+	// The message is written only for a bound that changed: every position
+	// compares every kind of bound, and most of them change in none.
+	message := func() string { return fmt.Sprintf("%s%s is now %s instead of %s.", dir.where(), label, cur, old) }
 	switch {
 	case tightened:
-		c.add(dir.pick(Breaking, Compatible), dir.prefix()+kind+"-tightened", location+"/"+boundKeyword(kind), message)
+		c.add(dir.pick(Breaking, Compatible), dir.prefix()+kind+"-tightened", location+"/"+boundKeyword(kind), message())
 	case relaxed:
-		c.add(dir.pick(Compatible, PossiblyBreaking), dir.prefix()+kind+"-relaxed", location+"/"+boundKeyword(kind), message)
+		c.add(dir.pick(Compatible, PossiblyBreaking), dir.prefix()+kind+"-relaxed", location+"/"+boundKeyword(kind), message())
 	}
 }
 

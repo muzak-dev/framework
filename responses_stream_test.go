@@ -208,6 +208,10 @@ func TestStreamClientDisconnectClosesTheBodyAndLeaksNothing(t *testing.T) {
 	app := New(quietOptions())
 	app.Get("/live", func(ctx *Context, _ Empty) (Stream, error) {
 		reader, writer := io.Pipe()
+		// The request's context, and not the Context itself, is what the
+		// producer keeps: the Context is pooled and reused once the handler
+		// returns, which is before this goroutine is done.
+		done := ctx.Context()
 		go func() {
 			chunk := bytes.Repeat([]byte("z"), 32<<10)
 			for {
@@ -215,8 +219,8 @@ func TestStreamClientDisconnectClosesTheBodyAndLeaksNothing(t *testing.T) {
 					return
 				}
 				select {
-				case <-ctx.Context().Done():
-					_ = writer.CloseWithError(ctx.Context().Err())
+				case <-done.Done():
+					_ = writer.CloseWithError(done.Err())
 					return
 				default:
 				}
@@ -373,8 +377,11 @@ func TestStreamCopiesThroughThePooledBuffer(t *testing.T) {
 			serve(app, req, w)
 		}
 	})
-	// A buffer per response would be 32 KiB of it.
-	if perOp := result.AllocedBytesPerOp(); perOp > 8<<10 {
+	// A buffer per response would be 32 KiB of it. The race detector has
+	// sync.Pool drop a share of what it is given, to flush out code that
+	// relies on getting it back, so a pooled buffer is sometimes rebuilt there
+	// too; the bound leaves room for that and none for a buffer every time.
+	if perOp := result.AllocedBytesPerOp(); perOp > 20<<10 {
 		t.Errorf("a stream allocated %d bytes per response, want the copy buffer pooled", perOp)
 	}
 }

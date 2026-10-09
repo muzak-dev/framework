@@ -76,6 +76,14 @@ func main() {
 		// Leaving this out is what a service that answers only in English does,
 		// and it then carries none of the translation machinery at all.
 		I18n: core.LocaleOptions(),
+		// Sessions, kept in a cookie encrypted under the configured secrets.
+		// The login handler regenerates the session before it records who
+		// signed in, and the logout handler destroys it.
+		Sessions: &muzak.SessionOptions{Secrets: settings.SessionSecrets},
+		// A session cookie is sent with requests other sites make, so a
+		// state-changing request from another origin is refused. Sessions
+		// cannot be configured without it.
+		CrossOriginProtection: &muzak.CrossOriginOptions{},
 	},
 		// The application-wide budget, counted before any guard runs so that a
 		// request a guard rejects still costs the client something. Routers

@@ -29,13 +29,13 @@ func (in *LoginIn) Validate(v *muzak.Validation) {
 	v.String(&in.Password).MinLen(8).MaxLen(128)
 }
 
-// LoginOut reports the established session.
+// LoginOut reports who signed in.
 //
-// The session identifier is also set as a cookie. It appears here so that a
-// non-browser client has somewhere to read it from, and nothing else about the
-// account is disclosed.
+// The session itself is set as a cookie, encrypted and out of reach of
+// scripts, and is deliberately not repeated here: a credential in a response
+// body is one any script on the page can read, which is exactly what the
+// cookie's HttpOnly attribute exists to prevent.
 type LoginOut struct {
-	Username  string `json:"username"`
-	SessionID string `json:"session_id"`
-	Next      string `json:"next,omitzero"`
+	Username string `json:"username"`
+	Next     string `json:"next,omitzero"`
 }

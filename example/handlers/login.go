@@ -2,8 +2,6 @@ package handlers
 
 import (
 	"crypto/subtle"
-	"net/http"
-	"uuid"
 
 	"muzak.dev/framework"
 	"muzak.dev/framework/example/schemas"
@@ -34,32 +32,45 @@ func Login(ctx *muzak.Context, in schemas.LoginIn) (schemas.LoginOut, error) {
 		return schemas.LoginOut{}, muzak.Unauthorized("the username or password is incorrect")
 	}
 
-	session := uuid.NewV4().String()
-	ctx.SetCookie(&http.Cookie{
-		Name:  "session_id",
-		Value: session,
-		Path:  "/",
-		// HttpOnly keeps the session out of reach of scripts, and SameSite
-		// keeps it off cross-site requests. Secure belongs here too once this
-		// is served over TLS, which is why it is named rather than omitted.
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   false,
-		MaxAge:   3600,
-	})
+	session := ctx.Session()
+	// Regenerating comes first, before anything that says who the user is.
+	// The browser may arrive carrying a session someone else chose for it,
+	// planted through a sibling subdomain or a link; signing in on top of
+	// that session would hand whoever planted it a signed-in one. A new
+	// session makes whatever they hold worthless at the moment it would have
+	// become valuable.
+	if err := session.Regenerate(); err != nil {
+		return schemas.LoginOut{}, err
+	}
+	// Only the username goes in: the session travels with every request, and
+	// the cookie that carries it is encrypted, HttpOnly, Secure and SameSite,
+	// all of which the framework sets without being asked.
+	if err := session.Set("user", in.Username); err != nil {
+		return schemas.LoginOut{}, err
+	}
 
 	return schemas.LoginOut{
-		Username:  in.Username,
-		SessionID: session,
-		Next:      in.Next,
+		Username: in.Username,
+		Next:     in.Next,
 	}, nil
+}
+
+// Logout ends the session: the cookie is removed from the browser, and a
+// value set afterwards would begin a new session rather than continue this
+// one.
+func Logout(ctx *muzak.Context, _ muzak.Empty) (muzak.Empty, error) {
+	ctx.Session().Destroy()
+	return muzak.Empty{}, nil
 }
 
 // LoginForm serves the page that posts to Login.
 //
 // It is a plain form with no enctype, so the browser posts it as
 // application/x-www-form-urlencoded. The route accepts that without being told
-// to, because it binds form values and no files.
+// to, because it binds form values and no files. A form is exactly what
+// another site can submit in the user's name, which is why the application
+// refuses a state-changing request from another origin; see
+// AppOptions.CrossOriginProtection in cmd/main.go.
 func LoginForm(ctx *muzak.Context, _ muzak.Empty) (muzak.HTML, error) {
 	return muzak.HTML(`<body>
 <form action="/login/?token=jessica" method="post">

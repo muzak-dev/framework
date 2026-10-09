@@ -25,5 +25,8 @@ func Auth() *muzak.Router {
 		// password costs the same budget as a right one.
 		muzak.RateLimit(muzak.Quota{Name: "login", Window: time.Minute, Limit: 5}))
 
+	r.Post("/logout/", handlers.Logout,
+		muzak.Summary("End the session"))
+
 	return r
 }

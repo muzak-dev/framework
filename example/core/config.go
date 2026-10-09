@@ -36,6 +36,13 @@ type Settings struct {
 	// believing one from an unknown sender hands every client the ability to
 	// choose which budget it spends.
 	TrustedProxies []string `env:"TRUSTED_PROXIES" required:"false"`
+	// SessionSecrets are the keys the session cookie is encrypted under, as a
+	// comma-separated list: the first encrypts and every one decrypts, which
+	// is how a key is rotated. Each must be at least 32 random bytes, such as
+	// the output of "openssl rand -base64 32". The default exists so that the
+	// example runs as it is; a deployment that kept it would be one whose
+	// sessions anyone who has read this file can forge.
+	SessionSecrets []string `env:"SESSION_SECRETS" default:"example-only-secret-replace-me-before-deploying" secret:"true"`
 }
 
 // LoadSettings reads the configuration, stopping the process if a required

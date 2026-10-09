@@ -1,10 +1,15 @@
 package muzak
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime/pprof"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,23 +49,58 @@ func newGatedSingleton(t *testing.T, outcome func(call int32) (diValue, error)) 
 	return g
 }
 
-// serve sends GET /x under ctx in the background and delivers the status.
+// serve sends GET /x under ctx in the background and delivers the status. The
+// goroutine carries a profiler label naming g, which is how waitUntilWaiting
+// finds its requests among those of the tests running alongside.
 func (g *gatedSingleton) serve(ctx context.Context) <-chan int {
 	status := make(chan int, 1)
-	go func() {
+	go pprof.Do(context.Background(), pprof.Labels(singletonLabel, g.label()), func(context.Context) {
 		rec := httptest.NewRecorder()
 		g.app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(ctx))
 		status <- rec.Code
-	}()
+	})
 	return status
 }
 
-// waitUntilWaiting blocks until n requests have reached the singleton, and
-// then a moment longer so that they are parked on the attempt in flight.
+// singletonLabel is the profiler label serve puts on its requests.
+const singletonLabel = "gated-singleton"
+
+func (g *gatedSingleton) label() string { return fmt.Sprintf("%p", g) }
+
+// waitUntilWaiting blocks until n requests have reached the singleton and all
+// but the one running the provider are parked on the attempt in flight.
+//
+// Being parked is read off the goroutine profile rather than given a fixed
+// moment to happen in. Sleeping 20ms after the requests arrived was not
+// always enough on a loaded machine, and a request that had not yet joined
+// the attempt when it ended started one of its own, which is a different
+// test.
 func (g *gatedSingleton) waitUntilWaiting(t *testing.T, n int32) {
 	t.Helper()
 	waitFor(t, func() bool { return g.arrived.Load() >= n }, "the requests to reach the singleton")
-	time.Sleep(20 * time.Millisecond)
+	waitFor(t, func() bool { return g.parked() >= int(n)-1 }, "the requests to wait on the attempt in flight")
+}
+
+// parked counts the requests sent by serve that are waiting on an attempt
+// another request is running.
+func (g *gatedSingleton) parked() int {
+	var profile bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&profile, 1); err != nil {
+		return 0
+	}
+	label := fmt.Sprintf("%q:%q", singletonLabel, g.label())
+	parked := 0
+	// Each record is a count of goroutines, their labels and their stack,
+	// and records are separated by a blank line.
+	for _, record := range strings.Split(profile.String(), "\n\n") {
+		if !strings.Contains(record, label) || !strings.Contains(record, "(*singletonCall).wait") {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.Fields(record)[0]); err == nil {
+			parked += n
+		}
+	}
+	return parked
 }
 
 // TestSingletonSlowFailureDoesNotSerialiseRequests is the regression test for
@@ -69,13 +109,18 @@ func (g *gatedSingleton) waitUntilWaiting(t *testing.T, n int32) {
 // ten attempts, long after its client had given up.
 func TestSingletonSlowFailureDoesNotSerialiseRequests(t *testing.T) {
 	t.Parallel()
+	// The attempt is slow, and the requests are let go together, so that on a
+	// loaded machine they still arrive while it runs: one that started after
+	// it had failed would rightly start another. Serialised, the slowest of
+	// them would take ten attempts, twice the bound below.
+	const attempt = 200 * time.Millisecond
 	var calls atomic.Int32
 	app := New(quietOptions())
 	app.Get("/x", func(ctx *Context, _ Empty) (diOut, error) {
 		return diOut{Text: From[diValue](ctx).Text}, nil
 	}, Singleton(func(*Context) (diValue, error) {
 		calls.Add(1)
-		time.Sleep(100 * time.Millisecond) // a dial to a database that is down
+		time.Sleep(attempt) // a dial to a database that is down
 		return diValue{}, errors.New("database unreachable")
 	}))
 	mustBuild(t, app)
@@ -83,9 +128,11 @@ func TestSingletonSlowFailureDoesNotSerialiseRequests(t *testing.T) {
 	const n = 10
 	var wg sync.WaitGroup
 	durations := make([]time.Duration, n)
+	start := make(chan struct{})
 	for i := range n {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), attempt/2)
 			defer cancel()
 			req := httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(ctx)
 			began := time.Now()
@@ -93,6 +140,7 @@ func TestSingletonSlowFailureDoesNotSerialiseRequests(t *testing.T) {
 			durations[i] = time.Since(began)
 		})
 	}
+	close(start)
 	wg.Wait()
 	var longest time.Duration
 	for _, d := range durations {
@@ -101,7 +149,7 @@ func TestSingletonSlowFailureDoesNotSerialiseRequests(t *testing.T) {
 	if got := calls.Load(); got > 2 {
 		t.Errorf("the provider ran %d times for %d concurrent requests, want one attempt they share", got, n)
 	}
-	if longest > 500*time.Millisecond {
+	if longest > 5*attempt {
 		t.Errorf("the slowest request took %v, want no request queued behind repeated attempts", longest)
 	}
 }

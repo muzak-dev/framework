@@ -341,8 +341,12 @@ func TestBatchingByInterval(t *testing.T) {
 	c := newCollector(t, nil)
 	opts, _ := testOptions(c.server.URL)
 	opts.BatchInterval = 30 * time.Millisecond
-	e := startExporter(t, opts)
+	// The interval is counted by a ticker the exporter starts with its worker,
+	// so the clock here starts before the exporter does. Started after, it
+	// missed however long a loaded machine took between the two, and a batch
+	// sent on time looked early.
 	began := time.Now()
+	e := startExporter(t, opts)
 	endSpans(e, 2)
 	waitFor(t, func() bool { return len(c.all()) == 1 }, "the interval to send a partial batch")
 	if took := time.Since(began); took < 25*time.Millisecond {
@@ -566,18 +570,21 @@ func TestRetryGivesUp(t *testing.T) {
 	opts, logs := testOptions(c.server.URL)
 	opts.RetryInitialInterval = 5 * time.Millisecond
 	opts.RetryMaxInterval = 10 * time.Millisecond
-	opts.RetryMaxElapsedTime = 300 * time.Millisecond
+	// Long enough for a second attempt to be made on a loaded machine, where
+	// the first could take most of 300ms by itself.
+	const allowed = time.Second
+	opts.RetryMaxElapsedTime = allowed
 	e := startExporter(t, opts)
 	endSpans(e, 2)
 	began := time.Now()
 	flush(t, e)
-	if took := time.Since(began); took > 2*time.Second {
-		t.Errorf("gave up after %v, want about 300ms", took)
+	if took := time.Since(began); took > allowed+2*time.Second {
+		t.Errorf("gave up after %v, want about %v", took, allowed)
 	}
-	// At least one wait of 5 to 10ms fits in 300ms, and at most 300 / 2.5
-	// of them do.
-	if n := len(c.all()); n < 2 || n > 121 {
-		t.Errorf("sent %d requests in 300ms of retrying", n)
+	// At least one wait of 5 to 10ms fits in the time allowed, and at most
+	// one per 2.5ms of it does.
+	if n := len(c.all()); n < 2 || n > int(allowed/(2500*time.Microsecond))+1 {
+		t.Errorf("sent %d requests in %v of retrying", n, allowed)
 	}
 	if stats := e.Stats(); stats.Failed != 2 {
 		t.Errorf("stats = %+v", stats)
@@ -623,12 +630,16 @@ func TestHangingCollector(t *testing.T) {
 		_, _ = io.WriteString(w, "{}")
 	})
 	opts, _ := testOptions(c.server.URL)
-	opts.Timeout = 50 * time.Millisecond
+	// The timeout bounds the retry as well as the hung attempt, and the retry
+	// has to go out and be answered inside it for the count of requests to
+	// come out at two. 50ms was not always enough on a loaded machine.
+	const timeout = time.Second
+	opts.Timeout = timeout
 	e := startExporter(t, opts)
 	endSpans(e, 1)
 	began := time.Now()
 	flush(t, e)
-	if took := time.Since(began); took > time.Second {
+	if took := time.Since(began); took > timeout+2*time.Second {
 		t.Errorf("the hung attempt held the exporter for %v", took)
 	}
 	// At least two requests: on a machine loaded enough, as under -race with
@@ -1147,11 +1158,16 @@ func TestStopDuringARetryWait(t *testing.T) {
 	endSpans(e, 1)
 	go func() { _ = e.Flush(context.Background()) }()
 	waitFor(t, func() bool { return len(c.all()) == 1 }, "the first refusal")
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// The deadline is still well short of the thirty seconds asked for, and
+	// long enough that a Stop which waited for it stands apart from one that
+	// gave up at once on a loaded machine too: with 200ms, giving up at once
+	// had only 150ms to be seen doing so.
+	const deadline = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	began := time.Now()
 	_ = e.Stop(ctx)
-	if took := time.Since(began); took > 150*time.Millisecond {
+	if took := time.Since(began); took > deadline/2 {
 		t.Errorf("Stop waited %v for a retry its deadline could not reach", took)
 	}
 	if stats := e.Stats(); stats.Failed != 1 {

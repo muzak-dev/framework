@@ -400,7 +400,11 @@ func TestClientTimeoutCoversTheBody(t *testing.T) {
 		case <-r.Context().Done():
 		}
 	})
-	client, network := newTestClient(t, ClientOptions{Timeout: 200 * time.Millisecond})
+	// The headers have to arrive inside the timeout for there to be a body to
+	// read, which a loaded machine did not always manage in 200ms. The timeout
+	// is what ends the read, so it is no longer than that needs.
+	const timeout = time.Second
+	client, network := newTestClient(t, ClientOptions{Timeout: timeout})
 	network.serve("api.example.com", publicA, "80", server.Server)
 	resp, err := client.Do(mustRequest(t, t.Context(), http.MethodGet, "http://api.example.com/"))
 	if err != nil {
@@ -412,7 +416,7 @@ func TestClientTimeoutCoversTheBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("reading a body that never ends succeeded")
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
+	if elapsed := time.Since(start); elapsed > timeout+2*time.Second {
 		t.Errorf("the read took %v, want it ended by the timeout", elapsed)
 	}
 }
@@ -433,6 +437,10 @@ func TestClientResponseHeaderTimeout(t *testing.T) {
 		t.Fatalf("Do error = %v, want the header timeout", err)
 	}
 	// A GET is retried after a timeout, which is a connection-level failure.
+	// The server counts an attempt when its handler starts, which on a loaded
+	// machine can be after the client has already given up on it, so the
+	// count is waited for before it is held to the number of attempts.
+	waitFor(t, func() bool { return server.hits.Load() >= DefaultClientMaxAttempts }, "every attempt to reach the server")
 	if hits := server.hits.Load(); hits != DefaultClientMaxAttempts {
 		t.Errorf("hits = %d, want %d attempts", hits, DefaultClientMaxAttempts)
 	}

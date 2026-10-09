@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"fmt"
 	"math"
 	"net/netip"
 	"reflect"
@@ -83,15 +84,23 @@ func instants(n int, loc *time.Location) []time.Time {
 	return out
 }
 
-func TestUniqueIsLinearForTimesAndAddresses(t *testing.T) {
-	t.Parallel()
-	times := instants(200_000, time.UTC)
-	addrs := make([]netip.Addr, 200_000)
-	for i := range addrs {
-		addrs[i] = netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+// addresses builds n distinct IPv4 addresses.
+func addresses(n int) []netip.Addr {
+	out := make([]netip.Addr, n)
+	for i := range out {
+		out[i] = netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
 	}
+	return out
+}
 
-	start := time.Now()
+// Not parallel, like every test that calls assertLinear.
+func TestUniqueIsLinearForTimesAndAddresses(t *testing.T) {
+	someTimes, timeRules := instants(uniqueSize, time.UTC), Slice[time.Time]().Unique()
+	assertLinear(t, "times", someTimes, func() { _ = timeRules.Check(someTimes) })
+	someAddrs, addrRules := addresses(uniqueSize), Slice[netip.Addr]().Unique()
+	assertLinear(t, "addresses", someAddrs, func() { _ = addrRules.Check(someAddrs) })
+
+	times := instants(200_000, time.UTC)
 	if err := Slice[time.Time]().Unique().Check(times); err != nil {
 		t.Errorf("distinct times gave %v", err)
 	}
@@ -99,15 +108,13 @@ func TestUniqueIsLinearForTimesAndAddresses(t *testing.T) {
 	if err := Slice[time.Time]().Unique().Check(times); err == nil {
 		t.Error("a late repeated time was accepted")
 	}
+	addrs := addresses(200_000)
 	if err := Slice[netip.Addr]().Unique().Check(addrs); err != nil {
 		t.Errorf("distinct addresses gave %v", err)
 	}
 	addrs[len(addrs)-1] = addrs[7]
 	if err := Slice[netip.Addr]().Unique().Check(addrs); err == nil {
 		t.Error("a late repeated address was accepted")
-	}
-	if elapsed := time.Since(start); elapsed > uniqueDeadline {
-		t.Errorf("Unique over 200000 times and addresses took %v", elapsed)
 	}
 }
 
@@ -172,21 +179,115 @@ func TestHashable(t *testing.T) {
 	}
 }
 
-// uniqueDeadline is far above what the linear search needs even under the race
-// detector, and far below what the pairwise one would: on the inputs below it
-// runs for minutes.
+// uniqueDeadline is far above what a search bounded to a hundred elements
+// needs even under the race detector, and far below what the pairwise one
+// would take over the twenty thousand elements it is given below.
 const uniqueDeadline = 5 * time.Second
 
-func TestUniqueIsLinearForHashableElements(t *testing.T) {
-	t.Parallel()
-	ints := make([]int, 200_000)
-	strs := make([]string, 200_000)
-	for i := range ints {
-		ints[i] = i
-		strs[i] = strconv.Itoa(i)
-	}
+// uniqueSize is how many elements the cost of Unique is measured over. Keying
+// each of them is twenty thousand steps, and comparing every pair two hundred
+// million.
+const uniqueSize = 20_000
 
+// maxOverhead is how many times as long as a yardstick pass over the same
+// elements Unique may take. Keying an element costs about what formatting it
+// does, give or take a few times, and comparing every pair of twenty thousand
+// costs thousands of times as much.
+const maxOverhead = 100
+
+// assertLinear fails the test unless unique, a Unique check over list, costs
+// about what one pass over the elements of list does.
+//
+// The yardstick formats every element and indexes it in a map, work done once
+// for each element and of the same kind as keying it, and it is timed beside
+// unique on the same machine at the same moment. A deadline in its place,
+// generous enough for the race detector, was still crossed on a loaded
+// machine; timing two sizes of input and comparing them was thrown off by the
+// larger falling out of a cache the load was sharing. Over the same elements
+// both are slowed alike, and only work that grows faster than the input can
+// open a gap of a hundred times between them.
+//
+// A test that calls it does not run in parallel, so that what it times is
+// its own work and not that of the tests alongside it.
+func assertLinear[E any](t *testing.T, name string, list []E, unique func()) {
+	t.Helper()
+	yardstick := func() {
+		index := make(map[string]int, len(list))
+		for i, e := range list {
+			index[fmt.Sprint(e)] = i
+		}
+	}
+	if overhead := costRatio(yardstick, unique, maxOverhead); overhead > maxOverhead {
+		t.Fatalf("%s: Unique over %d elements took %.0f times as long as formatting each of them once, want at most %d",
+			name, len(list), overhead, maxOverhead)
+	}
+}
+
+// costRatio returns how many times as long as yardstick run takes.
+//
+// Each is timed several times, in turn, and the fastest timing of each is
+// compared. Time the machine spends elsewhere only ever adds to a timing, so
+// the fastest of several is the closest to the cost of the work itself, where
+// one timing on a loaded machine can be stretched many times over.
+//
+// It stops as soon as the ratio is within limit, because one pair of timings
+// that shows the work can be done that fast is the answer, and once two
+// rounds leave it more than ten times over, which no stall makes of work
+// within it, so that a search comparing every pair fails after two of its
+// long calls rather than five.
+func costRatio(yardstick, run func(), limit float64) float64 {
+	best := [2]time.Duration{math.MaxInt64, math.MaxInt64}
+	var ratio float64
+	for round := range 5 {
+		best[0] = min(best[0], perCall(yardstick))
+		best[1] = min(best[1], perCall(run))
+		ratio = float64(best[1]) / float64(best[0])
+		if ratio <= limit || (round > 0 && ratio > 10*limit) {
+			break
+		}
+	}
+	return ratio
+}
+
+// perCall returns how long one call to run takes, averaged over as many calls
+// as fill 50ms, so that a fast call is still timed in steps a coarse clock can
+// see: the one on Windows can move in steps of 15.6ms.
+func perCall(run func()) time.Duration {
+	const span = 50 * time.Millisecond
 	start := time.Now()
+	for calls := 1; ; calls++ {
+		run()
+		if elapsed := time.Since(start); elapsed >= span {
+			return elapsed / time.Duration(calls)
+		}
+	}
+}
+
+// distinctInts and distinctStrings build n distinct elements of each kind.
+func distinctInts(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = i
+	}
+	return out
+}
+
+func distinctStrings(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = strconv.Itoa(i)
+	}
+	return out
+}
+
+// Not parallel, like every test that calls assertLinear.
+func TestUniqueIsLinearForHashableElements(t *testing.T) {
+	someInts, intRules := distinctInts(uniqueSize), Slice[int]().Unique()
+	assertLinear(t, "ints", someInts, func() { _ = intRules.For(&someInts).Evaluate() })
+	someStrs, strRules := distinctStrings(uniqueSize), Slice[string]().Unique()
+	assertLinear(t, "strings", someStrs, func() { _ = strRules.Check(someStrs) })
+
+	ints, strs := distinctInts(200_000), distinctStrings(200_000)
 	if problems := Slice[int]().Unique().For(&ints).Evaluate(); len(problems) != 0 {
 		t.Errorf("distinct ints gave %v", problems)
 	}
@@ -196,9 +297,6 @@ func TestUniqueIsLinearForHashableElements(t *testing.T) {
 	strs[len(strs)-1] = "3"
 	if err := Slice[string]().Unique().Check(strs); err == nil || err.Error() != "must not repeat 3" {
 		t.Errorf("a late repeat gave %v, want must not repeat 3", err)
-	}
-	if elapsed := time.Since(start); elapsed > uniqueDeadline {
-		t.Errorf("Unique over 200000 elements took %v", elapsed)
 	}
 }
 

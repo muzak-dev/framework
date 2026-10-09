@@ -40,90 +40,76 @@ type node struct {
 // hundred kilobytes of JSON, is two hundred million comparisons. Every one of
 // them is now keyed by a canonical encoding of its value, so the work follows
 // the size of the body and a MaxItems bound is no longer the only thing between
-// a client and the CPU.
+// a client and the CPU. Not parallel, like every test that calls assertLinear.
 func TestUniqueIsLinearForElementsThatCannotBeHashed(t *testing.T) {
-	t.Parallel()
-	const n = 20_000
-
-	ptrs := make([]*int, n)
-	anys := make([]any, n)
-	nested := make([][]string, n)
-	structs := make([]withSlice, n)
-	maps := make([]map[string]int, n)
-	ifaces := make([]withInterface, n)
-	pointed := make([]*withSlice, n)
-	for i := range n {
-		v := i
-		ptrs[i] = &v
-		anys[i] = strconv.Itoa(i)
-		nested[i] = []string{"a", strconv.Itoa(i)}
-		structs[i] = withSlice{Name: "x", Tags: []string{strconv.Itoa(i)}}
-		maps[i] = map[string]int{"k": i, "j": -i}
-		ifaces[i] = withInterface{Value: []int{i}}
-		pointed[i] = &withSlice{Tags: []string{strconv.Itoa(i)}}
+	cases := map[string]canonicalCase{
+		"pointers": caseOf(
+			func(i int) *int { return &i },
+			func(list []*int) *int { return list[3] }),
+		"interfaces": caseOf(
+			func(i int) any { return strconv.Itoa(i) },
+			func(list []any) any { return list[3] }),
+		"nested slices": caseOf(
+			func(i int) []string { return []string{"a", strconv.Itoa(i)} },
+			func([][]string) []string { return []string{"a", "3"} }),
+		"structs holding a slice": caseOf(
+			func(i int) withSlice { return withSlice{Name: "x", Tags: []string{strconv.Itoa(i)}} },
+			func([]withSlice) withSlice { return withSlice{Name: "x", Tags: []string{"3"}} }),
+		"maps": caseOf(
+			func(i int) map[string]int { return map[string]int{"k": i, "j": -i} },
+			func([]map[string]int) map[string]int { return map[string]int{"j": -3, "k": 3} }),
+		"structs holding an interface": caseOf(
+			func(i int) withInterface { return withInterface{Value: []int{i}} },
+			func([]withInterface) withInterface { return withInterface{Value: []int{3}} }),
+		"pointers to structs": caseOf(
+			func(i int) *withSlice { return &withSlice{Tags: []string{strconv.Itoa(i)}} },
+			func([]*withSlice) *withSlice { return &withSlice{Tags: []string{"3"}} }),
 	}
 
-	// check runs distinct and then repeated input against one rule set, and
-	// bounds the time both take together.
-	type checker func() (distinct, repeated error)
-	cases := map[string]checker{
-		"pointers": func() (error, error) {
-			r := Slice[*int]().Unique()
-			a := r.Check(ptrs)
-			ptrs[n-1] = ptrs[3]
-			return a, r.Check(ptrs)
-		},
-		"interfaces": func() (error, error) {
-			r := Slice[any]().Unique()
-			a := r.Check(anys)
-			anys[n-1] = anys[3]
-			return a, r.Check(anys)
-		},
-		"nested slices": func() (error, error) {
-			r := Slice[[]string]().Unique()
-			a := r.Check(nested)
-			nested[n-1] = []string{"a", "3"}
-			return a, r.Check(nested)
-		},
-		"structs holding a slice": func() (error, error) {
-			r := Slice[withSlice]().Unique()
-			a := r.Check(structs)
-			structs[n-1] = withSlice{Name: "x", Tags: []string{"3"}}
-			return a, r.Check(structs)
-		},
-		"maps": func() (error, error) {
-			r := Slice[map[string]int]().Unique()
-			a := r.Check(maps)
-			maps[n-1] = map[string]int{"j": -3, "k": 3}
-			return a, r.Check(maps)
-		},
-		"structs holding an interface": func() (error, error) {
-			r := Slice[withInterface]().Unique()
-			a := r.Check(ifaces)
-			ifaces[n-1] = withInterface{Value: []int{3}}
-			return a, r.Check(ifaces)
-		},
-		"pointers to structs": func() (error, error) {
-			r := Slice[*withSlice]().Unique()
-			a := r.Check(pointed)
-			pointed[n-1] = &withSlice{Tags: []string{"3"}}
-			return a, r.Check(pointed)
-		},
-	}
-
-	for name, run := range cases {
-		start := time.Now()
-		distinct, repeated := run()
-		elapsed := time.Since(start)
-		if distinct != nil {
-			t.Errorf("%s: distinct elements gave %v", name, distinct)
+	for name, c := range cases {
+		c.linear(t, name)
+		if err := c.distinct(); err != nil {
+			t.Errorf("%s: distinct elements gave %v", name, err)
 		}
-		if repeated == nil {
+		if c.repeated() == nil {
 			t.Errorf("%s: a late repeat was accepted", name)
 		}
-		if elapsed > uniqueDeadline {
-			t.Errorf("%s: Unique over %d elements took %v", name, n, elapsed)
+	}
+}
+
+// canonicalCase is one element type for
+// TestUniqueIsLinearForElementsThatCannotBeHashed, over uniqueSize elements.
+type canonicalCase struct {
+	// linear holds the cost of Unique over distinct elements to assertLinear.
+	linear func(t *testing.T, name string)
+	// distinct checks distinct elements.
+	distinct func() error
+	// repeated checks elements the last of which repeats an earlier one.
+	repeated func() error
+}
+
+// caseOf builds a canonicalCase from the i-th distinct element and the late
+// repeat of an earlier one.
+func caseOf[E any](element func(i int) E, again func(list []E) E) canonicalCase {
+	build := func() []E {
+		list := make([]E, uniqueSize)
+		for i := range list {
+			list[i] = element(i)
 		}
+		return list
+	}
+	return canonicalCase{
+		linear: func(t *testing.T, name string) {
+			t.Helper()
+			list, rules := build(), Slice[E]().Unique()
+			assertLinear(t, name, list, func() { _ = rules.Check(list) })
+		},
+		distinct: func() error { return Slice[E]().Unique().Check(build()) },
+		repeated: func() error {
+			list := build()
+			list[len(list)-1] = again(list)
+			return Slice[E]().Unique().Check(list)
+		},
 	}
 }
 

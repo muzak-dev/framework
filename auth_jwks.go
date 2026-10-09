@@ -87,8 +87,11 @@ type JWKSOptions struct {
 	// [DefaultJWKSMaxKeys] and at most 1024. A document with more is refused.
 	MaxKeys int
 
-	// Timeout bounds one fetch, defaulting to [DefaultJWKSTimeout]. A request
-	// waiting for a fetch also stops waiting when its own context ends.
+	// Timeout bounds one fetch, defaulting to [DefaultJWKSTimeout]. The fetch
+	// is made by the request that needed it first, which waits for it up to
+	// Timeout whatever its own deadline, so that its client going away does
+	// not fail the fetch for others; a request waiting for a fetch another
+	// one started stops waiting when its own context ends.
 	Timeout time.Duration
 
 	// MinRefreshInterval is the least time between two fetches, defaulting to

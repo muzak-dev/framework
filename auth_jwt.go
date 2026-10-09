@@ -49,6 +49,12 @@ type JWTOptions struct {
 	// Issuers lists the issuers a token's iss claim must equal, compared
 	// exactly. It is required: a token signed by a key this scheme trusts but
 	// issued by someone else for some other purpose is refused.
+	//
+	// Every key of the scheme is trusted for every issuer listed, so a token
+	// signed by one issuer's key may name another listed issuer as its own.
+	// List several only when they share their keys, as the issuer spellings of
+	// one identity provider do, and give each identity provider a scheme of
+	// its own, offered as alternatives in [WithSecurity].
 	Issuers []string
 
 	// Audience is the value a token's aud claim must contain, as a string or

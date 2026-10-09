@@ -132,8 +132,9 @@ type authGate struct {
 type gateRequirement struct {
 	members []gateMember
 	// forbidden is the WWW-Authenticate value of a 403 refusing a request
-	// that met this requirement but for its scopes, one per bearer scheme
-	// whose scopes fell short; it is built once, here.
+	// that met this requirement but for its scopes, one per bearer scheme of
+	// the requirement that names scopes; it is built once, by
+	// [authGate.finish].
 	forbidden []string
 }
 

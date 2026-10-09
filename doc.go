@@ -1049,6 +1049,41 @@
 // application. [muzak.dev/framework/otlp] is a Tracer that sends spans to any
 // OpenTelemetry collector.
 //
+// # Calling other services
+//
+// [NewClient] builds the client an application calls other services with. It
+// is a [net/http.Client] with the decisions that make it safe to point at a
+// URL someone else chose already made, so that fetching a webhook target, an
+// avatar or an import URL does not become a request forgery:
+//
+//	client := muzak.NewClient(muzak.ClientOptions{})
+//	item, err := client.GetJSON[ItemOut](ctx.Context(), in.URL)
+//
+// Loopback, private, link-local, shared, reserved and documentation
+// addresses are refused, and so are cloud metadata services, at the moment of
+// connecting rather than when the URL is read, so a name that resolves to one,
+// a name that resolves to one the second time it is asked, and a redirect to
+// one are all refused alike. So is every IPv6 spelling of a refused IPv4
+// address and every way of writing an IPv4 address that a browser or the C
+// resolver reads differently from Go, such as 127.1 or 2130706433. A refusal
+// is an [*AddressRefusedError], and nothing was sent. A client calling its own
+// network sets [ClientOptions.AllowPrivateNetworks], or names the networks it
+// calls in [ClientOptions.AllowedNetworks]; neither opens a metadata service
+// unless it is named outright.
+//
+// Every wait is bounded, the call as a whole by [ClientOptions.Timeout]; a
+// response body stops at [ClientOptions.MaxResponseBytes], decompressed; at
+// most five redirects are followed, never from https down to http, and
+// credentials are dropped from any that leave the origin. A request is retried
+// only when sending it twice is harmless, a GET, PUT or DELETE or anything with
+// an Idempotency-Key, after a connection error or a 429, 502, 503 or 504, with
+// a randomised exponential wait that honours Retry-After, and never more than
+// a [RetryBudget] allows, so that retries cannot become the outage. A
+// per-host circuit breaker is there to turn on with
+// [ClientOptions.CircuitBreaker]. The request identifier of the request being
+// served is sent along in X-Request-Id, which is what lets two services' logs
+// be joined; see [ClientOptions.Propagate].
+//
 // # Defaults worth knowing
 //
 // Muzak starts from settings that are safe rather than permissive. Every

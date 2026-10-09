@@ -406,6 +406,10 @@ func (a *App) dispatchMount(c *Context, entry *pathEntry) {
 				return
 			}
 			a.serveFrontend(c, f, relative)
+			// As dispatch settles a file mount it reaches directly: what the
+			// file mount's providers acquired is released as served, not left
+			// to the end of the request, which would release it as a failure.
+			a.settleServed(c)
 			return
 		}
 	}

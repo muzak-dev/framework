@@ -347,6 +347,10 @@ type App struct {
 	// application is built; see [App.finishDependencies].
 	overrides []*dependencyOverride
 
+	// auth is the security the application enforces, compiled when it is
+	// built; see auth_verify.go.
+	auth *appAuth
+
 	// clientIP answers which address a request came from, with the trusted
 	// proxy policy parsed once. clientIPErr holds the reason a policy could
 	// not be parsed, reported when the application is built rather than
@@ -647,6 +651,8 @@ func (a *App) build() {
 		state.errs = append(state.errs, err)
 	}
 
+	// Before the tree is resolved, so the routes it adds are resolved with it.
+	a.registerAuthRoutes()
 	a.routers = countRouters(a.Router)
 	a.finalize(inherited{
 		maxBodySize:           a.opts.MaxBodySize,
@@ -687,6 +693,7 @@ func (a *App) build() {
 	if err := a.validateSecurity(); err != nil {
 		state.errs = append(state.errs, err)
 	}
+	a.buildAuth(state)
 	if a.clientIPErr != nil {
 		state.errs = append(state.errs, a.clientIPErr)
 	}

@@ -109,6 +109,10 @@ type frontend struct {
 	opts      FrontendOptions
 	guards    []Guard
 	providers []*provider
+	// security is what the mount inherits from [WithSecurity] and [Public],
+	// which a verifying scheme enforces; see auth_verify.go.
+	security    []SecurityRequirement
+	securitySet bool
 
 	// limits is a stand-in route that carries the mount's rate limit. It is
 	// resolved by the same code that resolves a route's, and completed with
@@ -255,6 +259,7 @@ func (f *frontend) resolve(in inherited) error {
 	f.path = strings.TrimSuffix(in.prefix+f.path, "/")
 	f.guards = in.guards
 	f.providers = in.providers
+	f.security, f.securitySet = in.security, in.securitySet
 	// The stand-in is named after the mount, so that a rate limit the mount
 	// cannot use is reported against the mount rather than against a route
 	// nobody registered.

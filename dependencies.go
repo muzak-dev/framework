@@ -220,7 +220,9 @@ func (c *Context) dependency(t reflect.Type) (any, bool) {
 func (rt *Route) checkDeps() error {
 	var errs []error
 	for _, d := range rt.plan.deps {
-		if hasProvider(rt.providers, d.typ) {
+		if hasProvider(rt.providers, d.typ) || isPrincipalType(d.typ) {
+			// A verified principal is provided by the route's security, which
+			// is checked once the security is compiled; see checkPrincipalDeps.
 			continue
 		}
 		hint := ""

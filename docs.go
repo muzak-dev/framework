@@ -279,7 +279,7 @@ func (a *App) withDocs(next http.Handler) http.Handler {
 	docsPath := a.opts.DocsPath
 
 	serve := a.serveDocsAsset
-	guards, providers := a.cfg.guards, a.cfg.providers
+	guards, providers := a.docsGuards(), a.cfg.providers
 	var limits *rateLimitConfig
 	if a.docsLimits != nil {
 		limits = a.docsLimits.rateLimit

@@ -13,17 +13,22 @@ import (
 // document presents it: the credential a bearer token, an API key or a login
 // carries, and where a client puts it.
 //
-// A scheme only describes. It is never consulted while a request is served,
+// A scheme comes in two kinds. A verifying scheme, built by [JWTBearer] or
+// [APIKeyVerifier], both describes and enforces: a route whose [WithSecurity]
+// names one refuses a request without a valid credential before anything else
+// on the route runs, so the document and the behaviour cannot drift apart. A
+// descriptive scheme, built by any other constructor below or written as a
+// literal, only describes. It is never consulted while a request is served,
 // nothing is enforced because it is declared, and a route that names one is no
-// more protected than it was. What refuses a request is a [Guard]; a scheme is
-// how the document says which guard a route sits behind, so that a
+// more protected than it was. What refuses such a request is a [Guard]; the
+// scheme is how the document says which guard a route sits behind, so that a
 // documentation tool can offer a client the means to authenticate. The two are
 // declared separately and are only as truthful as the person who wrote both.
 //
 // Declare schemes in [OpenAPIOptions.SecuritySchemes], and say which a route
-// needs with [WithSecurity]. The constructors below cover the common cases; a
-// scheme they do not reach can be written as a literal, and is checked when the
-// application is built either way.
+// needs with [WithSecurity]. A scheme is checked when the application is built
+// either way, and a verifying one is written into the document exactly as the
+// descriptive scheme of the same shape would be.
 type SecurityScheme struct {
 	// Type is "http", "apiKey", "oauth2" or "openIdConnect", which is what the
 	// constructors set.
@@ -44,6 +49,11 @@ type SecurityScheme struct {
 	Flows *OAuthFlows `json:"flows,omitzero"`
 	// OpenIDConnectURL is the discovery document of an "openIdConnect" scheme.
 	OpenIDConnectURL string `json:"openIdConnectUrl,omitzero"`
+
+	// verifier is what makes a scheme built by [JWTBearer] or
+	// [APIKeyVerifier] enforce what it describes, and is nil on every
+	// descriptive scheme. It is never written into the document.
+	verifier *verifierSpec
 }
 
 // OAuthFlows lists the OAuth 2.0 flows a scheme supports. At least one is
@@ -134,15 +144,37 @@ func Require(scheme string, scopes ...string) SecurityRequirement {
 }
 
 // WithSecurity says which of the application's security schemes a route, or
-// every route beneath a router, is behind. It is documentation: it is written
-// into the OpenAPI document so that a documentation tool can offer a client
-// the means to authenticate, and it has no effect at runtime. Nothing is
-// enforced because a route names a scheme, so the route still needs the
-// [Guard] that does the refusing.
+// every route beneath a router, is behind. It is written into the OpenAPI
+// document so that a documentation tool can offer a client the means to
+// authenticate.
+//
+// Whether it is also enforced depends on the schemes it names. A verifying
+// scheme, one built by [JWTBearer] or [APIKeyVerifier], is enforced: the route
+// refuses a request that does not satisfy the requirements before its guards,
+// its providers or its handler run, with 401 and a WWW-Authenticate challenge
+// when no valid credential was presented and 403 when one was but lacks a
+// required scope, and hands the verified principal, a *[Claims] or an
+// *[APIKeyPrincipal], to [From], [TryFrom] and [Dep]. The scopes a requirement
+// names are checked against what the credential grants. A descriptive scheme
+// is documentation and has no effect at runtime, so a route that names one
+// still needs the [Guard] that does the refusing.
+//
+// A HEAD answered by a GET route is that route and is enforced with it; an
+// OPTIONS or a 405 answered from the route table runs no route and discloses
+// only which methods the path has. A [Router.Mount], a [Router.Static] and a
+// [Router.Frontend] inherit a router's declaration and enforce it as a route
+// does, and so does the documentation, for a declaration on the application
+// itself.
 //
 // The requirements are alternatives: a client satisfies any one of them. The
 // schemes named within one requirement are all needed. An empty requirement
-// among them says that a request with no credentials is accepted too.
+// among them says that a request with no credentials is accepted too; a
+// request that presents a credential is judged by it all the same, so an
+// expired token is refused rather than served as nobody. Alternatives that mix
+// verifying and descriptive schemes are a build error, since a request
+// satisfying a described one could not be told from one satisfying nothing; a
+// single requirement may mix them, and its descriptive members are left to
+// their guards.
 //
 //	admin := muzak.NewRouter(muzak.WithSecurity(muzak.Require("bearer")))
 //	admin.Get("/report", report)
@@ -171,9 +203,10 @@ func WithSecurity(requirements ...SecurityRequirement) SharedOption {
 
 // Public says that a route, or every route beneath a router, needs no
 // credentials, which the OpenAPI document states explicitly and a
-// documentation tool shows as open. Like [WithSecurity] it is documentation
-// only, and is how a route beneath a router that declared a requirement says it
-// is an exception.
+// documentation tool shows as open. It is how a route beneath a router that
+// declared a requirement says it is an exception, and it exempts the route
+// from a verifying scheme the router named as well; the guards it inherits
+// still run.
 func Public() SharedOption {
 	return securityOption([]SecurityRequirement{})
 }
@@ -231,6 +264,9 @@ func (o OpenAPIOptions) validateSecuritySchemes() error {
 	var errs []error
 	for _, name := range slices.Sorted(maps.Keys(o.SecuritySchemes)) {
 		if err := o.SecuritySchemes[name].validate(); err != nil {
+			errs = append(errs, fmt.Errorf("muzak: AppOptions.SecuritySchemes[%q]: %w", name, err))
+		}
+		for _, err := range o.SecuritySchemes[name].verifierProblems() {
 			errs = append(errs, fmt.Errorf("muzak: AppOptions.SecuritySchemes[%q]: %w", name, err))
 		}
 		if !schemeNameOK(name) {
@@ -370,6 +406,8 @@ func (o OpenAPIOptions) securitySchemesForDocs() map[string]SecurityScheme {
 	}
 	out := make(map[string]SecurityScheme, len(o.SecuritySchemes))
 	for name, scheme := range o.SecuritySchemes {
+		// The document describes; what enforces stays with the application.
+		scheme.verifier = nil
 		if scheme.Flows != nil {
 			flows := *scheme.Flows
 			for _, flow := range []**OAuthFlow{&flows.Implicit, &flows.Password, &flows.ClientCredentials, &flows.AuthorizationCode} {

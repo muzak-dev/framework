@@ -74,6 +74,10 @@ type mountPoint struct {
 	strip     bool
 	guards    []Guard
 	providers []*provider
+	// security is what the mount inherits from [WithSecurity] and [Public],
+	// which a verifying scheme enforces; see auth_verify.go.
+	security    []SecurityRequirement
+	securitySet bool
 	// private reports that the mount answers some clients and not others, so
 	// its responses are marked as such unless the handler says otherwise.
 	private bool
@@ -219,6 +223,7 @@ func (m *mountPoint) resolve(in inherited) error {
 	m.strip = m.cfg.stripPrefix
 	m.guards = merged.guards
 	m.providers = merged.providers
+	m.security, m.securitySet = merged.security, merged.securitySet
 	m.private = answersPerClient(m.guards, m.providers)
 	m.maxBodySize = merged.maxBodySize
 	if m.cfg.maxBodySize < 0 {

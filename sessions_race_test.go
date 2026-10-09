@@ -178,6 +178,7 @@ func TestSessionOverTheWire(t *testing.T) {
 // asks for its session, with a session cookie on it or not, and the check
 // adds nothing to a request it lets through.
 func TestSessionsCostNothingUntouched(t *testing.T) {
+	skipAllocationCountsUnderRace(t)
 	plain := quietOptions()
 	plain.DisableAccessLog = true
 	configured := plain

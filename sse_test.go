@@ -440,6 +440,7 @@ func TestSSEKeepsAnIdleStreamOpen(t *testing.T) {
 
 func TestSSEKeepAliveSaysNothingOnABusyStream(t *testing.T) {
 	t.Parallel()
+	const keepAlive = time.Second
 	stop := make(chan struct{})
 	_, server := newSSETestApp(t, func(app *App) {
 		app.SSE("/stream", func(_ *Context, _ Empty, stream *SSEStream[itemOut]) error {
@@ -456,12 +457,15 @@ func TestSSEKeepAliveSaysNothingOnABusyStream(t *testing.T) {
 			}
 			// The producer sends every millisecond, so the interval only has to be
 			// long enough that a stalled scheduler does not look like an idle stream.
-		}, WithSSE(SSEOptions{KeepAlive: 250 * time.Millisecond}))
+			// A loaded machine stalled it for longer than 250ms. The stream is
+			// watched for half as long again as the interval, so that a keepalive
+			// that ignored the traffic would have been sent within it.
+		}, WithSSE(SSEOptions{KeepAlive: keepAlive}))
 	})
 	defer close(stop)
 
 	reader := openStream(t, server.URL, "/stream", func(o *SSEDialOptions) { o.KeepComments = true })
-	deadline := time.Now().Add(400 * time.Millisecond)
+	deadline := time.Now().Add(keepAlive * 3 / 2)
 	for time.Now().Before(deadline) {
 		if message := nextEvent(t, reader); message.Comment != "" {
 			t.Fatalf("a busy stream was sent a keepalive: %+v", message)

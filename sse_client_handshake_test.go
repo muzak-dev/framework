@@ -69,13 +69,18 @@ func TestSSEDialGivesUpOnARefusalThatNeverFinishes(t *testing.T) {
 		_, _ = io.WriteString(w, "not a stream")
 		w.(http.Flusher).Flush()
 	})
+	// The headers and the first part of the body have to arrive inside the
+	// bound for there to be anything to return, and on a loaded machine they
+	// did not always arrive inside 150ms. The bound is what ends the test, so
+	// it is no longer than it needs to be for that.
+	const bound = time.Second
 	start := time.Now()
-	_, response, err := SSEDial(context.Background(), server.URL, SSEDialOptions{HandshakeTimeout: 150 * time.Millisecond})
+	_, response, err := SSEDial(context.Background(), server.URL, SSEDialOptions{HandshakeTimeout: bound})
 	if err == nil {
 		t.Fatal("SSEDial() = nil for a response that is not a stream")
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("SSEDial() gave up after %v, want about 150ms", elapsed)
+	if elapsed := time.Since(start); elapsed > bound+sseTestTimeout {
+		t.Errorf("SSEDial() gave up after %v, want about %v", elapsed, bound)
 	}
 	if response == nil {
 		t.Fatal("the refused response was not returned")
@@ -89,23 +94,33 @@ func TestSSEDialHandshakeTimeoutDoesNotEndTheStream(t *testing.T) {
 	t.Parallel()
 	// The bound is for getting the stream open. A stream that then says nothing
 	// for longer than it is what a stream is for.
+	//
+	// The event is held back until the bound has certainly run out, counted
+	// from before the dial began, rather than sent at a fixed moment: a bound
+	// of 100ms and an event at 500ms left a loaded machine 100ms to open the
+	// stream, which it did not always manage.
+	const bound = 500 * time.Millisecond
+	late := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
 		select {
-		case <-time.After(500 * time.Millisecond):
+		case <-late:
 			_, _ = io.WriteString(w, "data: late\n\n")
 		case <-r.Context().Done():
 		}
 	}))
 	t.Cleanup(server.Close)
 
-	reader, _, err := SSEDial(context.Background(), server.URL, SSEDialOptions{HandshakeTimeout: 100 * time.Millisecond})
+	start := time.Now()
+	reader, _, err := SSEDial(context.Background(), server.URL, SSEDialOptions{HandshakeTimeout: bound})
 	if err != nil {
 		t.Fatalf("SSEDial() = %v", err)
 	}
 	defer reader.Close()
+	time.Sleep(bound - time.Since(start) + 50*time.Millisecond)
+	close(late)
 	ctx, cancel := context.WithTimeout(t.Context(), sseTestTimeout)
 	defer cancel()
 	message, err := reader.Next(ctx)

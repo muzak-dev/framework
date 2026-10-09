@@ -140,11 +140,15 @@ func TestSSEMaxLifetimeFreesTheSlotOfAClientThatNeverReads(t *testing.T) {
 	t.Parallel()
 	options := quietOptions()
 	options.SSE = SSEOptions{MaxStreams: 1}
+	const lifetime = 300 * time.Millisecond
 	app, server := newSSETestAppWith(t, options, func(app *App) {
 		app.SSE("/stream", lifetimeStream,
-			WithSSE(SSEOptions{MaxLifetime: 300 * time.Millisecond, KeepAlive: 20 * time.Millisecond}))
+			WithSSE(SSEOptions{MaxLifetime: lifetime, KeepAlive: 20 * time.Millisecond}))
 	})
 
+	// The lifetime cannot have started before this, so a slot found free
+	// sooner than a lifetime after it was freed early.
+	start := time.Now()
 	conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
 	if err != nil {
 		t.Fatal(err)
@@ -153,11 +157,15 @@ func TestSSEMaxLifetimeFreesTheSlotOfAClientThatNeverReads(t *testing.T) {
 	if _, err := io.WriteString(conn, "GET /stream HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
-	// It never reads. While it is silent the slot is taken.
+	// It never reads. While it is silent the slot is taken. A loaded machine
+	// can stretch the wait and the sleep past the lifetime, so only a slot
+	// freed before the lifetime could have run out counts against it.
 	waitFor(t, func() bool { return app.streams.count() == 1 }, "the stream to open")
 	time.Sleep(100 * time.Millisecond)
 	if got := app.streams.count(); got != 1 {
-		t.Fatalf("the stream was gone after 100ms with %d registered, well before its lifetime", got)
+		if elapsed := time.Since(start); elapsed < lifetime {
+			t.Fatalf("the stream was gone after %v with %d registered, before its lifetime", elapsed.Round(time.Millisecond), got)
+		}
 	}
 	waitFor(t, func() bool { return app.streams.count() == 0 }, "the lifetime to release the slot of a client that reads nothing")
 

@@ -44,6 +44,11 @@ func TestSSEIdleStreamSurvivesItsWriteTimeoutOverHTTP2(t *testing.T) {
 	mustBuild(t, app)
 	srv := startSSEServer(t, app, true)
 
+	// The keepalives are counted from the event, which may go out before the
+	// dial returns, so the clock starts before the dial. Started after it,
+	// the clock missed however long a loaded machine took to hand the stream
+	// over, and keepalives on time looked early.
+	start := time.Now()
 	reader, response, err := SSEDial(t.Context(), srv.URL+"/stream",
 		SSEDialOptions{HTTPClient: srv.Client(), KeepComments: true})
 	if err != nil {
@@ -56,7 +61,6 @@ func TestSSEIdleStreamSurvivesItsWriteTimeoutOverHTTP2(t *testing.T) {
 
 	// The event, then two keepalives: the second arrives long after the write
 	// timeout would have reset an idle stream.
-	start := time.Now()
 	for range 3 {
 		if _, err := reader.Next(t.Context()); err != nil {
 			t.Fatalf("the idle stream ended after %v: %v", time.Since(start).Round(time.Millisecond), err)

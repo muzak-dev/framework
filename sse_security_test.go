@@ -443,7 +443,10 @@ func TestSSEReaderBoundsAnEventThatNeverFinishes(t *testing.T) {
 	if _, err := reader.Next(ctx); !errors.Is(err, ErrSSEStreamEnded) {
 		t.Errorf("Next() = %v, want the stream ended", err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	// Without the read timeout the wait would last until the context's
+	// deadline, so the bound sits halfway there rather than close to 50ms,
+	// which leaves a loaded machine room to run the timer late.
+	if elapsed := time.Since(start); elapsed > sseTestTimeout/2 {
 		t.Errorf("the reader waited %v for an event that never finished", elapsed)
 	}
 }

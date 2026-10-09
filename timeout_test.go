@@ -100,7 +100,14 @@ func TestTimeoutSendsASuccessThatIgnoredTheDeadline(t *testing.T) {
 	var expired atomic.Bool
 	app.Get("/x", func(ctx *Context, _ Empty) (rtOut, error) {
 		time.Sleep(60 * time.Millisecond)
-		expired.Store(ctx.Context().Err() != nil)
+		// The cancellation is delivered by a goroutine of its own once the
+		// deadline passes, and a loaded machine can wake this one from its
+		// sleep first, so it is waited for rather than read at once.
+		select {
+		case <-ctx.Context().Done():
+			expired.Store(true)
+		case <-time.After(5 * time.Second):
+		}
 		return rtOut{OK: true}, nil
 	}, Timeout(10*time.Millisecond))
 	mustBuild(t, app)

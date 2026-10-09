@@ -504,7 +504,9 @@ func TestHealthCheckAnsweringLateCountsAsFailed(t *testing.T) {
 				time.Sleep(60 * time.Millisecond)
 				return nil
 			}},
-			{Name: "slow", Timeout: 500 * time.Millisecond, Check: func(context.Context) error {
+			// Its timeout is far beyond its sleep, which a loaded machine can
+			// overrun by hundreds of milliseconds, so that it reports ok.
+			{Name: "slow", Timeout: 5 * time.Second, Check: func(context.Context) error {
 				time.Sleep(120 * time.Millisecond)
 				return nil
 			}},

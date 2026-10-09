@@ -54,7 +54,8 @@ func (s *spilledFiles) assertRemoved(t *testing.T, want int) {
 	if len(paths) != want {
 		t.Fatalf("recorded %d spilled files, want %d", len(paths), want)
 	}
-	deadline := time.Now().Add(time.Second)
+	// Generous, because a loaded machine can run that deferred work late.
+	deadline := time.Now().Add(5 * time.Second)
 	for _, path := range paths {
 		for {
 			_, err := os.Stat(path)

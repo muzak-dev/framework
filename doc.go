@@ -729,6 +729,90 @@
 // and with a guarded route, whose 304 stays private. A route that does not
 // declare it pays nothing for it.
 //
+// # Mounting a net/http handler
+//
+// [Router.Mount] serves any [net/http.Handler] at a prefix, for the prefix and
+// everything beneath it and every method: net/http/pprof, a metrics handler, a
+// connect-go service, or a legacy application being replaced one route at a
+// time:
+//
+//	app.Mount("/metrics", promhttp.Handler(), muzak.Needs(auth.RequireOperator))
+//	app.Mount("/debug/pprof", pprofMux, muzak.StripPrefix())
+//	app.Mount("/", legacy)
+//
+// The most specific answer wins. A route at a path beneath the prefix answers
+// the methods it registers, and the mounted handler every other method there;
+// a longer mount, or a frontend or static mount beneath the prefix, answers
+// what is beneath its own. The handler runs inside the application: the
+// middleware, the CORS policy, the access log and panic recovery all apply,
+// and before it runs, the rate limit, guards and providers of the routers it
+// was registered under and of the options given to Mount, whose refusals are
+// rendered as a route's are. It is handed the original *http.Request, with
+// the request identifier and [RouteFromContext] reporting the prefix, never
+// the pooled [Context], and a body bounded by [MaxBodySize]. [StripPrefix]
+// gives it paths relative to the mount.
+//
+// Nothing normalises a path first. A request reaches the mount only through
+// the routing tree's exact match of the prefix, so "//debug/x", "/DEBUG/x",
+// "/./debug/x" and "/debug%2Fx" do not reach a mount at /debug, and whatever
+// the mounted handler serves has passed its guards. Mounts are not in the
+// OpenAPI document.
+//
+// # Hosts and HTTPS
+//
+// [AppOptions.AllowedHosts] names the hosts the application answers to, and
+// refuses any other with 421 Misdirected Request before anything else runs:
+//
+//	app := muzak.New(muzak.AppOptions{
+//		AllowedHosts:  []string{"example.com", "*.example.com"},
+//		RedirectHTTPS: &muzak.RedirectHTTPSOptions{},
+//	})
+//
+// The Host header is whatever the client wrote, so an application that builds
+// a link, a redirect or a cache key from it, or that listens where a DNS
+// rebinding page can reach it, wants the list. Matching ignores the case of
+// ASCII letters and a trailing dot, a leading "*." allows every subdomain but
+// not the domain, and an entry without a port allows any. No forwarding
+// header is consulted.
+//
+// [AppOptions.RedirectHTTPS] answers a plain-HTTP request with a permanent
+// redirect to the same URL over https: 301 for GET and HEAD, 308 for the rest.
+// A request counts as https when it arrived over TLS, or when a proxy named in
+// [ClientIPOptions.TrustedProxies] says so in X-Forwarded-Proto, or in
+// Forwarded when that is the header the proxy writes; a claim from any other
+// peer is ignored. The redirect names only a host the application vouches for,
+// an allowed one or [RedirectHTTPSOptions.Host], so a forged Host cannot turn
+// it into a redirect elsewhere, and an ACME HTTP-01 challenge is never
+// redirected.
+//
+// # Problem details
+//
+// [AppOptions.ProblemDetails] makes RFC 9457 problem details the error
+// format: every error is answered with a [Problem] as application/problem+json,
+// and the OpenAPI document describes every error response that way.
+//
+//	app := muzak.New(muzak.AppOptions{
+//		ProblemDetails: &muzak.ProblemOptions{TypeBase: "https://errors.example.com/"},
+//	})
+//
+//	{
+//	  "type": "https://errors.example.com/not_found",
+//	  "title": "Not Found",
+//	  "status": 404,
+//	  "detail": "The requested resource was not found.",
+//	  "instance": "urn:uuid:0611f4b2-2f0a-7b57-9c1a-6e6a2e2f9b31",
+//	  "code": "not_found",
+//	  "request_id": "0611f4b2-2f0a-7b57-9c1a-6e6a2e2f9b31"
+//	}
+//
+// The renderer decides everything the default one decides, by asking it, so a
+// problem makes the same promises the envelope does: the same codes, details
+// and translations, and a server-side fault reported with a fixed sentence
+// while its cause is logged. The title is the status's reason phrase,
+// translated where the application translates muzak.status.<code>, and the
+// instance names the request rather than its path. The default envelope
+// remains the default.
+//
 // # What is generated
 //
 // The OpenAPI 3.1 document at /openapi.json and the documentation UI at /docs

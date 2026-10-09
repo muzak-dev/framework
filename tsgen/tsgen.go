@@ -243,7 +243,7 @@ func (g *generator) reference(ref string) (string, error) {
 // with no literal type, an object or a number that is not finite, widens the
 // union to what it can say.
 func (g *generator) enum(values []any) (string, error) {
-	var parts []string
+	var parts union
 	for _, value := range values {
 		if err := g.spend(); err != nil {
 			return "", err
@@ -252,15 +252,34 @@ func (g *generator) enum(values []any) (string, error) {
 		if literal == "unknown" {
 			return "unknown", nil
 		}
-		if !slices.Contains(parts, literal) {
-			parts = append(parts, literal)
-		}
+		parts.add(literal)
 	}
-	if len(parts) == 0 {
+	if len(parts.list) == 0 {
 		// An enum with no values admits nothing.
 		return "never", nil
 	}
-	return strings.Join(parts, " | "), nil
+	return strings.Join(parts.list, " | "), nil
+}
+
+// union collects the distinct members of a union in the order they are first
+// seen. A set rather than a search of the list, since a document can repeat a
+// union's members by the hundred thousand, and a search per member is then a
+// quadratic wait.
+type union struct {
+	list []string
+	seen map[string]bool
+}
+
+// add adds expr unless it is there already.
+func (u *union) add(expr string) {
+	if u.seen[expr] {
+		return
+	}
+	if u.seen == nil {
+		u.seen = map[string]bool{}
+	}
+	u.seen[expr] = true
+	u.list = append(u.list, expr)
 }
 
 // literalOf writes one enum value as a TypeScript literal type.
@@ -347,8 +366,14 @@ func (g *generator) operation(o *operation) error {
 	where := fmt.Sprintf("tsgen: %s %q", o.method, clip(o.path))
 	// The client fills every parameter of the path from params.path, so one
 	// the operation does not describe would be a type that does not compile.
+	described := map[string]bool{}
+	for _, p := range o.op.Parameters {
+		if p.In == "path" {
+			described[p.Name] = true
+		}
+	}
 	for _, name := range templateParams(o.path) {
-		if !slices.ContainsFunc(o.op.Parameters, func(p muzak.Parameter) bool { return p.In == "path" && p.Name == name }) {
+		if !described[name] {
 			return fmt.Errorf("%s: the path names the parameter %q, which the operation does not describe", where, clip(name))
 		}
 	}
@@ -497,7 +522,7 @@ func isJSON(mediaType string) bool {
 // succeeds, which is every 1xx, 2xx and 3xx response, and of what it answers
 // with otherwise.
 func (g *generator) responses(responses map[string]*muzak.Response) (string, string, error) {
-	var success, failure []string
+	var success, failure union
 	for _, status := range sortedKeys(responses) {
 		expr, err := g.responseType(responses[status])
 		if err != nil {
@@ -507,18 +532,16 @@ func (g *generator) responses(responses map[string]*muzak.Response) (string, str
 		if isSuccess(status) {
 			target = &success
 		}
-		if !slices.Contains(*target, expr) {
-			*target = append(*target, expr)
-		}
+		target.add(expr)
 	}
-	join := func(parts []string) string {
-		if len(parts) == 0 {
+	join := func(parts union) string {
+		if len(parts.list) == 0 {
 			return "never"
 		}
-		if slices.Contains(parts, "unknown") {
+		if parts.seen["unknown"] {
 			return "unknown"
 		}
-		return strings.Join(parts, " | ")
+		return strings.Join(parts.list, " | ")
 	}
 	return join(success), join(failure), nil
 }
@@ -547,7 +570,7 @@ func (g *generator) responseType(r *muzak.Response) (string, error) {
 	if r == nil || len(r.Content) == 0 {
 		return "undefined", nil
 	}
-	var parts []string
+	var parts union
 	for _, mediaType := range sortedKeys(r.Content) {
 		var expr string
 		switch kind := responseKind(mediaType); kind {
@@ -562,14 +585,12 @@ func (g *generator) responseType(r *muzak.Response) (string, error) {
 		default:
 			expr = "Blob"
 		}
-		if !slices.Contains(parts, expr) {
-			parts = append(parts, expr)
-		}
+		parts.add(expr)
 	}
-	if slices.Contains(parts, "unknown") {
+	if parts.seen["unknown"] {
 		return "unknown", nil
 	}
-	return strings.Join(parts, " | "), nil
+	return strings.Join(parts.list, " | "), nil
 }
 
 // responseKind says how a response of a media type is read.

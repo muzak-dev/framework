@@ -231,19 +231,21 @@ func (g *generator) clientMethod(o *operation) {
 // text as string literals and each parameter through pathSegment.
 func pathExpression(template string) string {
 	var parts []string
-	static := ""
+	// A builder, since adding to a string copies all of it, and a path of
+	// many static segments would be copied once per segment.
+	var static strings.Builder
 	for _, segment := range strings.Split(strings.TrimPrefix(template, "/"), "/") {
-		static += "/"
+		static.WriteByte('/')
 		if len(segment) > 2 && segment[0] == '{' && segment[len(segment)-1] == '}' {
 			name := segment[1 : len(segment)-1]
-			parts = append(parts, quote(static), "pathSegment("+quote(name)+", params.path["+quote(name)+"])")
-			static = ""
+			parts = append(parts, quote(static.String()), "pathSegment("+quote(name)+", params.path["+quote(name)+"])")
+			static.Reset()
 			continue
 		}
-		static += segment
+		static.WriteString(segment)
 	}
-	if static != "" {
-		parts = append(parts, quote(static))
+	if static.Len() > 0 {
+		parts = append(parts, quote(static.String()))
 	}
 	return strings.Join(parts, " + ")
 }

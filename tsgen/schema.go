@@ -71,24 +71,26 @@ func (g *generator) typeOf(s *muzak.Schema, blob bool, level int) (string, error
 // joined writes the union of schemas, each grouped so that precedence is
 // what it reads as. A member that may be anything makes the union anything.
 func (g *generator) joined(schemas []*muzak.Schema, blob bool, level int) (string, error) {
-	var parts []string
+	var parts union
 	for _, member := range schemas {
 		expr, err := g.typeOf(member, blob, level)
 		if err != nil {
 			return "", err
 		}
-		if expr = group(expr); !slices.Contains(parts, expr) {
-			parts = append(parts, expr)
-		}
+		parts.add(group(expr))
 	}
-	if slices.Contains(parts, "unknown") {
+	if parts.seen["unknown"] {
 		return "unknown", nil
 	}
-	return strings.Join(parts, " | "), nil
+	return strings.Join(parts.list, " | "), nil
 }
 
 // typed writes what a schema's type keyword describes, a union for a list of
 // types, or what its other keywords imply when it has none.
+//
+// A name the list repeats is written once. Each "array" or "object" walks
+// the schema's items or members again, so a list naming one of them over and
+// over would otherwise cost the whole of the schema per entry.
 func (g *generator) typed(s *muzak.Schema, blob bool, level int) (string, error) {
 	types := typeNames(s.Type)
 	if len(types) == 0 {
@@ -101,8 +103,12 @@ func (g *generator) typed(s *muzak.Schema, blob bool, level int) (string, error)
 			return "unknown", nil
 		}
 	}
-	var parts []string
+	var parts, names union
 	for _, name := range types {
+		if names.seen[name] {
+			continue
+		}
+		names.add(name)
 		var expr string
 		switch name {
 		case "string":
@@ -131,14 +137,12 @@ func (g *generator) typed(s *muzak.Schema, blob bool, level int) (string, error)
 		default:
 			expr = "unknown"
 		}
-		if !slices.Contains(parts, expr) {
-			parts = append(parts, expr)
-		}
+		parts.add(expr)
 	}
-	if slices.Contains(parts, "unknown") {
+	if parts.seen["unknown"] {
 		return "unknown", nil
 	}
-	return strings.Join(parts, " | "), nil
+	return strings.Join(parts.list, " | "), nil
 }
 
 // object writes an object type: its members, each optional unless the schema
@@ -164,6 +168,12 @@ func (g *generator) object(s *muzak.Schema, blob bool, level int) (string, error
 		return "Record<string, " + extra + ">", nil
 	}
 	indent := strings.Repeat("  ", level)
+	// A set, since a document can list members and required names by the
+	// hundred thousand, and a search of the list per member is quadratic.
+	required := make(map[string]bool, len(s.Required))
+	for _, name := range s.Required {
+		required[name] = true
+	}
 	var b strings.Builder
 	b.WriteString("{\n")
 	for _, name := range sortedKeys(s.Properties) {
@@ -177,7 +187,7 @@ func (g *generator) object(s *muzak.Schema, blob bool, level int) (string, error
 		}
 		writeComment(&b, indent+"  ", describe(member)...)
 		optional := "?"
-		if slices.Contains(s.Required, name) {
+		if required[name] {
 			optional = ""
 		}
 		b.WriteString(indent + "  " + propertyKey(name) + optional + ": " + expr + ";\n")

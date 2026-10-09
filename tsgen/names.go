@@ -33,17 +33,26 @@ func init() {
 // namer hands out identifiers no two of which are the same.
 type namer struct {
 	taken map[string]bool
+	// next is, for each name already numbered, the number to try first the
+	// next time it is asked for. Every number below it was taken when it was
+	// passed, and a name once taken stays taken, so starting there finds the
+	// same name as counting from 2 would. Counting from 2 every time made the
+	// n-th of many names that reduce to one identifier cost n steps, which a
+	// document of a few megabytes turned into minutes.
+	next map[string]int
 }
 
-func newNamer() *namer { return &namer{taken: map[string]bool{}} }
+func newNamer() *namer { return &namer{taken: map[string]bool{}, next: map[string]int{}} }
 
 // claim returns name, or name followed by the first number that makes it
 // free, and takes it. A reserved word is never free.
 func (n *namer) claim(name string) string {
 	candidate := name
-	for i := 2; n.taken[candidate] || reserved[candidate]; i++ {
+	i := max(n.next[name], 2)
+	for ; n.taken[candidate] || reserved[candidate]; i++ {
 		candidate = name + strconv.Itoa(i)
 	}
+	n.next[name] = i
 	n.taken[candidate] = true
 	return candidate
 }
@@ -62,10 +71,15 @@ func (n *namer) claimGroup(base string, suffixes ...string) string {
 		}
 		return true
 	}
+	// Numbered apart from claim's, since a number a group passed over may
+	// still be free for a name of its own.
+	key := base + "\x00" + strings.Join(suffixes, "\x00")
 	candidate := base
-	for i := 2; !free(candidate); i++ {
+	i := max(n.next[key], 2)
+	for ; !free(candidate); i++ {
 		candidate = base + strconv.Itoa(i)
 	}
+	n.next[key] = i
 	n.taken[candidate] = true
 	for _, suffix := range suffixes {
 		n.taken[candidate+suffix] = true

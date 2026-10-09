@@ -124,11 +124,15 @@ type backgroundTask struct {
 // response is encoded. Otherwise, once the handler has returned nil, the
 // tasks run whatever happens to the response, a client that left before
 // reading it and a value that failed to encode with an error included,
-// because the handler's own work is done by then. They are handed to the
-// workers after the response has been passed to net/http, before middleware
-// installed with [App.Use] has unwound, so a task may begin before the last
-// byte has reached the client; the response never waits for one. Tasks from
-// one request run concurrently, in no particular order.
+// because the handler's own work is done by then. The exception is a route
+// with an [Acquire] provider, whose [Release] is told of a value that failed
+// to encode as a failure, as it is of one of its own: the work the tasks were
+// to follow has been undone, a [Transaction] rolled back, so they are dropped.
+// They are handed to the workers after the response has been passed to
+// net/http, before middleware installed with [App.Use] has unwound, so a task
+// may begin before the last byte has reached the client; the response never
+// waits for one. Tasks from one request run concurrently, in no particular
+// order.
 //
 // The task receives a context that keeps the request's values, so
 // [RequestIDFromContext], [LocaleFromContext] and anything middleware stored

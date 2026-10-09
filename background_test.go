@@ -270,6 +270,29 @@ func TestAfterResponseRunsWhenTheResponseCannotBeEncoded(t *testing.T) {
 	}
 }
 
+// TestAfterResponseFollowsWhatTheReleasesWereTold pins the exception to the
+// rule above: a value that fails to encode is a failure the route's releases
+// are told of, so a transaction rolls back, and the tasks registered to follow
+// that work have nothing to follow.
+func TestAfterResponseFollowsWhatTheReleasesWereTold(t *testing.T) {
+	t.Parallel()
+	var ran atomic.Int32
+	log := newReleaseLog()
+	app := New(quietOptions())
+	app.Get("/x", func(ctx *Context, _ Empty) (unencodableOut, error) {
+		return unencodableOut{}, ctx.AfterResponse(func(context.Context) { ran.Add(1) })
+	}, acquireAs[relA](log, "a", nil))
+	mustBuild(t, app)
+	assertStatus(t, do(t, app, http.MethodGet, "/x"), http.StatusInternalServerError)
+	if log.failure(t, "a") == nil {
+		t.Error("the release was told a response that could not be encoded succeeded")
+	}
+	waitPoolIdle(t, app)
+	if n := ran.Load(); n != 0 {
+		t.Errorf("%d tasks ran after their request's releases were told it failed", n)
+	}
+}
+
 func TestAfterResponseQueueFull(t *testing.T) {
 	t.Parallel()
 	opts := quietOptions()

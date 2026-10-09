@@ -1245,6 +1245,7 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 				slog.String("route", c.route.Path),
 				slog.String(RequestIDKey, c.RequestID()),
 				slog.String("error", err.Error()))
+			a.observeStreamFailure(c, err)
 		}
 	}
 	// The handshake is long since answered, so there is no response left for

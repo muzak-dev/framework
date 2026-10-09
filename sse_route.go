@@ -557,6 +557,7 @@ func (a *App) serveSSE(c *Context, stream *sseStream, call func() error) error {
 				slog.String("route", c.route.Path),
 				slog.String(RequestIDKey, c.RequestID()),
 				slog.String("error", err.Error()))
+			a.observeStreamFailure(c, err)
 		}
 	}
 	// The header is long since written, so there is no response left for the

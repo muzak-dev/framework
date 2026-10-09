@@ -164,7 +164,9 @@ func (c *Context) Context() context.Context { return c.r.Context() }
 // a handler writes to the access log line of the same request. The identifier
 // is left out only when the [RequestID] middleware was removed from the chain,
 // and the method and path are cut to a bounded length, as everywhere the
-// framework logs what a client chose.
+// framework logs what a client chose. When tracing is configured, every record
+// also carries the trace under [TraceIDKey] and the server span under
+// [SpanIDKey], which join it to the request's trace.
 //
 // The logger is built the first time it is asked for and kept for the rest of
 // the request, so a handler that never logs pays nothing for it. Unlike the
@@ -179,6 +181,11 @@ func (c *Context) Logger() *slog.Logger {
 		}
 		if c.requestID != "" {
 			attrs = append(attrs, slog.String(RequestIDKey, c.requestID))
+		}
+		// With tracing configured, the request's trace too; see
+		// [TracingOptions]. A context with no span allocates nothing here.
+		if sc, ok := SpanContextFromContext(c.r.Context()); ok {
+			attrs = append(attrs, slog.String(TraceIDKey, sc.TraceID.String()), slog.String(SpanIDKey, sc.SpanID.String()))
 		}
 		c.requestLogger = c.logger.With(attrs...)
 	}

@@ -294,7 +294,8 @@ type AccessLogOptions struct {
 }
 
 // AccessLog records one line per request with its method, path, matched route,
-// status, duration and request identifier.
+// status, duration and request identifier, and with the request's trace and
+// server span when tracing is configured; see [TracingOptions].
 //
 // A request whose connection was aborted after its response had started (see
 // [Recovery]) is still recorded, with the status that was sent and
@@ -367,6 +368,11 @@ func logAccess(scoped *slog.Logger, base slog.Level, r *http.Request, rw *respon
 	// wants; the template is what a query groups by.
 	if route, ok := RouteFromContext(r.Context()); ok {
 		attrs = append(attrs, slog.String("route", route))
+	}
+	// The trace, when tracing is configured, which joins the line to the
+	// request's server span; see [TracingOptions].
+	if sc, ok := SpanContextFromContext(r.Context()); ok {
+		attrs = append(attrs, slog.String(TraceIDKey, sc.TraceID.String()), slog.String(SpanIDKey, sc.SpanID.String()))
 	}
 	// The locale is recorded only when one was resolved, so a service
 	// that does not translate logs exactly what it logged before.

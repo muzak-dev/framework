@@ -234,6 +234,17 @@ type AppOptions struct {
 	// with [Context.AfterResponse]. The zero value is a small pool that starts
 	// no goroutine until a task is registered; see [BackgroundOptions].
 	Background BackgroundOptions
+
+	// Tracing starts a server span for every request through a [Tracer],
+	// continues the W3C trace context a request carries, and joins the access
+	// log and [Context.Logger] to the trace. The zero value leaves it off and
+	// costs nothing; see [TracingOptions].
+	Tracing TracingOptions
+
+	// Observer is told about every request once its response is written,
+	// which is where request metrics are recorded. Nil, the default, costs
+	// nothing; see [RequestObserver].
+	Observer RequestObserver
 }
 
 // App is a Muzak application: a root router plus the server, middleware,
@@ -279,6 +290,10 @@ type App struct {
 	// swallowed by New, which never fails.
 	clientIP    *clientIPResolver
 	clientIPErr error
+
+	// obs is the tracing and request observer state, nil when neither is
+	// configured; see [observability].
+	obs *observability
 
 	// websockets tracks the open WebSocket connections, which net/http cannot
 	// do for us because a hijacked connection is no longer one of its own.
@@ -368,6 +383,7 @@ func New(opts AppOptions, routerOpts ...RouterOption) *App {
 	app.lifecycle = &lifecycleManager{logger: Scoped(logger, ScopeServer), stopTimeout: opts.ShutdownTimeout}
 	app.background = newBackgroundPool(opts.Background, Scoped(logger, ScopeServer))
 	app.clientIP, app.clientIPErr = newClientIPResolver(opts.ClientIP)
+	app.obs = newObservability(opts, app.clientIP, logger)
 	app.ctxPool.New = func() any { return new(Context) }
 	app.installDefaultMiddleware()
 	return app
@@ -410,6 +426,10 @@ func (a *App) installDefaultMiddleware() {
 	a.middleware = append(a.middleware, RequestID(RequestIDOptions{
 		TrustInboundHeader: a.opts.TrustRequestIDHeader,
 	}))
+	if a.obs != nil {
+		// Above recovery and the access log; see [observability.middleware].
+		a.middleware = append(a.middleware, a.obs.middleware)
+	}
 	if !a.opts.DisableSecurityHeaders {
 		a.middleware = append(a.middleware, SecurityHeaders())
 	}
@@ -545,6 +565,9 @@ func (a *App) build() {
 	if err := a.opts.validateSecuritySchemes(); err != nil {
 		state.errs = append(state.errs, err)
 	}
+	if err := a.opts.Tracing.validate(); err != nil {
+		state.errs = append(state.errs, err)
+	}
 
 	a.routers = countRouters(a.Router)
 	a.finalize(inherited{
@@ -595,7 +618,7 @@ func (a *App) build() {
 	// that it is completed with the rest.
 	a.resolveDocsRateLimit(state)
 	a.resolveRateLimiting(state)
-	a.lifecycle.components = state.lifecycles
+	a.lifecycle.components = observabilityComponents(state.lifecycles, a.opts.Tracing.Tracer, a.opts.Observer)
 	a.frontends = state.frontends
 	// Two mounts at one path cannot both answer, and the one registered first
 	// would take every request, whatever guards the second was given. That is
@@ -1014,6 +1037,7 @@ var errPanic = errors.New("muzak: handler panicked")
 // the error says it was not. A hijacked connection is left alone, and so is
 // a WebSocket or event stream route; see [Context.endsItsOwnResponse].
 func (a *App) fail(c *Context, err error) {
+	a.observeFailure(c, err)
 	// Releases see the failure before anything is written, and returning it
 	// unchanged is settle's contract when one is given.
 	_ = c.settle(err)

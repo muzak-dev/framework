@@ -107,8 +107,9 @@ func TestWSDialHonoursTheWriteTimeout(t *testing.T) {
 	})
 }
 
+// Not parallel, for the reason TestSSEMaxLifetimeStopsABusyHandlerAndTheKeepalive
+// gives: it asserts that no goroutine leaked anywhere in the process.
 func TestWSDialHonoursTheReadTimeout(t *testing.T) {
-	t.Parallel()
 	// The server begins a message and stops part way through it, which is
 	// the dribble a read timeout exists to cut off.
 	type frame struct {

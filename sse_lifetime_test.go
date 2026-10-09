@@ -92,8 +92,12 @@ func TestSSEMaxLifetimeEndsAStreamCleanly(t *testing.T) {
 
 // A handler that never stops sending is ended by its next send, and the
 // keepalive does not outlive the stream.
+//
+// It is not parallel, like the other tests that assert no goroutine leaked:
+// the leak profile covers the whole process, so a goroutine leaked by a test
+// running alongside, one failing on a loaded machine for instance, would be
+// reported here as this test's.
 func TestSSEMaxLifetimeStopsABusyHandlerAndTheKeepalive(t *testing.T) {
-	t.Parallel()
 	returned := make(chan error, 1)
 	app := New(quietOptions())
 	app.SSE("/stream", func(_ *Context, _ Empty, stream *SSEStream[itemOut]) error {

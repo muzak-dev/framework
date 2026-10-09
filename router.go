@@ -1146,6 +1146,9 @@ func (rt *Route) resolve(in inherited) error {
 	if err := rt.resolveTimeout(in); err != nil {
 		return err
 	}
+	if err := rt.checkDeps(); err != nil {
+		return err
+	}
 	if rt.websocket != nil {
 		return rt.resolveWebSocket(in)
 	}

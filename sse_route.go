@@ -536,7 +536,10 @@ func (a *App) serveSSE(c *Context, stream *sseStream, call func() error) error {
 		}
 	}()
 
-	if err := call(); err != nil {
+	// The stream's releases run as soon as its handler returns, with what it
+	// returned, and a release that fails a stream which had not is reported
+	// below as the stream's failure; see [Context.settle].
+	if err := c.settle(call()); err != nil {
 		if errors.Is(err, ErrSSEStreamEnded) {
 			// The client went away, or the server is shutting down. That is
 			// how a stream ends rather than something to report as a failure,

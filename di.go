@@ -43,6 +43,11 @@ type provider struct {
 	// asking, so it is left out when deciding whether a response is
 	// per-client; see [answersPerClient].
 	shared bool
+
+	// invalid holds the reason the provider was declared with an argument it
+	// cannot work with, such as a nil function, which is reported when the
+	// application is built; see [App.finishDependencies].
+	invalid error
 }
 
 // answersPerClient reports whether a route or mount that runs these guards and
@@ -388,12 +393,19 @@ func providerOption(p *provider) SharedOption {
 //
 // The type argument is checked at compile time and no assertion appears in
 // calling code. T must have been declared for the route being executed, via
-// [Needs] or [Singleton] on the route itself or on any router that encloses
-// it; asking for a type the route never declared is a programming error rather
-// than a runtime condition to handle, so From panics. The panic is caught by
-// the recovery middleware and reported as a 500 with the details logged, but
-// it signals a bug to fix rather than an error to recover from. Use [TryFrom]
-// when the absence of a dependency is a legitimate state.
+// [Needs], [Acquire], [Transaction], [Singleton] or [WithSingleton] on the
+// route itself or on any router that encloses it; asking for a type the route
+// never declared is a programming error rather than a runtime condition to
+// handle, so From panics. The panic is caught by the recovery middleware and
+// reported as a 500 with the details logged, but it signals a bug to fix
+// rather than an error to recover from. Use [TryFrom] when the absence of a
+// dependency is a legitimate state.
+//
+// A [Dep] field on the route's input reads the same value and moves that
+// check to build time: a route whose Dep has no provider is not built, where
+// a From with none fails on the first request that reaches it. From remains
+// the way to read a dependency from a guard, a provider or a helper, which
+// have no input type. Under [App.Override] it returns the override's value.
 func From[T any](ctx *Context) T {
 	v, ok := TryFrom[T](ctx)
 	if !ok {

@@ -63,6 +63,10 @@ type Context struct {
 	// never carries a previous request's values.
 	deps []depValue
 
+	// releases holds the Release of every [Acquire] provider that resolved for
+	// this request, in acquisition order, until [Context.settle] runs them.
+	releases []heldRelease
+
 	// rawBody holds the request body as it arrived, for a route that declared
 	// [CaptureBody]. It is nil on every other route, and rawBodyCaptured is
 	// what tells the two apart from a request that carried no body at all.
@@ -355,6 +359,13 @@ func (c *Context) reset() {
 		c.deps[i] = depValue{}
 	}
 	c.deps = c.deps[:0]
+	// Every release has run by now (see App.release), so this only drops the
+	// references, and a Context borrowed by the next request can never run a
+	// release this one acquired.
+	for i := range c.releases {
+		c.releases[i] = heldRelease{}
+	}
+	c.releases = c.releases[:0]
 	// Dropped rather than kept for reuse: the buffer is exactly the size of one
 	// request's body, so pooling it would hold the largest body this Context
 	// ever saw for the life of the process.

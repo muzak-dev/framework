@@ -1430,7 +1430,8 @@ func (b *schemaBuilder) bodySchema(plan *bindPlan) *Schema {
 	}
 	return b.describeObject(jsonMembers(plan.typ), func(member jsonMember) bool {
 		_, located := declaredLocation(member.field)
-		return located
+		// A Dep is filled by a provider and never sent, so it is no member.
+		return located || isDepField(member.field)
 	})
 }
 

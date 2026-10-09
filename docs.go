@@ -354,6 +354,7 @@ func (a *App) serveAdmittedAsset(as *asset, w http.ResponseWriter, r *http.Reque
 		}
 	}
 	as.serve(rw, r)
+	a.settleServed(c)
 }
 
 // markPrivate marks every documentation asset as one a shared cache must not

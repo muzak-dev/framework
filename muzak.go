@@ -269,6 +269,10 @@ type App struct {
 
 	lifecycle *lifecycleManager
 
+	// overrides are the providers [App.Override] substitutes when the
+	// application is built; see [App.finishDependencies].
+	overrides []*dependencyOverride
+
 	// clientIP answers which address a request came from, with the trusted
 	// proxy policy parsed once. clientIPErr holds the reason a policy could
 	// not be parsed, reported when the application is built rather than
@@ -556,6 +560,7 @@ func (a *App) build() {
 		rateLimit:             a.opts.RateLimit,
 		versions:              a.opts.Versioning.DefaultVersion,
 	}, emit, state)
+	a.finishDependencies(state)
 	a.websockets.limit = wsConnectionLimit(a.opts.WebSocket.MaxConnections)
 	a.websockets.perKeyLimit = wsConnectionsPerIPLimit(a.opts.WebSocket.MaxConnectionsPerIP)
 	a.streams.limit = sseStreamLimit(a.opts.SSE.MaxStreams)
@@ -777,6 +782,7 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 		// frontend mounted at the root cannot shadow an API.
 		if mount, relative, served := a.frontendFor(r.URL.Path); served {
 			a.serveFrontend(c, mount, relative)
+			a.settleServed(c)
 			return
 		}
 		a.fail(c, noRouteError(r))
@@ -971,6 +977,9 @@ func (a *App) recoverRoute(c *Context) {
 	if recovered == nil {
 		return
 	}
+	// Releases learn of the panic first, the abort below included; see
+	// [Context.settle].
+	_ = c.settle(panicFailure(recovered))
 	// recover returns any, not error, so errors.Is does not apply here. This is
 	// the same identity comparison net/http performs on the sentinel.
 	if recovered == http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
@@ -1005,6 +1014,9 @@ var errPanic = errors.New("muzak: handler panicked")
 // the error says it was not. A hijacked connection is left alone, and so is
 // a WebSocket or event stream route; see [Context.endsItsOwnResponse].
 func (a *App) fail(c *Context, err error) {
+	// Releases see the failure before anything is written, and returning it
+	// unchanged is settle's contract when one is given.
+	_ = c.settle(err)
 	if c.w.written && !c.w.hijacked && !c.endsItsOwnResponse() {
 		// Every failure is logged here, even the deliberate 4xx logCause
 		// would leave out, because the response the client sees says nothing
@@ -1167,6 +1179,9 @@ func (a *App) acquire(w *responseWriter, r *http.Request) *Context {
 // Every request that parsed a multipart body that way left its files behind
 // for good, as large as the client cared to make them.
 func (a *App) release(c *Context) {
+	// Every path through a route settles its releases before it returns; one
+	// still pending here was left by a panic outside a route.
+	_ = c.settle(errReleaseAbandoned)
 	releaseUpload(c.r)
 	a.settleTasks(c)
 	c.reset()
@@ -1288,18 +1303,29 @@ var responseBufferPool = sync.Pool{
 }
 
 // writeResponse serializes a value as the response body.
+//
+// The request's [Acquire] releases run once the body is known to be writable
+// and before any of it is, which is what lets a commit that fails replace the
+// success with an error; every branch below settles them before its first
+// write. With none pending, settling is a length check.
 func (c *Context) writeResponse(v any) error {
 	if c.w.written {
 		// The handler wrote the response itself, which is a supported way to
 		// stream; there is nothing left to encode.
-		return nil
+		return c.settle(nil)
 	}
 	status := clampStatus(c.status)
 	if status == http.StatusNoContent || status == http.StatusNotModified {
+		if err := c.settle(nil); err != nil {
+			return err
+		}
 		c.w.WriteHeader(status)
 		return nil
 	}
 	if document, isHTML := v.(HTML); isHTML {
+		if err := c.settle(nil); err != nil {
+			return err
+		}
 		return c.writeHTML(status, document)
 	}
 
@@ -1313,6 +1339,9 @@ func (c *Context) writeResponse(v any) error {
 
 	if err := json.MarshalWrite(buf, v, durationJSON); err != nil {
 		return fmt.Errorf("muzak: encoding the response of %s %s failed: %w", c.r.Method, c.route.pathOrRequest(c.r), err)
+	}
+	if err := c.settle(nil); err != nil {
+		return err
 	}
 	header := c.w.Header()
 	setIfAbsent(header, "Content-Type", "application/json; charset=utf-8")

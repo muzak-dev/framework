@@ -191,6 +191,10 @@ type bindPlan struct {
 	// field origins those rules are reported against. Resolving them here means
 	// a request pays a map lookup per rule rather than a walk over the type.
 	validation *validationPlan
+	// deps lists the [Dep] fields of the input, which are filled from the
+	// resolved dependencies rather than from the request. It is nil for an
+	// input without one, which then pays a nil check for the feature.
+	deps []depBinder
 }
 
 // bodyBufferPool recycles the buffers used to read request bodies. Buffers are
@@ -268,8 +272,9 @@ func newBindPlan(t reflect.Type, method, path string) (*bindPlan, error) {
 			// input has no located fields at all. Counting body fields against
 			// the field count is not enough: an embedded struct holding both a
 			// located parameter and a body member counts as one field on each
-			// side, which would let a crafted body reach the located field.
-			direct:   len(plan.params) == 0 && len(bodyFields) == totalFields(t),
+			// side, which would let a crafted body reach the located field. A
+			// Dep is kept out of the body the same way.
+			direct:   len(plan.params) == 0 && len(plan.deps) == 0 && len(bodyFields) == totalFields(t),
 			fields:   bodyFields,
 			required: true,
 			shape:    t,
@@ -347,7 +352,7 @@ func bodyShape(t reflect.Type, at []int) (reflect.Type, []bodyCopy) {
 		if !usableField(f) {
 			continue
 		}
-		if _, located := declaredLocation(f); located {
+		if _, located := declaredLocation(f); located || isDepField(f) {
 			continue
 		}
 		name, options, _ := strings.Cut(f.Tag.Get(tagJSON), ",")
@@ -600,6 +605,14 @@ func templateParams(path string) map[string]bool {
 func collectFields(t reflect.Type, prefix []int, plan *bindPlan, bodyFields *[][]int) error {
 	for i := range t.NumField() {
 		f := t.Field(i)
+		// A Dep is filled from the dependencies, never from the request, so it
+		// is neither a parameter nor body content; see [bindPlan.collectDep].
+		if dep, err := plan.collectDep(f, prefix, i); dep || err != nil {
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		if !usableField(f) {
 			if location, declared := declaredLocation(f); declared {
 				return fmt.Errorf("field %s declares a %s parameter but is unexported, so the binder cannot set it; export the field", f.Name, location)
@@ -751,9 +764,11 @@ func locatedWithin(t reflect.Type, seen map[reflect.Type]bool) (path, location s
 
 // located counts the binders compiled so far, which is what tells
 // collectFields whether an embedded struct contributed anything of its own or
-// is body content like any other field.
+// is body content like any other field. A Dep counts, so that an embedded
+// struct holding one is split into its body members rather than decoded whole,
+// which would make the Dep a member a client could send.
 func (p *bindPlan) located() int {
-	return len(p.params) + len(p.form) + len(p.files)
+	return len(p.params) + len(p.form) + len(p.files) + len(p.deps)
 }
 
 // usableField reports whether a struct field takes part in binding.
@@ -1045,6 +1060,13 @@ func fieldByIndex(v reflect.Value, index []int) reflect.Value {
 func (p *bindPlan) bind(c *Context, dst reflect.Value, route *Route) error {
 	if p.empty {
 		return nil
+	}
+	// Filled first, so that a Validate method can read a dependency, and safe
+	// to fill first because nothing below can write to a Dep field.
+	if p.deps != nil {
+		if err := p.fillDeps(c, dst); err != nil {
+			return err
+		}
 	}
 	// The model's name is the narrowest scope a translated message is looked up
 	// under, so it travels with the failures rather than being rediscovered by

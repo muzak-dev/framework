@@ -1215,7 +1215,10 @@ func (a *App) serveWebSocket(c *Context, conn *WSConn, call func() error) error 
 		_ = conn.Close(status, reason)
 	}()
 
-	if err := call(); err != nil {
+	// The connection's releases run as soon as its handler returns, with what
+	// it returned, and a release that fails a connection which had not closes
+	// it as a failure below; see [Context.settle].
+	if err := c.settle(call()); err != nil {
 		var closed *WSCloseError
 		switch {
 		case errors.As(err, &closed):

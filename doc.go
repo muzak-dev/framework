@@ -918,6 +918,53 @@
 // [HTTPError.Wrap], [HTTPError.WithCode] and [HTTPError.WithDetails] chain
 // onto every one of them. Any other status is one [NewHTTPError] can produce.
 //
+// # Observability
+//
+// Tracing is off until [AppOptions.Tracing] names a [Tracer], and costs nothing
+// while it is: no header is parsed, no identifier is drawn and nothing is
+// allocated. With one, every request gets a server span, named after its
+// method and route template, "GET /items/{id}", and never after its path,
+// which carries identifiers and often personal data:
+//
+//	exporter, err := otlp.New(otlp.Options{Endpoint: "http://localhost:4318", ServiceName: "shop"})
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	app := muzak.New(muzak.AppOptions{Tracing: muzak.TracingOptions{Tracer: exporter}})
+//
+// A request carrying a W3C traceparent continues that trace, and its sampling
+// decision with it, unless [TracingOptions.Parent] says to believe only a
+// trusted proxy's, [TraceParentFromTrustedProxies], which is what a service
+// reached directly from the internet wants: a client choosing its own trace
+// identifier can attach its requests to another's trace, or have every one of
+// them sampled. The header is read strictly, as the recommendation writes it:
+// lowercase hex only, no identifier of zeroes, version ff refused and a later
+// version read forward-compatibly, and a tracestate of more than 32 members or
+// 512 bytes, or with one member out of grammar, dropped whole. Identifiers
+// this server draws come from crypto/rand.
+//
+// A handler reaches the span through its context: [SpanFromContext] to add
+// what it knows, [StartSpan] for a child span recorded through the same
+// Tracer, and [SpanContextFromContext] and [InjectTraceContext] to carry the
+// trace into a request of its own. The access log and every record written
+// through [Context.Logger] carry trace_id and span_id.
+//
+// The span carries the OpenTelemetry HTTP attributes, user_agent.original only
+// when asked for. A 5xx, a response aborted after it started and a stream or
+// WebSocket handler that failed mark it an error, and a failure the log records
+// is added as an "exception" event with the same text the log line holds and
+// nothing more. It ends once the response is written, which for an event
+// stream or a WebSocket is when the stream or the connection ends. A Tracer
+// that panics costs the request its span and nothing else.
+//
+// [AppOptions.Observer] is the hook request metrics are built on. A
+// [RequestObserver] is called exactly once per request, after the response,
+// with a method, a route template and a status whose values are bounded, so a
+// metric labelled by them cannot grow a series per request. A Tracer or an
+// observer that implements [Lifecycle] is started and stopped with the
+// application. [muzak.dev/framework/otlp] is a Tracer that sends spans to any
+// OpenTelemetry collector.
+//
 // # Defaults worth knowing
 //
 // Muzak starts from settings that are safe rather than permissive. Every

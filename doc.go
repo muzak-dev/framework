@@ -90,6 +90,30 @@
 // Cache-Control of its own. A handler serving something every user may share
 // says so with [Context.SetHeader].
 //
+// A value can also be declared on the input type, as a [Dep] field, and read
+// with Get. The route is then refused at build time, naming the field, if no
+// provider of exactly that type is declared for it, rather than failing on its
+// first request; the field is never read from the request and never appears
+// in the OpenAPI document:
+//
+//	type ReadItem struct {
+//		ID   string                 `path:"id"`
+//		User muzak.Dep[CurrentUser]
+//	}
+//
+// A provider that has to clean up after the request is declared with
+// [Acquire], which returns a [Release] beside the value. Releases run once
+// each, last acquired first, on every way a request can end, and are told
+// whether it failed; for a buffered response they run before anything is
+// written, so a release that fails turns a success into an error.
+// [Transaction] is the one most applications need: a *sql.Tx begun for the
+// request, committed if it succeeded and rolled back otherwise.
+//
+// A test replaces a provider with [App.Override], or testclient.Override,
+// before the application is built. An override replaces every provider of its
+// type in that application alone, keeps the lifetime of the provider it
+// stands in for, and leaves guards alone.
+//
 // # Uploads and forms
 //
 // A field tagged `file:"name"` is bound from a multipart upload, and its Go

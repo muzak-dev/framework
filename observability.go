@@ -202,7 +202,7 @@ func (o *observability) serverAttributes(r *http.Request) []slog.Attr {
 func (o *observability) finish(r *http.Request, rw *responseWriter, active *activeSpan, body *countingBody, start time.Time, panicking bool) {
 	status, aborted := requestOutcome(rw, panicking)
 	route, routed := RouteFromContext(r.Context())
-	method := observedMethod(r.Method, routed)
+	method := observedMethod(r.Method, registeredMethod(r))
 	if active != nil && active.span != nil {
 		o.endServerSpan(active, method, route, routed, status, aborted)
 	}
@@ -321,16 +321,27 @@ var standardMethods = [...]string{
 }
 
 // observedMethod returns the method as a span or a metric records it: as it is
-// when it is a standard one or one a route answered, and "_OTHER" otherwise.
+// when it is a standard one or one a route registered for it answered, and
+// "_OTHER" otherwise.
 //
 // net/http admits any token as a method, as long as the request line, so a
 // method recorded as sent would let one client mint a span name and a metric
 // series per request.
-func observedMethod(method string, routed bool) string {
-	if routed || slices.Contains(standardMethods[:], method) {
+func observedMethod(method string, registered bool) string {
+	if registered || slices.Contains(standardMethods[:], method) {
 		return method
 	}
 	return "_OTHER"
+}
+
+// registeredMethod reports whether the request was answered by a route
+// registered for its own method, which the routing table bounds. A handler
+// mount answers every method a client sends, so the template it publishes
+// vouches for the path alone, and its method is recorded as
+// [observedMethod] records one no route vouches for.
+func registeredMethod(r *http.Request) bool {
+	holder, ok := r.Context().Value(routeContextKey{}).(*routeHolder)
+	return ok && holder.method != "" && holder.method == r.Method
 }
 
 // spanMethod returns the method as it appears in a span name, where

@@ -69,7 +69,12 @@ type routeContextKey struct{}
 //
 // No lock: one request is handled by one goroutine from the chain root to the
 // handler and back, and the read happens after next.ServeHTTP has returned.
-type routeHolder struct{ template string }
+type routeHolder struct {
+	template string
+	// method is the method the matched route was registered for. A handler
+	// mount answers every method and leaves it empty; see [registeredMethod].
+	method string
+}
 
 // RouteFromContext returns the template of the route this request matched,
 // such as "/v1/orgs/{org_id}/apps/{app_id}", and whether one matched at all.

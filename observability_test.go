@@ -462,3 +462,37 @@ func TestObservabilityUnderConcurrency(t *testing.T) {
 		t.Errorf("recorded %d spans, want 150", got)
 	}
 }
+
+// TestMountedMethodIsBounded checks that a request a handler mount answers is
+// recorded with a bounded method. A mount answers every method a client sends,
+// so its template vouches for the path but not for the method: recorded as
+// sent, a client choosing a fresh method per request would mint a span name
+// and a metric series each time.
+func TestMountedMethodIsBounded(t *testing.T) {
+	t.Parallel()
+	opts, tracer := tracedOptions()
+	observer := &observations{}
+	opts.Observer = observer
+	app := New(opts)
+	app.Mount("/legacy", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	// Registered elsewhere, so a route vouches for PURGE, but not at the mount.
+	app.Handle("PURGE", "/cache", func(*Context, Empty) (itemOut, error) { return itemOut{}, nil })
+	mustBuild(t, app)
+	for _, method := range []string{"X-7f3a9c", "PURGE", "GET"} {
+		assertStatus(t, do(t, app, method, "/legacy/anything"), http.StatusOK)
+	}
+	observed := observer.list()
+	spans := tracer.all()
+	if len(observed) != 3 || len(spans) != 3 {
+		t.Fatalf("observed %d requests and %d spans, want 3 of each", len(observed), len(spans))
+	}
+	for i, want := range []string{"_OTHER", "_OTHER", "GET"} {
+		if got := observed[i]; got.Method != want || got.Route != "/legacy" {
+			t.Errorf("request %d observed as %s %q, want %s /legacy", i, got.Method, got.Route, want)
+		}
+		wantName := spanMethod(want) + " /legacy"
+		if got, _ := spans[i].attr("http.request.method"); spans[i].name != wantName || got != want {
+			t.Errorf("request %d span %q with method %q, want %q with %q", i, spans[i].name, got, wantName, want)
+		}
+	}
+}

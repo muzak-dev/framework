@@ -78,6 +78,12 @@ type Context struct {
 	// is what decides whether they run.
 	tasks   []backgroundTask
 	handled bool
+
+	// session is the request's session once [Context.Session] has read it,
+	// and nil until then, which is what keeps a request that never asks from
+	// paying for one. It is allocated per request rather than pooled, so a
+	// Session a handler kept can never see another request's values.
+	session *Session
 }
 
 // depValue is one resolved value dependency, keyed by the concrete type the
@@ -351,6 +357,9 @@ func (c *Context) Status() int { return c.status }
 // a resolved dependency, a request pointer or a route behind would both retain
 // memory and risk exposing one request's values to the next.
 func (c *Context) reset() {
+	// Before the writer is dropped, since the session detaches from it; see
+	// sessions.go.
+	c.resetSession()
 	c.w = nil
 	c.r = nil
 	c.route = nil

@@ -768,6 +768,11 @@ type responseWriter struct {
 	written  bool
 	hijacked bool
 	vary     []string
+	// commitHook is told the status just before the response starts, the
+	// last moment a header can still be added: it is how the session of a
+	// handler that writes its own response reaches it. Nil unless a request
+	// read its session; see sessions.go.
+	commitHook commitHook
 }
 
 // asResponseWriter wraps w unless it is already a *responseWriter, so that
@@ -795,7 +800,7 @@ func (w *responseWriter) WriteHeader(status int) {
 		w.ResponseWriter.WriteHeader(status)
 		return
 	}
-	w.commitVary()
+	w.beforeCommit(status)
 	w.status = status
 	w.written = true
 	w.ResponseWriter.WriteHeader(status)
@@ -820,6 +825,17 @@ func (w *responseWriter) commitVary() {
 	}
 	addVaryFields(w.Header(), w.vary...)
 	w.vary = nil
+}
+
+// beforeCommit runs what has to reach the header before the response
+// starts with status: the commit hook, once, and then the Vary fields, which
+// the hook may have added to.
+func (w *responseWriter) beforeCommit(status int) {
+	if hook := w.commitHook; hook != nil {
+		w.commitHook = nil
+		hook.beforeCommit(status)
+	}
+	w.commitVary()
 }
 
 // addVaryFields adds every named field the Vary header does not already
@@ -853,7 +869,7 @@ func isInformational(status int) bool {
 // Write records the byte count and marks the response as started.
 func (w *responseWriter) Write(b []byte) (int, error) {
 	if !w.written {
-		w.commitVary()
+		w.beforeCommit(http.StatusOK)
 		w.status = http.StatusOK
 		w.written = true
 	}
@@ -884,6 +900,9 @@ func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 func (w *responseWriter) FlushError() error {
 	// A flush sends the header as it stands, whether or not anything was
 	// written before it.
+	if !w.written {
+		w.beforeCommit(http.StatusOK)
+	}
 	w.commitVary()
 	err := http.NewResponseController(w.ResponseWriter).Flush()
 	if !w.written && !errors.Is(err, http.ErrNotSupported) {

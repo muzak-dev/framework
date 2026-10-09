@@ -210,6 +210,12 @@ en:
       503: "Service Unavailable"
       504: "Gateway Timeout"
 
+    # Refusals made to protect a user rather than for the request's shape.
+    security:
+      # A state-changing request a browser sent from another origin, refused
+      # because of AppOptions.CrossOriginProtection.
+      cross_origin: "Cross-origin requests that change state are not accepted."
+
   date:
     formats:
       default: "%Y-%m-%d"

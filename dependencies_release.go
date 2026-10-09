@@ -132,11 +132,27 @@ type heldRelease struct {
 // Each release is removed before it is called, so it runs exactly once even
 // if something it calls ends up here again. With nothing pending this is a
 // length check, which is all a route without [Acquire] pays.
+//
+// The request's session is written last, once every release has succeeded,
+// so a transaction that fails to commit takes the session change with it;
+// see [Session]. A request that never read its session pays a nil check.
 func (c *Context) settle(failure error) error {
-	if len(c.releases) == 0 {
+	if len(c.releases) == 0 && c.session == nil {
 		return failure
 	}
-	return c.runReleases(failure)
+	return c.settleSlow(failure)
+}
+
+// settleSlow runs the releases and then writes the session, kept apart so
+// that settle inlines.
+func (c *Context) settleSlow(failure error) error {
+	if len(c.releases) != 0 {
+		failure = c.runReleases(failure)
+	}
+	if c.session != nil {
+		failure = c.commitSession(failure)
+	}
+	return failure
 }
 
 // runReleases is the slow path of settle, kept apart so that settle inlines.

@@ -305,6 +305,19 @@ type AppOptions struct {
 	// is expected to be one built on ProblemDetails, since the document will
 	// say every error is a problem.
 	ProblemDetails *ProblemOptions
+
+	// Sessions gives every request a session through [Context.Session], kept
+	// in an encrypted cookie or a [SessionStore]; see [SessionOptions]. It is
+	// nil by default, which costs nothing, and setting it requires
+	// CrossOriginProtection as well.
+	Sessions *SessionOptions
+
+	// CrossOriginProtection refuses a state-changing request a browser sends
+	// from another origin, the shape of cross-site request forgery, with 403
+	// through the error renderer; see [CrossOriginOptions]. It is nil by
+	// default, which checks nothing. An application that authenticates with
+	// cookies of any kind, not only [AppOptions.Sessions], wants it.
+	CrossOriginProtection *CrossOriginOptions
 }
 
 // App is a Muzak application: a root router plus the server, middleware,
@@ -379,6 +392,13 @@ type App struct {
 	// before the handler is assembled. See allowedhosts.go.
 	edge       Middleware
 	edgeExempt func(*http.Request) bool
+
+	// sessions is the resolved [AppOptions.Sessions], nil when none are
+	// configured, and crossOrigin the check of
+	// [AppOptions.CrossOriginProtection], nil when none is. See sessions.go
+	// and crossorigin.go.
+	sessions    *sessionManager
+	crossOrigin Middleware
 
 	buildOnce sync.Once
 	buildErr  error
@@ -703,6 +723,10 @@ func (a *App) build() {
 	// that it is completed with the rest.
 	a.resolveDocsRateLimit(state)
 	a.resolveRateLimiting(state)
+	// Sessions and cross-origin protection; see crossorigin.go. Before the
+	// components are collected, so a session store that manages something
+	// is started with them.
+	a.buildSessions(state)
 	a.lifecycle.components = observabilityComponents(state.lifecycles, a.opts.Tracing.Tracer, a.opts.Observer)
 	a.frontends = state.frontends
 	// Two mounts at one path cannot both answer, and the one registered first
@@ -853,6 +877,12 @@ func (a *App) buildHandler(cors Middleware) http.Handler {
 	}
 	for i := len(a.userMiddleware) - 1; i >= 0; i-- {
 		handler = a.userMiddleware[i](handler)
+	}
+	if a.crossOrigin != nil {
+		// Outside everything of the application's own, so a forged request
+		// reaches none of it, and inside CORS, so an allowed origin's script
+		// can read why it was refused; see [CrossOriginOptions].
+		handler = a.crossOrigin(handler)
 	}
 	if cors != nil {
 		handler = cors(handler)

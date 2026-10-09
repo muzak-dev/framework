@@ -29,8 +29,9 @@
 // Batches are posted to the endpoint's /v1/traces with the JSON encoding the
 // OTLP specification gives, gzip-compressed when [Options.Gzip] is set. A
 // batch answered with 429, 502, 503 or 504, or that could not be delivered, is
-// retried with exponential backoff and jitter, honouring a Retry-After within
-// [Options.RetryMaxInterval]; any other answer is final. An answer is read up
+// retried with exponential backoff and jitter, honouring a Retry-After that
+// asks for longer within [Options.RetryMaxInterval]; any other answer is
+// final. An answer is read up
 // to 64 KiB and no further, and every attempt is bounded by
 // [Options.Timeout].
 //

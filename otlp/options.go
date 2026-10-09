@@ -112,9 +112,11 @@ type Options struct {
 	// starts at RetryInitialInterval and doubles each time up to
 	// RetryMaxInterval, with up to half of it drawn at random so that many
 	// instances refused at once do not return at once. A Retry-After from the
-	// collector replaces the wait, capped at RetryMaxInterval. A batch still
-	// refused after RetryMaxElapsedTime is given up on and counted as failed.
-	// Any other answer, every other 4xx and 5xx included, is final. They
+	// collector lengthens the wait to what it asks for, capped at
+	// RetryMaxInterval, and never shortens it, so an answer of zero cannot
+	// have a batch sent again without pause. A batch still refused after
+	// RetryMaxElapsedTime is given up on and counted as failed. Any other
+	// answer, every other 4xx and 5xx included, is final. They
 	// default to [DefaultRetryInitialInterval], [DefaultRetryMaxInterval] and
 	// [DefaultRetryMaxElapsedTime].
 	RetryInitialInterval time.Duration

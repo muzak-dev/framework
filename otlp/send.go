@@ -112,18 +112,28 @@ func (e *Exporter) giveUp(r *run, batch []*span, result attempt, why string) {
 	e.cfg.logger.Error("otlp: "+why, attrs...)
 }
 
-// retryWait returns how long to wait before sending again: what the collector
-// asked for, capped at RetryMaxInterval, or an exponential backoff with
-// jitter.
+// retryWait returns how long to wait before sending again: an exponential
+// backoff with jitter, or what the collector asked for when that is longer,
+// capped at RetryMaxInterval.
 //
 // The backoff starts at RetryInitialInterval and doubles per try up to
 // RetryMaxInterval. Half of it is fixed and half drawn at random, which keeps
 // the wait from shrinking to nothing while spreading out instances that were
-// refused together.
+// refused together. A Retry-After can lengthen it but never shorten it: one of
+// zero, or a date gone by, answered to every attempt would otherwise have the
+// batch sent again as fast as the refusal came back, for all of
+// RetryMaxElapsedTime, to a collector that had just said it was overloaded.
 func (e *Exporter) retryWait(tries int, result attempt) time.Duration {
+	backoff := e.backoff(tries)
 	if result.hasRetryAfter {
-		return min(result.retryAfter, e.cfg.retryMax)
+		return max(backoff, min(result.retryAfter, e.cfg.retryMax))
 	}
+	return backoff
+}
+
+// backoff returns the jittered exponential wait before the retry after tries
+// failed ones; see [Exporter.retryWait].
+func (e *Exporter) backoff(tries int) time.Duration {
 	wait := e.cfg.retryInitial
 	for range tries {
 		if wait >= e.cfg.retryMax/2 {

@@ -435,8 +435,8 @@ func TestRetryWithBackoff(t *testing.T) {
 func TestRetryAfter(t *testing.T) {
 	t.Parallel()
 	// The cap is 50ms where the header asks for longer, so a wait near it is
-	// the cap applied; it is 2s where the header asks for none, so a wait
-	// far under a second is the header obeyed rather than the backoff.
+	// the cap applied. Where the header asks for none, the backoff of 50ms,
+	// at least half of it fixed, is waited all the same.
 	cases := []struct {
 		name, header string
 		limit        time.Duration
@@ -444,8 +444,8 @@ func TestRetryAfter(t *testing.T) {
 		atMost       time.Duration
 	}{
 		{name: "seconds past the cap are capped", header: "3600", limit: 50 * time.Millisecond, atLeast: 40 * time.Millisecond, atMost: time.Second},
-		{name: "zero is now", header: "0", limit: 2 * time.Second, atMost: 500 * time.Millisecond},
-		{name: "a date in the past is now", header: "Wed, 21 Oct 2015 07:28:00 GMT", limit: 2 * time.Second, atMost: 500 * time.Millisecond},
+		{name: "zero keeps the backoff", header: "0", limit: 50 * time.Millisecond, atLeast: 20 * time.Millisecond, atMost: time.Second},
+		{name: "a date in the past keeps the backoff", header: "Wed, 21 Oct 2015 07:28:00 GMT", limit: 50 * time.Millisecond, atLeast: 20 * time.Millisecond, atMost: time.Second},
 		{name: "a date far ahead is capped", header: time.Now().Add(time.Hour).UTC().Format(http.TimeFormat), limit: 50 * time.Millisecond, atLeast: 40 * time.Millisecond, atMost: time.Second},
 	}
 	for _, tc := range cases {
@@ -464,6 +464,39 @@ func TestRetryAfter(t *testing.T) {
 			}
 			if gap := requests[1].arrived.Sub(requests[0].arrived); gap < tc.atLeast || gap > tc.atMost {
 				t.Errorf("waited %v, want between %v and %v", gap, tc.atLeast, tc.atMost)
+			}
+		})
+	}
+}
+
+// TestRetryAfterCannotShortenTheBackoff checks that a collector, or anything in
+// front of it, answering every export with a Retry-After of zero or of a date
+// gone by cannot turn the retries into a loop without pause: the batch would
+// be sent again as fast as the answer came back, for all of
+// RetryMaxElapsedTime, against a collector that just said it was overloaded.
+func TestRetryAfterCannotShortenTheBackoff(t *testing.T) {
+	t.Parallel()
+	for _, header := range []string{"0", "Wed, 21 Oct 2015 07:28:00 GMT"} {
+		t.Run(header, func(t *testing.T) {
+			t.Parallel()
+			c := newCollector(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", header)
+				w.WriteHeader(http.StatusTooManyRequests)
+			})
+			opts, _ := testOptions(c.server.URL)
+			opts.RetryInitialInterval = 20 * time.Millisecond
+			opts.RetryMaxInterval = 20 * time.Millisecond
+			opts.RetryMaxElapsedTime = 200 * time.Millisecond
+			e := startExporter(t, opts)
+			endSpans(e, 1)
+			flush(t, e)
+			// Every wait is at least half of 20ms, so 200ms leaves room for
+			// at most 20 retries after the first attempt.
+			if sent := len(c.all()); sent > 21 {
+				t.Errorf("sent %d requests in 200ms, want the backoff to space them out", sent)
+			}
+			if stats := e.Stats(); stats.Failed != 1 {
+				t.Errorf("stats = %+v, want the batch given up on", stats)
 			}
 		})
 	}
@@ -969,8 +1002,13 @@ func TestRetryWaitBounds(t *testing.T) {
 	if wait := e.retryWait(0, attempt{hasRetryAfter: true, retryAfter: time.Hour}); wait != time.Second {
 		t.Errorf("a Retry-After of an hour gave %v, want the cap", wait)
 	}
-	if wait := e.retryWait(5, attempt{hasRetryAfter: true}); wait != 0 {
-		t.Errorf("a Retry-After of zero gave %v", wait)
+	for range 20 {
+		if wait := e.retryWait(5, attempt{hasRetryAfter: true}); wait < 500*time.Millisecond || wait > time.Second {
+			t.Fatalf("a Retry-After of zero gave %v, want the backoff of the sixth try", wait)
+		}
+		if wait := e.retryWait(0, attempt{hasRetryAfter: true, retryAfter: 700 * time.Millisecond}); wait < 700*time.Millisecond || wait > time.Second {
+			t.Fatalf("a Retry-After of 700ms on the first try gave %v, want it obeyed", wait)
+		}
 	}
 }
 

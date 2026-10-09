@@ -473,6 +473,48 @@ func TestDocsPageMethods(t *testing.T) {
 	assertStatus(t, post, http.StatusMethodNotAllowed)
 }
 
+// TestDocsRefuseAMethodThroughTheErrorRenderer is the regression test for the
+// documentation's 405, which was written with http.Error as a line of
+// text/plain: the one error an application rendering problem details, or the
+// default envelope, answered in neither, and on guarded documentation the
+// releases of the application's providers were told it had succeeded.
+func TestDocsRefuseAMethodThroughTheErrorRenderer(t *testing.T) {
+	t.Parallel()
+	for _, problems := range []bool{false, true} {
+		for _, guarded := range []bool{false, true} {
+			log := newReleaseLog()
+			options := quietOptions()
+			if problems {
+				options.ProblemDetails = &ProblemOptions{}
+			}
+			var routerOpts []RouterOption
+			if guarded {
+				routerOpts = append(routerOpts, acquireAs[relA](log, "a", nil))
+			}
+			app := mustBuild(t, New(options, routerOpts...))
+			for _, target := range []string{"/openapi.json", "/docs", "/docs/_nuxt/app.js"} {
+				rec := do(t, app, http.MethodPost, target)
+				assertStatus(t, rec, http.StatusMethodNotAllowed)
+				if got := rec.Header().Get("Allow"); got != "GET, HEAD" {
+					t.Errorf("POST %s: Allow = %q, want %q", target, got, "GET, HEAD")
+				}
+				if problems {
+					if p, _ := decodeProblem(t, rec); p.Status != http.StatusMethodNotAllowed || p.Code != CodeMethodNotAllowed {
+						t.Errorf("POST %s: the problem is %+v", target, p)
+					}
+					continue
+				}
+				if body := decodeError(t, rec); body.Error.Status != http.StatusMethodNotAllowed || body.Error.Code != CodeMethodNotAllowed {
+					t.Errorf("POST %s: the envelope is %+v", target, body)
+				}
+			}
+			if guarded && log.failure(t, "a") == nil {
+				t.Error("the release was told a refused method succeeded")
+			}
+		}
+	}
+}
+
 // TestDocsUIIsOptional covers the default: no dashboard is configured, so none
 // is served and none is in the binary. The document itself is still published,
 // because describing the API is the framework's job and rendering it is not.

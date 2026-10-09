@@ -278,7 +278,7 @@ func (a *App) withDocs(next http.Handler) http.Handler {
 	specPath := a.opts.OpenAPIPath
 	docsPath := a.opts.DocsPath
 
-	serve := func(as *asset, w http.ResponseWriter, r *http.Request) { as.serve(w, r) }
+	serve := a.serveDocsAsset
 	guards, providers := a.cfg.guards, a.cfg.providers
 	var limits *rateLimitConfig
 	if a.docsLimits != nil {
@@ -351,8 +351,38 @@ func (a *App) serveAdmittedAsset(as *asset, w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
+	if !isReadMethod(r.Method) {
+		a.refuseDocsMethod(c)
+		return
+	}
 	as.serve(rw, r)
 	a.settleServed(c)
+}
+
+// serveDocsAsset serves an asset of documentation that runs no rate limit,
+// guard or provider.
+func (a *App) serveDocsAsset(as *asset, w http.ResponseWriter, r *http.Request) {
+	if !isReadMethod(r.Method) {
+		c := a.acquire(asResponseWriter(w), r)
+		defer a.release(c)
+		a.refuseDocsMethod(c)
+		return
+	}
+	as.serve(w, r)
+}
+
+// docsAllow is the Allow header of a request for the documentation that is
+// refused for its method.
+const docsAllow = "GET, HEAD"
+
+// refuseDocsMethod answers a request for the documentation made with a method
+// other than GET or HEAD with 405, through the error renderer as a route's 405
+// is. It was a line of text/plain, the one error an application answered in
+// neither its envelope nor problem details.
+func (a *App) refuseDocsMethod(c *Context) {
+	c.w.Header().Set("Allow", docsAllow)
+	a.fail(c, NewHTTPErrorf(http.StatusMethodNotAllowed, "%s is not allowed here; allowed methods are %s",
+		quotableMethod(c.r.Method), docsAllow))
 }
 
 // markPrivate marks every documentation asset as one a shared cache must not
@@ -406,15 +436,11 @@ func newAsset(contentType string, body []byte) *asset {
 	return as
 }
 
-// serve writes the asset, honouring conditional requests so that a
-// documentation page reloaded repeatedly transfers its body once, and sending
-// the compressed form to a client that accepts it.
+// serve writes the asset in answer to a GET or a HEAD, honouring conditional
+// requests so that a documentation page reloaded repeatedly transfers its body
+// once, and sending the compressed form to a client that accepts it. Every
+// other method is refused before this is called; see [App.refuseDocsMethod].
 func (as *asset) serve(w http.ResponseWriter, r *http.Request) {
-	if !isReadMethod(r.Method) {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	body, etag := as.body, as.etag
 	compressed := as.gzip != nil && negotiateEncoding(r.Header.Get("Accept-Encoding")) == "gzip"
 	if compressed {

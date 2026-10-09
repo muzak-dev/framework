@@ -457,6 +457,15 @@ func (a *App) serveMount(c *Context, m *mountPoint) {
 		setIfAbsent(c.w.Header(), "Cache-Control", privateCacheControl)
 	}
 	m.handler.ServeHTTP(c.w, r)
+	// What the mount's providers acquired is released once the handler has
+	// returned without panicking, as a file mount's is once the file is served:
+	// the handler decided what to answer, so the request did not fail on the
+	// framework's account. A release that fails is reported as a handler's
+	// failure would be, which once the handler has written aborts the response.
+	// A panic is released with its failure by the recovery deferred above.
+	if err := c.settle(nil); err != nil {
+		a.fail(c, err)
+	}
 }
 
 // admit runs what a route of the same routers runs before its handler, in the

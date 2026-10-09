@@ -62,8 +62,12 @@ func TestRawHijackThroughTheResponseWriter(t *testing.T) {
 		body, _ := io.ReadAll(res.Body)
 		_ = res.Body.Close()
 		_ = conn.Close()
-		// Close waits for the handler, so every line it causes is written.
+		// Close does not wait for the handler of a hijacked connection, which
+		// net/http no longer tracks, so the access log line, written once the
+		// handler has returned, is waited for rather than assumed.
 		server.Close()
+		waitFor(t, func() bool { return strings.Contains(logs.String(), `"status":101`) },
+			"the access log line of the hijacked request")
 
 		if string(body) != "hi" {
 			t.Errorf("compressed=%v: body = %q, want the handler's own", compressed, body)

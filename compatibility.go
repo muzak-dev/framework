@@ -305,6 +305,9 @@ type docComparer struct {
 	// holds those not yet compared, in the order they were met.
 	pairs map[schemaPair]bool
 	queue []schemaPair
+	// admitsNull keeps whether each schema met so far admits null; see
+	// [docComparer.partAdmitsNull].
+	admitsNull map[*Schema]bool
 
 	// budget is what is left of the steps the comparison may take, and depth
 	// how deep the current walk into inline schemas is.
@@ -320,7 +323,7 @@ func newDocComparer(before, after *Document) *docComparer {
 	if after == nil {
 		after = &Document{}
 	}
-	c := &docComparer{old: before, cur: after, pairs: map[schemaPair]bool{}}
+	c := &docComparer{old: before, cur: after, pairs: map[schemaPair]bool{}, admitsNull: map[*Schema]bool{}}
 	if before.Components != nil {
 		c.oldSchemas, c.oldSchemes = before.Components.Schemas, before.Components.SecuritySchemes
 	}

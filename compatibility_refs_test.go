@@ -310,6 +310,28 @@ func TestPointerCycleInAGoDocument(t *testing.T) {
 	}
 }
 
+// TestPointerCycleThroughAnyOfInAGoDocument covers a Document built in Go
+// whose union holds itself as an alternative. Whether it admits null is asked
+// of every alternative in turn, and that question must end on a cycle too,
+// rather than recurse until the stack is exhausted, which kills the process.
+func TestPointerCycleThroughAnyOfInAGoDocument(t *testing.T) {
+	t.Parallel()
+	loop := func() *Schema {
+		s := &Schema{AnyOf: []*Schema{nil, compatStr()}}
+		s.AnyOf[0] = s
+		return s
+	}
+	assertAPIChanges(t, CompareDocuments(compatReadDoc(loop(), nil), compatReadDoc(loop(), nil)),
+		wantChange{Breaking, "comparison-incomplete", ""})
+	nested := func() *Schema {
+		s := &Schema{AnyOf: []*Schema{compatStr(), nil}}
+		s.AnyOf[1] = &Schema{AnyOf: []*Schema{s, {Type: "integer"}}}
+		return s
+	}
+	assertAPIChanges(t, CompareDocuments(compatAnswerDoc(nested(), nil), compatAnswerDoc(nested(), nil)),
+		wantChange{Breaking, "comparison-incomplete", ""})
+}
+
 type compatMoney struct {
 	Amount   float64 `json:"amount"`
 	Currency string  `json:"currency"`

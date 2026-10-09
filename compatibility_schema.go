@@ -249,20 +249,26 @@ func typeAdmitsNull(t any) bool {
 	return !typed || slices.Contains(names, "null")
 }
 
-// partAdmitsNull reports whether one conjunct admits null.
-func partAdmitsNull(s *Schema) bool {
-	if !typeAdmitsNull(s.Type) || (s.Enum != nil && !slices.Contains(s.Enum, nil)) {
-		return false
+// partAdmitsNull reports whether one conjunct admits null. The answer for each
+// schema is worked out once and kept, so a union that many positions reach
+// costs as much as it is large once rather than once per position. While it is
+// being worked out a schema is taken not to admit null, so that a Document
+// built in Go whose union holds itself as an alternative gets an answer
+// instead of recursing until the stack runs out, which no recover survives.
+func (c *docComparer) partAdmitsNull(s *Schema) bool {
+	if known, ok := c.admitsNull[s]; ok {
+		return known
 	}
-	if len(s.AnyOf) == 0 {
-		return true
+	c.admitsNull[s] = false
+	admits := typeAdmitsNull(s.Type) && (s.Enum == nil || slices.Contains(s.Enum, nil))
+	if admits && len(s.AnyOf) > 0 {
+		_, wrapped := nullableCore(s)
+		admits = wrapped || slices.ContainsFunc(s.AnyOf, func(alternative *Schema) bool {
+			return alternative == nil || c.partAdmitsNull(alternative)
+		})
 	}
-	if _, wrapped := nullableCore(s); wrapped {
-		return true
-	}
-	return slices.ContainsFunc(s.AnyOf, func(alternative *Schema) bool {
-		return alternative == nil || partAdmitsNull(alternative)
-	})
+	c.admitsNull[s] = admits
+	return admits
 }
 
 // schemaView is what a position holds, gathered from everything it reaches
@@ -295,7 +301,7 @@ func (c *docComparer) view(schemas map[string]*Schema, nodes []*Schema) schemaVi
 		}
 		seen[s] = true
 		v.parts = append(v.parts, s)
-		if !core && !partAdmitsNull(s) {
+		if !core && !c.partAdmitsNull(s) {
 			v.nullable = false
 		}
 		if s.Ref != "" {

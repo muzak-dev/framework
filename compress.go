@@ -507,7 +507,13 @@ func (w *compressWriter) flushHeld() error {
 	if w.compressor != nil {
 		_, err = w.compressor.Write(held)
 	} else {
-		_, err = w.ResponseWriter.Write(held)
+		// These are the handler's own bytes, held while the decision was
+		// pending and passed on unchanged, as Write passes on b. gosec's G705
+		// reaches them only through the receiver: its call graph counts every
+		// io.Writer.Write in the program as a caller and reads the bytes that
+		// call writes as this receiver, so whether it reports the line depends
+		// on which of those callers it happens to visit first.
+		_, err = w.ResponseWriter.Write(held) //nolint:gosec // G705: relays the handler's own body unchanged, adding nothing from the request
 	}
 	return err
 }

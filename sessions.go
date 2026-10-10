@@ -460,7 +460,9 @@ func (m *sessionManager) storeContext(c *Context, write bool) (context.Context, 
 // a shared cache keep it, whether that was set before the cookie was added or
 // after it, since a cache that stored it would hand one user's session to the
 // next; a response from a handler that read the session varies on Cookie and
-// is marked the same way unless the handler set its own.
+// is marked the same way unless the handler set its own, or is an event
+// stream or a WebSocket, which keep theirs. An event stream's no-transform
+// survives being made private.
 //
 // A handler that writes its response itself, through
 // [Context.ResponseWriter] or by returning a stream, has its session written
@@ -555,9 +557,13 @@ func (c *Context) Session() *Session {
 	s := c.app.sessions.load(c)
 	c.session = s
 	// What the handler answers now depends on who asked, which a cache only
-	// knows by the cookie; see [Session].
+	// knows by the cookie; see [Session]. An event stream and a WebSocket
+	// are left to their own Cache-Control, as they are behind a guard; see
+	// [Route.isGuarded].
 	c.w.varyOn("Cookie")
-	setIfAbsent(c.w.Header(), "Cache-Control", privateCacheControl)
+	if !c.endsItsOwnResponse() {
+		setIfAbsent(c.w.Header(), "Cache-Control", privateCacheControl)
+	}
 	// So a response the handler writes itself carries the session too.
 	c.w.commitHook = c
 	return s
@@ -1080,11 +1086,19 @@ func (s *Session) setCookie(cookie *http.Cookie) error {
 }
 
 // keepPrivate marks a response "Cache-Control: private, no-cache" unless its
-// Cache-Control already keeps it out of shared caches.
+// Cache-Control already keeps it out of shared caches. A no-transform it
+// carried is kept: it is an event stream's, sent so that no proxy holds the
+// events back to compress them.
 func keepPrivate(header http.Header) {
-	if !keepsPrivate(header.Values("Cache-Control")) {
-		header.Set("Cache-Control", privateCacheControl)
+	values := header.Values("Cache-Control")
+	if keepsPrivate(values) {
+		return
 	}
+	value := privateCacheControl
+	if hasCacheDirective(values, "no-transform") {
+		value += ", no-transform"
+	}
+	header.Set("Cache-Control", value)
 }
 
 // keepCookiePrivate keeps the response out of shared caches if the session
@@ -1120,15 +1134,23 @@ type cookieGuard http.Header
 func (g cookieGuard) beforeCommit(int) { keepPrivate(http.Header(g)) }
 
 // keepsPrivate reports whether a Cache-Control already keeps a response out
-// of shared caches, with a private or no-store directive. It is linear in the
-// header's length.
+// of shared caches, with a private or no-store directive.
 func keepsPrivate(values []string) bool {
+	return hasCacheDirective(values, "private", "no-store")
+}
+
+// hasCacheDirective reports whether a Cache-Control carries any of the named
+// directives, compared without regard to case. It is linear in the header's
+// length.
+func hasCacheDirective(values []string, names ...string) bool {
 	for _, value := range values {
 		for directive := range strings.SplitSeq(value, ",") {
 			name, _, _ := strings.Cut(directive, "=")
 			name = strings.TrimSpace(name)
-			if strings.EqualFold(name, "private") || strings.EqualFold(name, "no-store") {
-				return true
+			for _, want := range names {
+				if strings.EqualFold(name, want) {
+					return true
+				}
 			}
 		}
 	}

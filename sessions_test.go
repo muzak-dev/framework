@@ -823,6 +823,42 @@ func TestSessionCookieStaysPrivateWhateverFollows(t *testing.T) {
 	}
 }
 
+// TestSessionEventStreamKeepsNoTransform covers an event stream whose guard
+// reads the session, as one that signs its subscribers in does. The stream
+// keeps its own "no-cache, no-transform", as it does behind any guard, since
+// a proxy free to transform it may hold its events back to compress them;
+// renewed at the start of the stream, the session makes it private without
+// taking no-transform away.
+func TestSessionEventStreamKeepsNoTransform(t *testing.T) {
+	t.Parallel()
+	app, clock, _ := sessionTestApp(t, nil, func(app *App) {
+		app.SSE("/events", func(*Context, Empty, *SSEStream[string]) error { return nil },
+			WithDependencies(func(ctx *Context) error {
+				if _, ok := SessionGet[string](ctx.Session(), "v"); !ok {
+					return Unauthorized("sign in first")
+				}
+				return nil
+			}))
+	})
+	cookie := mustSessionCookie(t, sessionRequest(t, app, "POST", "/write?value=subscriber"))
+	rec := sessionRequest(t, app, "GET", "/events", cookie)
+	assertStatus(t, rec, http.StatusOK)
+	assertNoSessionCookie(t, rec)
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache, no-transform" {
+		t.Errorf("the event stream is sent with Cache-Control %q", got)
+	}
+	if !varyNames(rec.Header().Values("Vary"), "Cookie") {
+		t.Errorf("the event stream does not vary on Cookie: %q", rec.Header().Values("Vary"))
+	}
+	clock.advance(DefaultSessionIdleTimeout / 2)
+	rec = sessionRequest(t, app, "GET", "/events", cookie)
+	assertStatus(t, rec, http.StatusOK)
+	mustSessionCookie(t, rec)
+	if got := rec.Header().Get("Cache-Control"); got != "private, no-cache, no-transform" {
+		t.Errorf("the event stream that renewed the session is sent with Cache-Control %q", got)
+	}
+}
+
 // TestSessionWriteFailureSkipsBackgroundTasks covers a session that cannot
 // be saved after a handler succeeded: the request fails, as a release
 // failing would make it, and the work registered to follow a success does

@@ -11,7 +11,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -857,65 +856,76 @@ func TestWebSocketUpgradeRefusedAfterTheResponseStarted(t *testing.T) {
 	}
 }
 
-// smallSocketBuffer is the send and receive buffer a test sets on both ends
-// of a connection it means to fill, far below what it writes.
-const smallSocketBuffer = 64 << 10
+// stalledPeer accepts connections to a peer that has stopped reading: once a
+// write deadline is set, a write waits for it and then fails as a write to
+// such a peer does. It is how a test makes a response undeliverable on every
+// system alike, where filling the sockets' buffers depends on how large each
+// system lets them grow, which Windows grows on a loopback connection to take
+// mebibytes whole. A write with no deadline goes through, so a server that set
+// none would have its response delivered.
+type stalledPeer struct{ net.Listener }
 
-// smallSendBuffers accepts connections whose send buffer is
-// smallSocketBuffer, so that what a server writes past it waits on its peer.
-type smallSendBuffers struct{ net.Listener }
-
-func (l smallSendBuffers) Accept() (net.Conn, error) {
+func (l stalledPeer) Accept() (net.Conn, error) {
 	conn, err := l.Listener.Accept()
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.(*net.TCPConn).SetWriteBuffer(smallSocketBuffer); err != nil {
-		_ = conn.Close()
-		return nil, err
+	return &stalledConn{Conn: conn}, nil
+}
+
+// stalledConn is a connection stalledPeer accepted.
+type stalledConn struct {
+	net.Conn
+	mu       sync.Mutex
+	deadline time.Time
+}
+
+func (c *stalledConn) SetDeadline(t time.Time) error {
+	c.setWriteDeadline(t)
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *stalledConn) SetWriteDeadline(t time.Time) error {
+	c.setWriteDeadline(t)
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *stalledConn) setWriteDeadline(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadline = t
+}
+
+func (c *stalledConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	deadline := c.deadline
+	c.mu.Unlock()
+	if deadline.IsZero() {
+		return c.Conn.Write(p)
 	}
-	return conn, nil
+	time.Sleep(time.Until(deadline))
+	return 0, &net.OpError{Op: "write", Net: "tcp", Err: os.ErrDeadlineExceeded}
 }
 
 func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 	t.Parallel()
-	// The response is made far larger than the two sockets will buffer, and
-	// the client is made to look away until the server has closed the
-	// connection, so the handshake genuinely cannot be delivered. What matters
-	// is that the server gives up and closes rather than holding open a
-	// connection whose client will never hear back. Both sockets' buffers are
-	// set small, since the size a system chooses for them on its own is its
-	// own: Windows grows a loopback connection's to take four mebibytes whole.
-	const padding = 4 << 20
+	// The client stops reading, so the handshake cannot be delivered, and
+	// looks away until the server has closed the connection. What matters is
+	// that the server gives up within its write timeout and closes, rather
+	// than holding open a connection whose client will never hear back.
 	const writeTimeout = 20 * time.Millisecond
 
 	app := New(quietOptions())
-	app.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("X-Padding", strings.Repeat("a", padding))
-			next.ServeHTTP(w, r)
-		})
-	})
 	app.WS("/ws", wsEcho, WithWebSocket(WSOptions{WriteTimeout: writeTimeout}))
 	mustBuild(t, app)
 	server := httptest.NewUnstartedServer(app)
-	sockets := &openCountListener{Listener: smallSendBuffers{server.Listener}}
+	sockets := &openCountListener{Listener: stalledPeer{server.Listener}}
 	server.Listener = sockets
 	server.Start()
 	t.Cleanup(server.Close)
 
 	address := strings.TrimPrefix(server.URL, "http://")
-	// The receive buffer is set before the connection is made, since the
-	// window it offers is agreed then: set afterwards, Windows went on
-	// offering the window it had tuned the connection to.
-	dialer := net.Dialer{Control: func(_, _ string, raw syscall.RawConn) error {
-		var setErr error
-		if err := raw.Control(func(fd uintptr) { setErr = setReceiveBuffer(fd, smallSocketBuffer) }); err != nil {
-			return err
-		}
-		return setErr
-	}}
-	conn, err := dialer.Dial("tcp", address)
+	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		t.Fatalf("dialling: %v", err)
 	}
@@ -930,21 +940,19 @@ func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 		t.Fatalf("sending the handshake: %v", err)
 	}
 
-	// Nothing is read until the server has closed its end. Sleeping for a
-	// multiple of the write timeout instead was not enough on a loaded machine,
-	// where building the padded response alone can outlast the sleep: the
-	// client then read before the deadline was even set, and the handshake
-	// went out after all.
 	waitFor(t, func() bool { return sockets.accepted.Load() == 1 && sockets.open.Load() == 0 },
 		"the server to give up on the handshake and close")
 	// Reading to the end returns only because the server closed the
-	// connection, with whatever part of the response the socket held. Only a
+	// connection, with nothing of the response, which never left. Only a
 	// timeout means it is still open. A reset is the server's close too, and
 	// is not matched by its text, which differs on Windows.
-	_, err = io.ReadAll(conn)
+	body, err := io.ReadAll(conn)
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		t.Fatalf("reading what came back: %v", err)
+	}
+	if len(body) != 0 {
+		t.Errorf("the client received %q of a handshake the server could not send", body)
 	}
 }
 

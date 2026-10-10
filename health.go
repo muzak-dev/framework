@@ -646,12 +646,20 @@ func (c *healthChecker) run() *healthReport {
 // check runs one check on its own goroutine and reports what it returned. The
 // outcomes channel has room for every check, so a check that answers after
 // the run stopped waiting still returns rather than blocking.
+//
+// The check is marked free before its outcome is reported, not after. A run
+// returns as soon as the outcome arrives, and a probe that followed it at once
+// found the check still marked as running and reported it as failing, although
+// it had just passed.
 func (c *healthChecker) check(i int, outcomes chan<- healthOutcome) {
-	defer c.busy[i].Store(false)
 	check := c.checks[i]
 	ctx, cancel := context.WithTimeoutCause(context.Background(), check.Timeout, errHealthCheckTimeout)
 	defer cancel()
-	outcomes <- healthOutcome{index: i, err: c.call(ctx, check)}
+	err := func() error {
+		defer c.busy[i].Store(false)
+		return c.call(ctx, check)
+	}()
+	outcomes <- healthOutcome{index: i, err: err}
 }
 
 // call runs a check's function, turning a panic into a failure.

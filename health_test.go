@@ -565,6 +565,26 @@ func TestHealthFailureLoggingFollowsChangesOfState(t *testing.T) {
 	}
 }
 
+// A check that has returned is free again by the time its run reports, so a
+// probe that follows at once runs it rather than reporting it as still busy
+// with the run before. Marked free only after its outcome was sent, the check
+// was found still marked by about one run in forty under the race detector,
+// and the probe that found it answered 503 for a check that had just passed.
+func TestHealthCheckIsFreeOnceItsRunReports(t *testing.T) {
+	t.Parallel()
+	checker := newHealthChecker(HealthOptions{
+		Checks: []HealthCheck{{Name: "db", Check: func(context.Context) error { return nil }}},
+	}, slog.New(discardHandler{}))
+	for run := range 2000 {
+		if report := checker.run(); report.status != http.StatusOK {
+			t.Fatalf("run %d answered %d for a check that passes", run, report.status)
+		}
+		if checker.busy[0].Load() {
+			t.Fatalf("run %d reported while its check was still marked as running", run)
+		}
+	}
+}
+
 func TestHealthWaitingProbeGivesUpWithItsClient(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})

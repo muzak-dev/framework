@@ -348,18 +348,16 @@ func TestStopClosesOnlyItsOwnTransport(t *testing.T) {
 		t.Parallel()
 		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 		t.Cleanup(server.Close)
-		// get makes a request on the default transport and waits until its
-		// connection is idle, reporting whether it was one already idle.
-		get := func() bool {
-			reused := false
-			idle := make(chan struct{}, 1)
+		// get makes a request on the default transport and reports whether it
+		// was sent on a connection already idle, and whether its own
+		// connection was then kept idle. The answer has no body, and for one
+		// with none the transport parks the connection before RoundTrip
+		// returns, so both are known by then and nothing is waited for.
+		get := func() (reused, parked bool) {
+			var gotReused, gotParked atomic.Bool
 			trace := &httptrace.ClientTrace{
-				GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
-				PutIdleConn: func(err error) {
-					if err == nil {
-						idle <- struct{}{}
-					}
-				},
+				GotConn:     func(info httptrace.GotConnInfo) { gotReused.Store(info.Reused) },
+				PutIdleConn: func(err error) { gotParked.Store(err == nil) },
 			}
 			req, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace), http.MethodGet, server.URL, nil)
 			if err != nil {
@@ -371,14 +369,20 @@ func TestStopClosesOnlyItsOwnTransport(t *testing.T) {
 			}
 			_, _ = io.Copy(io.Discard, res.Body)
 			_ = res.Body.Close()
-			select {
-			case <-idle:
-			case <-time.After(10 * time.Second):
-				t.Fatal("the connection never became idle")
-			}
-			return reused
+			return gotReused.Load(), gotParked.Load()
 		}
-		get()
+		// The transport keeps a connection only once it has heard that the
+		// request was written, and gives up on hearing it after 50
+		// milliseconds, which a loaded machine running the race detector can
+		// take. So a connection is asked for until one is kept.
+		for attempt := 1; ; attempt++ {
+			if _, parked := get(); parked {
+				break
+			}
+			if attempt == 100 {
+				t.Fatal("the default transport never kept a connection idle")
+			}
+		}
 		opts, _ := testOptions(server.URL)
 		opts.Client = &http.Client{Timeout: time.Minute}
 		e, err := New(opts)
@@ -388,7 +392,7 @@ func TestStopClosesOnlyItsOwnTransport(t *testing.T) {
 		if err := e.Stop(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if !get() {
+		if reused, _ := get(); !reused {
 			t.Error("Stop closed the idle connections of http.DefaultTransport")
 		}
 	})

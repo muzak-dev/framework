@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // The headers W3C Trace Context carries a trace in, spelled as the
@@ -149,9 +150,7 @@ func (sc SpanContext) Traceparent() string {
 func newTraceID() TraceID {
 	var id TraceID
 	for !id.IsValid() {
-		// crypto/rand.Read never returns an error: on the platforms Go
-		// supports it either fills the buffer or ends the program.
-		_, _ = rand.Read(id[:])
+		drawID(id[:])
 	}
 	return id
 }
@@ -160,9 +159,40 @@ func newTraceID() TraceID {
 func newSpanID() SpanID {
 	var id SpanID
 	for !id.IsValid() {
-		_, _ = rand.Read(id[:])
+		drawID(id[:])
 	}
 	return id
+}
+
+// idSource holds bytes drawn from crypto/rand for the identifiers still to be
+// handed out, and left counts those not yet handed out, from the end of buf.
+//
+// A request that is traced draws two identifiers. Drawing each from
+// crypto/rand directly cost a call into the operating system apiece and,
+// under the race detector, moved every identifier to the heap, since the
+// instrumented crypto/rand.Read holds on to the slice it fills as far as the
+// compiler can tell. Copying identifiers out of a buffer that lives as long
+// as the program costs neither, and one draw serves thirty-two traces.
+var idSource struct {
+	mu   sync.Mutex
+	buf  [512]byte
+	left int
+}
+
+// drawID fills dst, which is at most 512 bytes, with bytes from crypto/rand
+// that no other identifier was given.
+func drawID(dst []byte) {
+	idSource.mu.Lock()
+	defer idSource.mu.Unlock()
+	if idSource.left < len(dst) {
+		// crypto/rand.Read never returns an error: on the platforms Go
+		// supports it either fills the buffer or ends the program.
+		_, _ = rand.Read(idSource.buf[:])
+		idSource.left = len(idSource.buf)
+	}
+	start := len(idSource.buf) - idSource.left
+	copy(dst, idSource.buf[start:start+len(dst)])
+	idSource.left -= len(dst)
 }
 
 // extractTraceContext reads the trace a request says it belongs to.

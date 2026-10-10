@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -243,6 +244,36 @@ func TestGeneratedIDsAreUniqueAndValid(t *testing.T) {
 	}
 	if len(traces) != draws || len(spans) != draws {
 		t.Fatalf("drew %d distinct trace ids and %d distinct span ids out of %d", len(traces), len(spans), draws)
+	}
+}
+
+// TestDrawnIDsAreDistinctAcrossGoroutines draws trace and span identifiers
+// from many goroutines at once, across many refills of the buffer they come
+// from, and finds no two the same: each is given bytes no other was.
+func TestDrawnIDsAreDistinctAcrossGoroutines(t *testing.T) {
+	t.Parallel()
+	const workers, each = 8, 400
+	traces := make([][]TraceID, workers)
+	spans := make([][]SpanID, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for range each {
+				traces[w] = append(traces[w], newTraceID())
+				spans[w] = append(spans[w], newSpanID())
+			}
+		})
+	}
+	wg.Wait()
+	seenTraces := make(map[TraceID]bool, workers*each)
+	seenSpans := make(map[SpanID]bool, workers*each)
+	for w := range workers {
+		for i := range each {
+			if seenTraces[traces[w][i]] || seenSpans[spans[w][i]] {
+				t.Fatalf("an identifier was drawn twice: %x %x", traces[w][i], spans[w][i])
+			}
+			seenTraces[traces[w][i]], seenSpans[spans[w][i]] = true, true
+		}
 	}
 }
 

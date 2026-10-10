@@ -61,8 +61,8 @@ func eraOf(version string) mcpEra {
 }
 
 // Headers of the Streamable HTTP transport, as an application lists them in
-// [CORSOptions] for a browser-based MCP client: AllowHeaders for both, and
-// ExposeHeaders for the session identifier, which a browser otherwise hides
+// [CORSOptions] for a browser-based MCP client: AllowedHeaders for both, and
+// ExposedHeaders for the session identifier, which a browser otherwise hides
 // from the page.
 const (
 	// HeaderMCPSessionID carries the session a legacy client opened with

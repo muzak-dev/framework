@@ -25,9 +25,11 @@ type Options struct {
 	// status is not a success, carrying the status and the decoded body.
 	//
 	// Path parameters are escaped segment by segment, and one that is empty,
-	// "." or "..", or that holds a "/" outside a trailing {name...} parameter,
-	// is refused with a TypeError rather than sent to another route, as the
-	// Go client refuses it. The path's own text is held to the same: a
+	// "." or "..", or that holds a "/", is refused with a TypeError rather
+	// than sent to another route, as the Go client refuses it. A trailing
+	// {name...} wildcard is held to one segment too, since the document
+	// writes it as an ordinary parameter; send a value with "/" in it with a
+	// request of your own. The path's own text is held to the same: a
 	// character URL would read as the start of a query or a fragment, or as
 	// a separator, is escaped, and a path holding a dot segment, which URL
 	// resolves, out of the baseUrl if there are enough of them, makes

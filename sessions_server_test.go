@@ -263,6 +263,51 @@ func TestServerSessionSavedAfterItEndedIsForgotten(t *testing.T) {
 	}
 }
 
+// TestServerSessionRegeneratedAfterItEndedIsNotRecreated covers a request
+// that regenerates a session another request destroyed while it ran, a change
+// of privilege in one tab racing a sign-out in another. Regenerating creates
+// a new entry rather than updating the old one, so nothing about the write
+// itself shows that the old one is gone, and the values it carries over are
+// the destroyed session's: written under a new identifier, they would undo
+// the sign-out. The request writes nothing instead, and a store that cannot
+// say whether the session still exists fails it.
+func TestServerSessionRegeneratedAfterItEndedIsNotRecreated(t *testing.T) {
+	t.Parallel()
+	for _, outage := range []bool{false, true} {
+		release := make(chan struct{})
+		loaded := make(chan struct{})
+		app, store, _, _ := serverSessionApp(t, func(app *App) {
+			app.Post("/slow-regenerate", func(ctx *Context, _ Empty) (sessionOut, error) {
+				s := ctx.Session()
+				close(loaded)
+				<-release
+				return readSession(s), s.Regenerate()
+			})
+		})
+		cookie := mustSessionCookie(t, sessionRequest(t, app, "POST", "/write?value=signed-in"))
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() { done <- sessionRequest(t, app, "POST", "/slow-regenerate", cookie) }()
+		<-loaded
+		sessionRequest(t, app, "POST", "/destroy", cookie)
+		if outage {
+			store.mu.Lock()
+			store.failLoad = errors.New("store down")
+			store.mu.Unlock()
+		}
+		close(release)
+		rec := <-done
+		if outage {
+			assertStatus(t, rec, http.StatusInternalServerError)
+		} else {
+			assertStatus(t, rec, http.StatusOK)
+		}
+		assertNoSessionCookie(t, rec)
+		if n := store.Len(); n != 0 {
+			t.Errorf("with outage %v, the store holds %d sessions after the only one was destroyed", outage, n)
+		}
+	}
+}
+
 // TestServerSessionLoadFailure covers a store that cannot be read: the
 // request proceeds with an empty session that refuses changes, so the user's
 // real session is not overwritten by an empty one, the failure is logged

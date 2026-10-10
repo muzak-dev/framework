@@ -962,11 +962,29 @@ func (s *Session) write() error {
 // A fresh session, a new one or one regenerated, is created under a new
 // identifier, after the entry it replaces is deleted; an identifier a client
 // sent is never adopted for a new session, which is what would make fixation
-// possible. Any other is updated in place.
+// possible. A regenerated one is first looked up, and is not written when
+// another request has ended it. Any other is updated in place.
 func (s *Session) persist(record []byte, ttl time.Duration, fresh bool) (string, bool, error) {
 	m := s.m
 	if fresh {
 		if s.stored != "" {
+			if s.id != "" && !s.destroyed {
+				// Regenerating carries the values over to an entry that is
+				// created, not updated, so nothing in the write itself would
+				// show that another request ended the session meanwhile; only
+				// asking does. A deletion landing between the two is the one
+				// race left, and it is as short as the store is quick.
+				ctx, cancel := m.storeContext(s.c, true)
+				_, found, err := m.store.Load(ctx, s.stored)
+				cancel()
+				if err != nil {
+					return "", false, fmt.Errorf("muzak: the session could not be saved: %w", err)
+				}
+				if !found {
+					s.forget()
+					return "", false, nil
+				}
+			}
 			if err := s.storeDelete(s.stored); err != nil {
 				return "", false, err
 			}

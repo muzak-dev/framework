@@ -162,6 +162,30 @@ func FuzzEndpointRoundTrip(f *testing.F) {
 	})
 }
 
+// FuzzReadDisposition holds the file name a call reads from another server's
+// Content-Disposition to one clean name, whatever the header says, and to
+// the name a Muzak application meant when it is one that sent the header.
+func FuzzReadDisposition(f *testing.F) {
+	for _, seed := range []string{
+		`attachment; filename="../../etc/passwd"`, `inline; filename*=UTF-8''a%E2%80%AEb%0D%0A.txt`,
+		`attachment; filename="a\\b"; filename*=UTF-8''%2F%2F`, `attachment`, `inline; filename=""`, "\xff",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, header string) {
+		for _, value := range []string{header, contentDisposition(true, header)} {
+			name, _ := readDisposition(http.Header{"Content-Disposition": {value}})
+			if name != cleanFilename(name) || strings.ContainsAny(name, "/\\") || len(name) > maxDispositionName {
+				t.Fatalf("%q reads as %q, which is not one clean name", value, name)
+			}
+		}
+		if name, download := readDisposition(http.Header{"Content-Disposition": {contentDisposition(true, header)}}); !download ||
+			name != cleanFilename(header) {
+			t.Fatalf("the name %q was sent and read back as %q, %v", header, name, download)
+		}
+	})
+}
+
 // equalFuzzIn compares what arrived with what was sent.
 func equalFuzzIn(got, want fuzzIn) bool {
 	return got.ID == want.ID && got.Rest == want.Rest && got.Q == want.Q && slices.Equal(got.QS, want.QS) &&

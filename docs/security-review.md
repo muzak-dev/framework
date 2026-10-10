@@ -772,6 +772,78 @@ Windows-only paths of static serving (backslash separators, 8.3 short names,
 `os.Root` on NTFS) run anywhere. Aliasing by trailing dots and alternate data
 streams, listed above as not established, still has no test of its own.
 
+## Sixth review - 2026-10-10
+
+A review of everything 0.3.0 adds, done before the release rather than after
+it. Each feature was written test first and then given to a reviewer whose
+only job was to break it: dependencies, operations and mounting; responses and
+the outbound client; observability and API comparison; authentication;
+sessions and cross-origin protection; typed endpoints and TypeScript
+generation; and the MCP endpoint and the `muzak` command. The reviewers
+attacked the new code from outside (hostile clients, hostile servers a client
+calls, hostile documents a generator reads) and checked that every hook the
+features added to the request path costs nothing when it is off. Each finding
+below was reproduced by a test that failed before the fix. None reached a
+release, so none needs a migration; they are recorded because what a reviewer
+found is the best guide to where the next one will look.
+
+| # | Severity | Finding | Feature | Status |
+|---|---|---|---|---|
+| W1 | Medium | The outbound client's address policy read only the /48 layout of the local-use NAT64 block `64:ff9b:1::/48`, so `64:ff9b:1:abcd::a9fe:a9fe`, which a translator with a /96 prefix delivers to 169.254.169.254, passed as a public address and reached a cloud metadata service. With `AllowPrivateNetworks`, the IPv4-translated form `::ffff:0:a9fe:a9fe` (SIIT) reached it too | `NewClient` | Fixed (block refused as private; every layout read; the translated form read as NAT64 is) |
+| W2 | Medium | A JWKS fetched over https that redirected to plain http was accepted, so anyone on the path of the second request could replace the keys and sign their own tokens | `JWTBearer` | Fixed (a key set is used only if it arrived over https, or http to loopback) |
+| W3 | Medium | A route declared with `CaptureBody` read and buffered the body before its verifying scheme judged the credential, so an anonymous client could make the server hold a body per request | `WithSecurity` | Fixed (requirements judged first) |
+| W4 | Medium | With a server-side store, a request that read a session before another request destroyed it (signing out) wrote it back as a new session with the old values on its next change, signing the user back in; `Regenerate` did the same under a new identifier | Sessions | Fixed (forgotten when the store reports it gone; Regenerate checks first) |
+| W5 | Medium | A response carrying the session cookie was made private only when the cookie was added, so a handler setting `Cache-Control: public` after `Save`, an error renderer, or a 416 from a file range (net/http drops Cache-Control) let a shared cache hand one user's session to the next client | Sessions | Fixed (made private again when the response is committed) |
+| W6 | Medium | `StripPrefix` mounts rebuilt the request, and the multipart temporary files a mounted handler parsed were never removed, so repeated uploads filled the disk | `Mount` | Fixed |
+| W7 | Medium | A typed endpoint whose input decodes itself was marshalled whole, so its header and cookie fields, an `Authorization` among them, were written into a JSON body that is logged and kept | `Endpoint.Call` | Fixed (written from its body members alone) |
+| W8 | Medium | The generated TypeScript client joined `baseUrl` and the path's static text unescaped, so a document someone else wrote could send `options.headers`, credentials included, to `?`, `#`, `\` or `..` targets outside the base path | `tsgen` | Fixed (static text escaped; dot segments refused) |
+| W9 | Medium | A handler mount let the client choose the method recorded for a span and a metric, so one client could mint unbounded label values in a metrics backend | Observer, tracing | Fixed (`_OTHER` unless a route registered the method) |
+| W10 | Medium | The OTLP exporter held a span's attribute values without counting them against its memory bound, and a collector answering `Retry-After: 0` was retried with no backoff | `otlp` | Fixed (every value counted; Retry-After never shortens backoff) |
+| W11 | Low | A document built to be expensive made `CompareDocuments` and `tsgen` quadratic, a self-referencing `anyOf` overflowed the stack, and locations could grow without bound | Comparison, `tsgen` | Fixed (charged reads, linear generation, cycle check, report caps) |
+| W12 | Low | A hostile server's `Content-Disposition` file name (`../../.ssh/authorized_keys`, CR, LF, NUL, bidi controls) reached `Bytes.Filename` and `Stream.Filename` as sent | `Endpoint.Call` | Fixed (cleaned as the server cleans its own) |
+| W13 | Low | A client's `Propagate` could overwrite a header the input bound, and a body member with a default that its json tag omits arrived as the default, so the request sent was not the one written | `Endpoint.Call` | Fixed (both refused with `ErrCallRefused`) |
+| W14 | Low | `ReadDocument` quoted locations with terminal control characters raw, which a `muzak diff` of someone else's document printed | `ReadDocument` | Fixed (escaped) |
+| W15 | Low | A `Stream` under `Compress` could run past its declared `Length` | `Stream` | Fixed (aborted) |
+| W16 | Low | Session changes made after the response started were dropped silently, and an event stream whose guard read the session lost `no-transform` | Sessions | Fixed (warned; kept) |
+| W17 | Low | An MCP tool call compiled its own request plan, which missed W7 and W13: an input that decodes itself panicked on every call and a member its tag omits arrived as its default | MCP | Fixed (one plan for both) |
+| W18 | Low | A client could make the server log errors at will: a session store read, a rate limit count or a handler that failed with the request's own cancellation was logged at error level when the client hung up | Sessions, rate limit | Fixed (debug level; a store timeout is still an error) |
+| W19 | Low | A `CrossOriginProtection` bypass pattern of `/` or `POST /` turned the protection off for the whole application, and any pattern ending in `/` silently covered its subtree | Cross-origin protection | Fixed (`/` is a build error; a subtree is warned of) |
+| W20 | High | An MCP tool whose input bound the header, query parameter or cookie an API key scheme or the session reads let the model supply the credential: one client called a tool with another principal's key and was answered as them | MCP | Fixed (such a route cannot be a tool; build error) |
+| W21 | Medium | A 1 MiB tool call of empty list entries or `{}` rows was written out as a request of 370 to 705 MiB before the route refused it with 413; a route taking uploads allowed 32 MiB of empty parts | MCP | Fixed (written under the smaller of the route's and the endpoint's limits) |
+| W22 | Low | A request of a session revision carrying `Mcp-Method` and `Mcp-Name` was not held to them, so a gateway admitting tools by header could be told one tool while another ran | MCP | Fixed (400, -32020) |
+| W23 | Medium | `muzak dev` forwarded only SIGINT and SIGTERM, so closing the terminal or Ctrl-\ left the application running in its own process group, holding its port | `muzak dev` | Fixed (SIGHUP and SIGQUIT forwarded) |
+| W24 | Low | `muzak dev` pointed at a symbolic link watched nothing, and `muzak ts -o` created files 0644 whatever the umask | `muzak` | Fixed |
+
+**Residual.** Everything the reviews left is listed under **Known limits** in
+the 0.3.0 changelog, each with the reason. The ones with a security bearing:
+- A NAT64 translator using a network-specific prefix cannot be told apart
+  from a public IPv6 address; `DeniedNetworks` names it where a network has
+  one.
+- A 307 or 308 followed to another origin sends the body again without
+  credentials, as net/http does; with `AllowPrivateNetworks` that origin can
+  be another internal service.
+- `DefaultPropagate` sends the request id and trace context to every host a
+  client calls.
+- `FileResponse` serves an uploaded `.js` or `.css` under its real type, which
+  `script-src 'self'` trusts; uploads belong on another origin or under
+  `application/octet-stream`, since `Download` alone does not stop a page
+  loading one as a script.
+- With `ReportChecks`, health check names and outcomes are readable through
+  any host name, DNS rebinding included, since probes are answered before
+  `AllowedHosts`.
+- The default `TraceParentAccept` lets a client ask to be sampled.
+- An API key in a cookie is an ambient credential and needs
+  `CrossOriginProtection`; a stream or WebSocket outlives the token that
+  opened it unless `MaxLifetime` is set.
+- Two applications sharing one `SessionStore` share sessions.
+- An MCP tool call returns none of the route's response headers, and a route's
+  401 or 403 is an error result, so the endpoint itself is where the scopes
+  its tools need are enforced. A session opened without credentials is bound
+  to nobody, and an unguarded endpoint can be flooded with sessions; guard or
+  rate-limit it.
+- A wildcard argument can spell a path that `App.Use` middleware or the
+  documentation answers, which runs before the result is refused.
+
 ---
 
 ## One caveat about this review's process

@@ -9,6 +9,8 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-10
+
 ### Fixed
 
 - **`otlp.Exporter.Stop` makes a retry its deadline can still reach.** A

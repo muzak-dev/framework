@@ -66,7 +66,7 @@ func testConsole(dir string) (*console, *syncBuffer, *syncBuffer) {
 		signals: func() (<-chan os.Signal, func()) {
 			return make(chan os.Signal), func() {}
 		},
-		version:      "v0.3.0",
+		version:      "v0.3.1",
 		fetchTimeout: 10 * time.Second,
 	}, stdout, stderr
 }
@@ -203,7 +203,7 @@ func TestUnknownFlagsAreUsageErrors(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	t.Parallel()
-	want := "muzak v0.3.0 (" + runtime.Version() + " " + runtime.GOOS + "/" + runtime.GOARCH + ")\n"
+	want := "muzak v0.3.1 (" + runtime.Version() + " " + runtime.GOOS + "/" + runtime.GOARCH + ")\n"
 	for _, args := range [][]string{{"version"}, {"-version"}, {"--version"}} {
 		r := runIn(t, t.TempDir(), args...)
 		r.expect(t, exitOK)

@@ -80,7 +80,7 @@ func TestNewScaffoldsTheProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "module example.com/shop\n\ngo 1.27.0\n\nrequire muzak.dev/framework v0.3.0\n"; string(gomod) != want {
+	if want := "module example.com/shop\n\ngo 1.27.0\n\nrequire muzak.dev/framework v0.3.1\n"; string(gomod) != want {
 		t.Errorf("go.mod is\n%s\nwant\n%s", gomod, want)
 	}
 	main, err := os.ReadFile(filepath.Join(dir, "cmd", "server", "main.go"))

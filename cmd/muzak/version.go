@@ -17,11 +17,11 @@ const frameworkModule = "muzak.dev/framework"
 // creates requires it whenever the binary records no release of its own. The
 // release that adds a version to CHANGELOG.md changes it too, and a test
 // fails when it falls behind the newest one there.
-const releaseVersion = "v0.3.0"
+const releaseVersion = "v0.3.1"
 
 // frameworkVersion returns the version a new project requires: the release
 // the go command recorded when it built this binary, as
-// "go install muzak.dev/framework/cmd/muzak@v0.3.0" does, and releaseVersion
+// "go install muzak.dev/framework/cmd/muzak@v0.3.1" does, and releaseVersion
 // for any other build. A local build records "(devel)", or a pseudo-version
 // naming a commit that may never have been pushed, or one marked +dirty, and
 // a go.mod requiring any of those would not resolve for anyone else.

@@ -121,11 +121,15 @@ func TestWebSocketSlotIsHeldWhileACloseWaitsForAStalledWriter(t *testing.T) {
 	app := New(opts)
 	big := make([]byte, 4<<20)
 	app.WS("/ws", func(ctx *Context, _ Empty, conn *WSConn) error {
+		// The writer outlives the handler, so it is given the request's
+		// context before the handler returns: the *Context goes back to its
+		// pool when the handler does, and is not the writer's to read after.
+		request := ctx.Context()
 		go func() {
-			for conn.WriteBinary(ctx.Context(), big) == nil {
+			for conn.WriteBinary(request, big) == nil {
 			}
 		}()
-		_, _, _ = conn.Read(ctx.Context())
+		_, _, _ = conn.Read(request)
 		return nil
 	}, WithWebSocket(WSOptions{WriteTimeout: 2 * time.Second}))
 	mustBuild(t, app)

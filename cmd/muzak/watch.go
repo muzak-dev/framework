@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -85,13 +86,13 @@ func newWatcher(root, extensions, skip string, limit int) (*watcher, error) {
 // system, or at once for an empty name, which skips nothing; it costs one
 // resolution per element of the name.
 func resolveLinks(name string) string {
-	if resolved, err := filepath.EvalSymlinks(name); err == nil {
-		return resolved
-	}
-	if parent := filepath.Dir(name); name != "" && parent != name {
+	resolved, err := filepath.EvalSymlinks(name)
+	if parent := filepath.Dir(name); err != nil && name != "" && parent != name {
 		return filepath.Join(resolveLinks(parent), filepath.Base(name))
 	}
-	return name
+	// EvalSymlinks returns nothing with its error, so a name it could not
+	// resolve is kept as it is.
+	return cmp.Or(resolved, name)
 }
 
 // prime records the tree as it is, which is what the first poll compares with.

@@ -189,5 +189,5 @@ func writeFileAtomic(name string, data []byte) error {
 // perm would ignore the umask.
 func createBeside(name string, perm os.FileMode) (*os.File, error) {
 	tmp := filepath.Join(filepath.Dir(name), "."+filepath.Base(name)+"."+rand.Text()+".tmp")
-	return os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
+	return os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm) //nolint:gosec // beside the file the command line named, created exclusively
 }

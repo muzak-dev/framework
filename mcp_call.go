@@ -104,14 +104,19 @@ func (s *mcpServer) compileTool(rt *Route) (*mcpTool, []error) {
 	// A call's body is written under the limit the route reads one under, so
 	// that a few bytes of arguments, a list of empty strings or empty objects,
 	// are not written as a body hundreds of times their size only for the
-	// route to refuse it; see [boundedBuffer]. A route that removed its limit
-	// is held to the endpoint's, which its arguments came in under.
-	t.maxBody = rt.maxBodySize
+	// route to refuse it; see [boundedBuffer]. It is held to the endpoint's
+	// limit as well, which its arguments came in under: a route that takes
+	// uploads reads 32 MiB by default, and a list of empty files is a part
+	// each, with a header map built for every one on the way to the limit.
+	// Files are sent as base64, a third larger than the body they make, so no
+	// call whose message fit is refused for its files.
+	t.maxBody = mcpMessageLimit(s.post)
+	routeLimit := rt.maxBodySize
 	if len(rt.plan.files) > 0 {
-		t.maxBody = rt.maxUploadSize
+		routeLimit = rt.maxUploadSize
 	}
-	if t.maxBody <= 0 {
-		t.maxBody = mcpMessageLimit(s.post)
+	if routeLimit > 0 && routeLimit < t.maxBody {
+		t.maxBody = routeLimit
 	}
 	for i, err := range errs {
 		errs[i] = fmt.Errorf("%w; it is chosen as an MCP tool, and a tool call writes the input as a request as Endpoint.Call does, "+

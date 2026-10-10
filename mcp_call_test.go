@@ -610,10 +610,12 @@ type wideRowsIn struct {
 // as a body larger than its route reads, before the body is written out: a
 // list of empty strings is a form part each, and a list of empty objects a
 // struct each with every member, hundreds of times the bytes the arguments
-// took. The route's limit holds, MaxUploadSize for files, and a route that
-// removed its limit is held to the endpoint's, which the arguments came in
-// under. The route never runs; TestCallBodyLimitBoundsTheWork shows the
-// refusal costs no more than the limit.
+// took. The route's limit holds, MaxUploadSize for files, and so does the
+// endpoint's, which the arguments came in under, for a route that removed its
+// limit or reads more, as one taking uploads does by default; a file a message
+// carries in base64 is smaller written out, so it fits. The route never runs;
+// TestCallBodyLimitBoundsTheWork shows the refusal costs no more than the
+// limit.
 func TestMCPCallRequestIsBounded(t *testing.T) {
 	const routeLimit, endpointLimit = 64 << 10, 512 << 10
 	var ran atomic.Int32
@@ -627,6 +629,13 @@ func TestMCPCallRequestIsBounded(t *testing.T) {
 		muzak.MCPTool())
 	app.Post("/upload", func(*muzak.Context, listFilesIn) (shopItem, error) { ran.Add(1); return shopItem{}, nil },
 		muzak.MaxUploadSize(routeLimit), muzak.MCPTool())
+	var uploaded atomic.Int64
+	app.Post("/files", func(_ *muzak.Context, in listFilesIn) (shopItem, error) {
+		for _, doc := range in.Docs {
+			uploaded.Add(int64(len(doc)))
+		}
+		return shopItem{}, nil
+	}, muzak.MCPTool())
 	app.Post("/rows", func(*muzak.Context, wideRowsIn) (shopItem, error) { ran.Add(1); return shopItem{}, nil },
 		muzak.MaxBodySize(routeLimit), muzak.MCPTool())
 	m := newMCPClient(t, app)
@@ -648,6 +657,7 @@ func TestMCPCallRequestIsBounded(t *testing.T) {
 		{"post_form", map[string]any{"form": map[string]any{"tags": list("", entries)}}, routeLimit},
 		{"post_unlimited", map[string]any{"form": map[string]any{"tags": list("", entries)}}, endpointLimit},
 		{"post_upload", map[string]any{"form": map[string]any{"docs": list("", entries)}}, routeLimit},
+		{"post_files", map[string]any{"form": map[string]any{"docs": list("", entries)}}, endpointLimit},
 		{"post_rows", map[string]any{"body": map[string]any{"rows": list(map[string]any{}, entries)}}, routeLimit},
 		// Under the limit as arguments, and over it written out.
 		{"post_rows", map[string]any{"body": map[string]any{"rows": list(map[string]any{}, 2000)}}, routeLimit},
@@ -659,8 +669,16 @@ func TestMCPCallRequestIsBounded(t *testing.T) {
 		}
 		mustContain(t, envelope.Error.Message, fmt.Sprintf("the arguments make a request body larger than the %d bytes this operation accepts", call.limit))
 	}
-	if ran.Load() != 0 {
+	if ran.Load() != 0 || uploaded.Load() != 0 {
 		t.Fatalf("a route ran %d times for a body it would not read", ran.Load())
+	}
+	// A file as large as a message can carry is sent whole.
+	file := bytes.Repeat([]byte{0xff}, endpointLimit*3/4-1024)
+	if got := m.call("post_files", map[string]any{"form": map[string]any{"docs": []string{base64.StdEncoding.EncodeToString(file)}}}); got.IsError {
+		t.Fatalf("a file that fit the message: %s", got.raw)
+	}
+	if uploaded.Load() != int64(len(file)) {
+		t.Fatalf("the route received %d bytes of a %d byte file", uploaded.Load(), len(file))
 	}
 }
 

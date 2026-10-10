@@ -30,10 +30,13 @@ func denyEveryone(t *testing.T, name, rights string) {
 	t.Cleanup(func() { _ = exec.Command("icacls", name, "/remove:d", "*S-1-1-0").Run() })
 }
 
-// denyCreate keeps anything from being created in dir.
+// denyCreate keeps anything from being created in dir, by denying the rights
+// to add a file and a subdirectory. The generic write right is not denied: it
+// carries the right to wait on the directory, which every open of it asks
+// for, so the directory could not then be listed either.
 func denyCreate(t *testing.T, dir string) {
 	t.Helper()
-	denyEveryone(t, dir, "W")
+	denyEveryone(t, dir, "WD,AD")
 }
 
 // denyExamine keeps entry, in dir, from being examined at all: neither its own

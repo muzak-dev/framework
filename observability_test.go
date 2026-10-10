@@ -61,6 +61,27 @@ func observedApp(t *testing.T, opts AppOptions) (*App, *observations) {
 	return app, observer
 }
 
+// TestObserverMeasuresWhatARequestTakes reports the duration of a request
+// that takes fifty milliseconds as at least half that, which a clock that
+// ticks as seldom as every 15.6 milliseconds, as Windows' does, still
+// measures, and as no more than the test saw it take.
+func TestObserverMeasuresWhatARequestTakes(t *testing.T) {
+	t.Parallel()
+	const pause = 50 * time.Millisecond
+	app, observer := observedApp(t, quietOptions())
+	app.Get("/slow", func(*Context, Empty) (itemOut, error) {
+		time.Sleep(pause)
+		return itemOut{}, nil
+	})
+	mustBuild(t, app)
+	began := time.Now()
+	assertStatus(t, do(t, app, http.MethodGet, "/slow"), http.StatusOK)
+	took := time.Since(began)
+	if got := observer.only(t).Duration; got < pause/2 || got > took {
+		t.Errorf("Duration = %v for a request that slept %v and took %v", got, pause, took)
+	}
+}
+
 func TestObserverIsCalledOncePerRequest(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -94,15 +115,22 @@ func TestObserverIsCalledOncePerRequest(t *testing.T) {
 			app, observer := observedApp(t, quietOptions())
 			mustBuild(t, app)
 			var rec *httptest.ResponseRecorder
+			began := time.Now()
 			if tc.body != "" {
 				rec = do(t, app, tc.method, tc.target, tc.body)
 			} else {
 				rec = do(t, app, tc.method, tc.target)
 			}
+			took := time.Since(began)
 			assertStatus(t, rec, tc.want.Status)
 			got := observer.only(t)
-			if got.Duration <= 0 {
-				t.Errorf("Duration = %v, want it measured", got.Duration)
+			// The duration is read from the clock the test reads too, so it
+			// lies within what the test saw the request take. On a clock as
+			// coarse as Windows' a request quicker than one tick takes no
+			// time at all by it; TestObserverMeasuresWhatARequestTakes holds
+			// it to a request long enough for every clock to see.
+			if got.Duration < 0 || got.Duration > took {
+				t.Errorf("Duration = %v, want it within the %v the request took", got.Duration, took)
 			}
 			if got.SpanContext.IsValid() {
 				t.Errorf("SpanContext = %+v with tracing off", got.SpanContext)

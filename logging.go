@@ -3,6 +3,7 @@ package muzak
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -336,6 +337,23 @@ const maxLoggedPanicLength = 4096
 // than losing the record. The stack is logged separately.
 func panicValue(recovered any) string {
 	return truncateTo(fmt.Sprint(recovered), maxLoggedPanicLength)
+}
+
+// failureLevel returns the level to log a failure at: level, or debug level
+// when err is the cancellation of ctx, the request's own context.
+//
+// net/http cancels a request's context when its client goes away, and
+// whatever was waiting on the request's behalf, a store or a handler, then
+// fails with that cancellation. Nothing failed on the server's side, and a
+// client that connects and hangs up must not be able to write errors to the
+// log at will, so it is recorded the way an event stream whose client went
+// away is. A deadline that passed is not one of these: a store or a handler
+// that runs out the clock is failing, and is reported at level.
+func failureLevel(ctx context.Context, err error, level slog.Level) slog.Level {
+	if errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled) {
+		return slog.LevelDebug
+	}
+	return level
 }
 
 // isTerminal reports whether w is a character device, which is the closest the

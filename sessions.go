@@ -600,10 +600,13 @@ func (m *sessionManager) load(c *Context) *Session {
 		cancel()
 		if err != nil {
 			// Neither the identifier nor its key is logged: the first is a
-			// credential, and the second names the session in the store.
+			// credential, and the second names the session in the store. A
+			// read the client cancelled by hanging up is no failure of the
+			// store; see [failureLevel].
 			s.err = fmt.Errorf("%w: %w", ErrSessionUnavailable, err)
 			s.stored = key
-			m.logger.ErrorContext(c.Context(), "muzak: the session store could not be read; the request proceeds without its session",
+			m.logger.Log(c.Context(), failureLevel(c.Context(), err, slog.LevelError),
+				"muzak: the session store could not be read; the request proceeds without its session",
 				slog.String(RequestIDKey, c.RequestID()),
 				slog.String("error", err.Error()))
 			return s

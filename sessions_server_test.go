@@ -360,6 +360,60 @@ func TestServerSessionLoadFailure(t *testing.T) {
 	}
 }
 
+// hungSessionStore answers no read until the read's context ends, as a store
+// does when the network to it has stopped.
+type hungSessionStore struct {
+	*MemorySessionStore
+}
+
+func (hungSessionStore) Load(ctx context.Context, _ string) ([]byte, bool, error) {
+	<-ctx.Done()
+	return nil, false, ctx.Err()
+}
+
+// TestServerSessionLoadCancelledByClient is the regression test for a client
+// that hangs up while its session is read being logged as a store failure,
+// at error level, which any client could produce at will. The read its own
+// request's cancellation ended is logged at debug level, and the request is
+// answered as before; a read StoreTimeout ended is the store failing, and
+// is still an error.
+func TestServerSessionLoadCancelledByClient(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		cancel bool
+		level  string
+	}{
+		"the client went away": {true, "DEBUG"},
+		"the store timed out":  {false, "ERROR"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := hungSessionStore{NewMemorySessionStore(MemorySessionOptions{})}
+			app, _, logs := sessionTestApp(t, func(o *AppOptions) {
+				o.Sessions = &SessionOptions{Store: store, StoreTimeout: time.Millisecond}
+			}, nil)
+			id, _ := newSessionID()
+			req := httptest.NewRequest(http.MethodGet, "/read", nil)
+			req.AddCookie(&http.Cookie{Name: app.sessions.name, Value: id})
+			if tc.cancel {
+				ctx, cancel := context.WithCancel(req.Context())
+				cancel()
+				req = req.WithContext(ctx)
+			}
+			rec := doRequest(t, app, req)
+			assertStatus(t, rec, http.StatusOK)
+			assertNoSessionCookie(t, rec)
+			if out := decodeSessionOut(t, rec); out.Found {
+				t.Errorf("an unreadable session reads %+v", out)
+			}
+			want := `"level":"` + tc.level + `","msg":"muzak: the session store could not be read`
+			if !strings.Contains(logs.String(), want) {
+				t.Errorf("want a line beginning %s; the log holds:\n%s", want, logs.String())
+			}
+		})
+	}
+}
+
 // TestServerSessionDeleteFailure covers a store that refuses to delete at
 // sign-out: the browser's cookie is removed anyway, and the request fails so
 // the user knows the session may outlive it.

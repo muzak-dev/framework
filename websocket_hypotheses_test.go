@@ -16,10 +16,17 @@ import (
 // descheduled on a loaded machine can miss: that would be the keepalive doing
 // its job, not the failure looked for here. Queued messages leave the handler
 // waiting on nothing, so the only silence it shows the keepalive is its own.
+//
+// Reading a message that is already waiting still takes the handler's
+// goroutine some time, and to the keepalive a read that has not yet reached
+// the message looks like a read waiting on a silent peer. At a 30ms timeout a
+// loaded machine held the goroutine up for that long, so the timeout is long
+// beside a scheduling delay. The handler is busy with each message for twice
+// an interval and a timeout, so that a ping is sent and judged while it is.
 func TestKeepaliveLeavesAHandlerThatReadsSlowlyAlone(t *testing.T) {
 	t.Parallel()
-	const interval, timeout = 20 * time.Millisecond, 30 * time.Millisecond
-	const messages = 5
+	const interval, timeout = 50 * time.Millisecond, 400 * time.Millisecond
+	const messages = 3
 	queued := make(chan struct{})
 	_, server := newWSTestApp(t, func(app *App) {
 		app.WS("/ws", func(ctx *Context, _ Empty, conn *WSConn) error {
@@ -33,7 +40,7 @@ func TestKeepaliveLeavesAHandlerThatReadsSlowlyAlone(t *testing.T) {
 				if err != nil {
 					return nil
 				}
-				time.Sleep(3 * (interval + timeout))
+				time.Sleep(2 * (interval + timeout))
 				if err := conn.WriteText(ctx.Context(), message); err != nil {
 					return nil
 				}

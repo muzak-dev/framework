@@ -405,7 +405,7 @@ func (a *App) serveFrontend(c *Context, f *frontend, relative string) {
 				"%s is not allowed here; allowed methods are %s", quotableMethod(c.r.Method), allowedOnFiles))
 			return
 		}
-		f.write(c, files, name, http.StatusOK)
+		a.serveFrontendFile(c, f, files, name, http.StatusOK)
 		return
 	}
 	a.serveFrontendFallback(c, f, files)
@@ -622,11 +622,11 @@ func (a *App) serveFrontendFallback(c *Context, f *frontend, files fs.FS) {
 	}
 	switch {
 	case f.notFound != "":
-		f.write(c, files, f.notFound, http.StatusNotFound)
+		a.serveFrontendFile(c, f, files, f.notFound, http.StatusNotFound)
 	case f.fallback != "" && acceptsHTML(c.r):
 		// The client-side router is being asked for a page it knows about, so
 		// the application document answers and takes over from here.
-		f.write(c, files, f.fallback, http.StatusOK)
+		a.serveFrontendFile(c, f, files, f.fallback, http.StatusOK)
 	default:
 		a.fail(c, frontendNotFound(c.r))
 	}
@@ -657,20 +657,24 @@ func acceptsHTML(r *http.Request) bool {
 	return false
 }
 
-// write sends one file as the response.
-func (f *frontend) write(c *Context, files fs.FS, name string, status int) {
+// serveFrontendFile sends one file as the response.
+//
+// A file that was found and then cannot be opened, measured or read fails the
+// request through [App.fail], as every other refusal of a mount does, so that
+// it is rendered by the error renderer and its releases are told it failed.
+func (a *App) serveFrontendFile(c *Context, f *frontend, files fs.FS, name string, status int) {
 	file, err := files.Open(name)
 	if err != nil {
 		c.logger.ErrorContext(c.Context(), "muzak: a frontend file vanished between being found and being read",
 			slog.String("file", name), slog.String("error", err.Error()))
-		http.Error(c.w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		a.fail(c, frontendNotFound(c.r))
 		return
 	}
 	defer func() { _ = file.Close() }()
 
 	info, err := file.Stat()
 	if err != nil {
-		http.Error(c.w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+		a.fail(c, frontendNotFound(c.r))
 		return
 	}
 
@@ -687,7 +691,7 @@ func (f *frontend) write(c *Context, files fs.FS, name string, status int) {
 		// any size into memory for every request is a way to exhaust it.
 		head, err := io.ReadAll(io.LimitReader(file, maxBufferedFrontendFile+1))
 		if err != nil {
-			http.Error(c.w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			a.fail(c, fmt.Errorf("muzak: the frontend file %q could not be read: %w", name, err))
 			return
 		}
 		if len(head) <= maxBufferedFrontendFile {

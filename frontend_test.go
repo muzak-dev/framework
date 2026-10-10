@@ -620,6 +620,50 @@ func TestFrontendSurvivesAFilesystemThatFailsMidRequest(t *testing.T) {
 	}
 }
 
+// TestFrontendFailsMidRequestThroughTheErrorRenderer is the regression test
+// for a file that was found and then could not be opened, measured or read:
+// each was answered by http.Error with a line of text/plain, which is neither
+// the default envelope nor problem details, and the request was settled as a
+// success, so the releases of the mount's providers were told it had
+// succeeded. The statuses are what they were.
+func TestFrontendFailsMidRequestThroughTheErrorRenderer(t *testing.T) {
+	t.Parallel()
+	content := fstest.MapFS{"index.html": {Data: []byte("app")}}
+	cases := []struct {
+		name   string
+		files  fs.FS
+		status int
+		code   string
+	}{
+		{"cannot be opened", brokenFS{MapFS: content, failOpen: true}, http.StatusNotFound, CodeNotFound},
+		{"cannot be measured", brokenFS{MapFS: content, failStat: true}, http.StatusNotFound, CodeNotFound},
+		{"cannot be read", brokenFS{MapFS: content, failRead: true}, http.StatusInternalServerError, CodeInternalError},
+	}
+	for _, tc := range cases {
+		for _, problems := range []bool{false, true} {
+			log := newReleaseLog()
+			options := quietOptions()
+			if problems {
+				options.ProblemDetails = &ProblemOptions{}
+			}
+			app := New(options, acquireAs[relA](log, "a", nil))
+			app.Frontend("/", FrontendOptions{FS: tc.files})
+			rec := navigate(t, mustBuild(t, app), "/")
+			assertStatus(t, rec, tc.status)
+			if problems {
+				if p, _ := decodeProblem(t, rec); p.Status != tc.status || p.Code != tc.code {
+					t.Errorf("%s: the problem is %+v", tc.name, p)
+				}
+			} else if body := decodeError(t, rec); body.Error.Status != tc.status || body.Error.Code != tc.code {
+				t.Errorf("%s: the envelope is %+v", tc.name, body)
+			}
+			if log.failure(t, "a") == nil {
+				t.Errorf("%s: the release was told the request succeeded", tc.name)
+			}
+		}
+	}
+}
+
 // assertReadOnly checks that a path served from a filesystem answers a read and
 // refuses everything else.
 func assertReadOnly(t *testing.T, app *App, target string) {

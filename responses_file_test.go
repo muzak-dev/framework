@@ -552,7 +552,7 @@ func TestFileResponseSymlinkEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(dir, "secret.txt"), filepath.Join(public, "leak.txt")); err != nil {
-		t.Skipf("symbolic links are not available here: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	root, err := os.OpenRoot(public)
 	if err != nil {

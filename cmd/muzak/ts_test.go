@@ -120,7 +120,7 @@ func TestTSReplacesALinkRatherThanWritingThroughIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(dir, "api.ts")); err != nil {
-		t.Skipf("symbolic links are unavailable: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	runIn(t, dir, "ts", "-file", "openapi.json", "-o", "api.ts").expect(t, exitOK)
 	if data, _ := os.ReadFile(target); string(data) != "theirs" {

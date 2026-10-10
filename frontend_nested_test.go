@@ -263,7 +263,7 @@ func TestNestedMountsFollowLinksInsideTheirDirectory(t *testing.T) {
 		}
 	}
 	if err := os.Symlink("pub", filepath.Join(root, "publink")); err != nil {
-		t.Skipf("cannot create a symbolic link here: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	if err := os.Symlink("staff", filepath.Join(root, "stafflink")); err != nil {
 		t.Fatal(err)
@@ -294,7 +294,7 @@ func TestNestedMountsAreFoundFromTheirDirectories(t *testing.T) {
 	}
 	via := filepath.Join(base, "via")
 	if err := os.Symlink(site, via); err != nil {
-		t.Skipf("cannot create a symbolic link here: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	// The parent is named through a link, the way a deployment's "current"
 	// directory is, and the child by its real path.

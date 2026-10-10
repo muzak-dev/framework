@@ -393,7 +393,7 @@ func TestStaticSymlinkContainmentNeedsARoot(t *testing.T) {
 	}
 	served := t.TempDir()
 	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(served, "abs.txt")); err != nil {
-		t.Skipf("cannot create a symbolic link here: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	if err := os.Symlink(outside, filepath.Join(served, "dirlink")); err != nil {
 		t.Fatal(err)

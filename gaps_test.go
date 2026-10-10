@@ -130,12 +130,12 @@ func TestLifecycleStartAndStopBothFail(t *testing.T) {
 func TestNewLoggerAutoChoosesConsoleForACharacterDevice(t *testing.T) {
 	device, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
-		t.Skipf("cannot open %s: %v", os.DevNull, err)
+		t.Fatalf("cannot open %s: %v", os.DevNull, err)
 	}
 	defer device.Close()
 
 	if !isTerminal(device) {
-		t.Skipf("%s is not reported as a character device on this platform", os.DevNull)
+		t.Fatalf("%s is not reported as a character device", os.DevNull)
 	}
 	logger := NewLogger(LoggerOptions{Format: LogFormatAuto, Output: device})
 	if _, isConsole := logger.Handler().(*consoleHandler); !isConsole {

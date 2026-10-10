@@ -771,8 +771,9 @@ func FuzzGenerate(f *testing.F) {
 		out, err := Generate(doc, Options{Client: true})
 		if err != nil {
 			// Only a name with a "{" or "}" in it can make the path's
-			// parameter one the operation does not describe.
-			if !strings.ContainsAny(name+value, "{}/") {
+			// parameter one the operation does not describe, and only a
+			// dot segment is refused in a path the client sends.
+			if _, dots := dotSegment("/" + value); !strings.ContainsAny(name+value, "{}/") && !dots {
 				t.Fatalf("Generate: %v", err)
 			}
 			return

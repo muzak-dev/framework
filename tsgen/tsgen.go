@@ -27,10 +27,14 @@ type Options struct {
 	// Path parameters are escaped segment by segment, and one that is empty,
 	// "." or "..", or that holds a "/" outside a trailing {name...} parameter,
 	// is refused with a TypeError rather than sent to another route, as the
-	// Go client refuses it. Cookie parameters are typed but not sent, since a
-	// browser sends its cookies itself and refuses a Cookie header from a
-	// script. Leave it off to write the types alone and send requests with a
-	// client of your own.
+	// Go client refuses it. The path's own text is held to the same: a
+	// character URL would read as the start of a query or a fragment, or as
+	// a separator, is escaped, and a path holding a dot segment, which URL
+	// resolves, out of the baseUrl if there are enough of them, makes
+	// Generate return an error. Cookie parameters are typed but not sent,
+	// since a browser sends its cookies itself and refuses a Cookie header
+	// from a script. Leave it off to write the types alone and send requests
+	// with a client of your own.
 	Client bool
 }
 
@@ -385,6 +389,12 @@ func (g *generator) operation(o *operation) error {
 	for _, name := range templateParams(o.path) {
 		if !described[name] {
 			return fmt.Errorf("%s: the path names the parameter %q, which the operation does not describe", where, clip(name))
+		}
+	}
+	if g.opts.Client {
+		if segment, found := dotSegment(o.path); found {
+			return fmt.Errorf("%s: the path holds the dot segment %q, which URL resolves as a step through the path, "+
+				"so the client would send the request somewhere else, outside its baseUrl if there are enough of them", where, clip(segment))
 		}
 	}
 	doc := []string{}

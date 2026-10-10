@@ -242,12 +242,46 @@ func pathExpression(template string) string {
 			static.Reset()
 			continue
 		}
-		static.WriteString(segment)
+		writeStatic(&static, segment)
 	}
 	if static.Len() > 0 {
 		parts = append(parts, quote(static.String()))
 	}
 	return strings.Join(parts, " + ")
+}
+
+// writeStatic writes a static segment of a path as the client sends it.
+//
+// The client joins it to its baseUrl and hands the whole to URL, which reads
+// some characters as something other than the path: "?" and "#" begin a query
+// and a fragment, a backslash is a "/" in an http URL, and a tab, a carriage
+// return and a line feed are dropped. Each of those, and every other control
+// character, is written percent-encoded, which a Muzak router decodes before
+// it compares a static segment. A dot segment cannot be escaped this way, since
+// URL decodes "%2e" too, and is refused instead; see [dotSegment].
+func writeStatic(b *strings.Builder, segment string) {
+	const hex = "0123456789ABCDEF"
+	for i := range len(segment) {
+		switch c := segment[i]; {
+		case c == '?', c == '#', c == '\\', c < 0x20, c == 0x7f:
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0x0f])
+		default:
+			b.WriteByte(c)
+		}
+	}
+}
+
+// dotSegment returns the first segment of a path template that URL resolves
+// as "." or "..", which it does for "%2e" in either case as for a dot.
+func dotSegment(template string) (string, bool) {
+	for _, segment := range strings.Split(strings.TrimPrefix(template, "/"), "/") {
+		if dots := strings.ReplaceAll(strings.ToLower(segment), "%2e", "."); dots == "." || dots == ".." {
+			return segment, true
+		}
+	}
+	return "", false
 }
 
 // successKind says how the body of an operation's success is read: as JSON

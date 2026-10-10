@@ -169,6 +169,40 @@ func TestGenerateWritesAParameterDescribedTwiceOnce(t *testing.T) {
 	typeCheck(t, out)
 }
 
+func TestGenerateKeepsTheClientWithinItsBaseURL(t *testing.T) {
+	t.Parallel()
+	doc := func(path string) *muzak.Document {
+		var parameters []muzak.Parameter
+		for _, name := range templateParams(path) {
+			parameters = append(parameters, muzak.Parameter{Name: name, In: "path", Required: true, Schema: &muzak.Schema{Type: "string"}})
+		}
+		return &muzak.Document{Paths: map[string]*muzak.PathItem{path: {Get: &muzak.Operation{OperationID: "x",
+			Parameters: parameters, Responses: map[string]*muzak.Response{"204": {}}}}}}
+	}
+	// URL resolves a dot segment however it is spelled, and enough of them
+	// climb out of the base the client was given, to another service on the
+	// same host, with the headers given for this one.
+	for _, path := range []string{"/../../admin", "/v1/./x", "/a/%2e%2E/b", "/a/.%2e", "/%2E/{id}", "/x/.."} {
+		if _, err := Generate(doc(path), Options{Client: true}); err == nil || !strings.Contains(err.Error(), "dot segment") ||
+			!strings.HasPrefix(err.Error(), "tsgen: GET ") {
+			t.Errorf("%q: got %v", path, err)
+		}
+		// The types alone hold the path as a string, which nothing resolves.
+		if _, err := Generate(doc(path), Options{}); err != nil {
+			t.Errorf("%q without the client: %v", path, err)
+		}
+	}
+	// "?" and "#" would begin a query and a fragment, URL reads "\" as "/" and
+	// drops a tab or a line break, so each is written escaped, as a Muzak
+	// router decodes it before it compares the segment.
+	out := must(Generate(doc("/a?b=1#c\\d\te\n/.../{id}/x?"), Options{Client: true}))
+	if want := `"/a%3Fb=1%23c%5Cd%09e%0A/.../" + pathSegment("id", params.path["id"]) + "/x%3F"`; !strings.Contains(string(out), want) {
+		t.Errorf("missing %s in:\n%s", want, out)
+	}
+	assertLexes(t, out)
+	typeCheck(t, out)
+}
+
 func TestCommentSkipsBlankLines(t *testing.T) {
 	t.Parallel()
 	var b strings.Builder

@@ -309,21 +309,29 @@ func TestAssertCompatibleRecordingFailures(t *testing.T) {
 }
 
 // TestAssertCompatibleInAReadOnlyDirectory covers a directory the baseline
-// cannot be written into: the run fails, and nothing is left there.
+// cannot be written into, refused by permission bits on Unix and by the access
+// control list on Windows: the run fails, and nothing is left there. Where
+// the refusal does not bind the user, as it does not the superuser, the
+// baseline is written.
 func TestAssertCompatibleInAReadOnlyDirectory(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("a read-only directory is not read-only on Windows or to root")
-	}
 	t.Setenv("MUZAK_UPDATE_OPENAPI", "1")
 	dir := filepath.Join(t.TempDir(), "locked")
-	if err := os.Mkdir(dir, 0o500); err != nil {
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	denyCreate(t, dir)
 	rec := &recordingTB{}
 	testclient.AssertCompatible(rec, catalogueApp(), filepath.Join(dir, "openapi.json"))
+	entries, err := os.ReadDir(dir)
+	if !restrictionsBind {
+		rec.only(t, 0, 0, 1)
+		if err != nil || len(entries) != 1 {
+			t.Errorf("the directory holds %v, %v; want the baseline", entries, err)
+		}
+		return
+	}
 	rec.only(t, 0, 1, 0)
-	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+	if err != nil || len(entries) != 0 {
 		t.Errorf("the directory holds %v, %v", entries, err)
 	}
 }
@@ -332,9 +340,6 @@ func TestAssertCompatibleInAReadOnlyDirectory(t *testing.T) {
 // is replaced rather than written through, so nothing outside the path is
 // touched.
 func TestAssertCompatibleReplacesALink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating a symbolic link needs a privilege Windows does not grant by default")
-	}
 	dir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "elsewhere.json")
 	if err := os.WriteFile(outside, []byte("untouched"), 0o600); err != nil {

@@ -879,12 +879,18 @@ const maxPropagatedID = 256
 // control character or is implausibly long, is left out rather than failing
 // the call, since the call matters more than the correlation.
 //
-// Compose it with your own when you need both:
+// Compose it with your own when you need both, leaving a header the request
+// already carries alone as DefaultPropagate does:
 //
 //	Propagate: func(ctx context.Context, h http.Header) {
 //		muzak.DefaultPropagate(ctx, h)
-//		h.Set("X-Tenant", tenantFrom(ctx))
+//		if _, set := h["X-Tenant"]; !set {
+//			h.Set("X-Tenant", tenantFrom(ctx))
+//		}
 //	},
+//
+// [Endpoint.Call] refuses to send a request whose Propagate changed a header
+// its input set, so one that overwrites can stop a typed call from going out.
 func DefaultPropagate(ctx context.Context, h http.Header) {
 	if _, set := h[HeaderRequestID]; !set {
 		if id, ok := RequestIDFromContext(ctx); ok && id != "" && len(id) <= maxPropagatedID && isHeaderSafe(id) {

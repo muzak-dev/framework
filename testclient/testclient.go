@@ -79,9 +79,10 @@ func WithoutRedirects() Option {
 // limit and its HTTP/2 settings apply, so a request the application would
 // refuse in production is refused in the test too. Its lifecycle components
 // are started before the first request, and when the test finishes the
-// application is shut down as [muzak.App.Shutdown] describes, which ends its
-// event streams and WebSockets, waits for the requests still running and then
-// stops the components. A test may call App.Shutdown itself to check what a
+// application is shut down as [muzak.App.Shutdown] describes: readiness goes
+// down, any [muzak.ServerOptions.DrainDelay] passes, its event streams and
+// WebSockets end, the requests still running and then the background tasks
+// are waited for, and the components are stopped. A test may call App.Shutdown itself to check what a
 // shutdown does; the cleanup then has nothing left to do. A build failure or a
 // component that refuses to start fails the test immediately, because every
 // later assertion would be meaningless.

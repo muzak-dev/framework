@@ -319,7 +319,8 @@ type WSOptions struct {
 	// with 403 unless AllowedOrigins or AllowOriginFunc names it. A handshake
 	// with no Origin header is not affected, since only a browser sends one.
 	// This bounds the WebSocket handshake only: an application that wants every
-	// request held to its own names checks Host in a middleware as well.
+	// request held to its own names sets [AppOptions.AllowedHosts] as well,
+	// which answers any other Host with 421 before routing.
 	AllowedHosts []string
 
 	// AllowOriginFunc decides dynamically whether an origin may connect. It is

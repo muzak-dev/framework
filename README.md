@@ -325,20 +325,22 @@ The full list is in
 
 ## Performance
 
-Apple M1 Pro, Go 1.27, medians of three runs. Every case drives the real path
-through `App.ServeHTTP`, so routing, binding, dependencies and encoding are all
-included.
+Apple M1 Pro, Go 1.27, framework 0.3.0, medians of five runs. Every case drives
+the real path through `App.ServeHTTP`, so routing, binding, dependencies and
+encoding are all included.
 
 | | ns/op | allocs/op |
 |---|---:|---:|
-| Route lookup, static | 64.4 | 0 |
-| Route lookup, parameter | 80.5 | 0 |
-| Full request, bare | 545.6 | 8 |
-| The same work by hand on `http.ServeMux` | 608.1 | 9 |
+| Route lookup, static | 75.3 | 0 |
+| Route lookup, parameter | 92.4 | 0 |
+| Full request, bare | 786.0 | 11 |
+| The same work by hand on `http.ServeMux` | 628.4 | 9 |
 
-Matching allocates nothing, and the framework path beats a hand-written
-`net/http` handler doing identical work. [BENCHMARKS.md](BENCHMARKS.md) has the
-method and the rest of the numbers.
+Matching allocates nothing, and the framework path costs a little more than a
+hand-written `net/http` handler doing identical work, almost all of it the copy
+of the request that carries the matched route to instrumentation.
+[BENCHMARKS.md](BENCHMARKS.md) has the method, the machine's load while it was
+measured, and the rest of the numbers.
 
 ### Test coverage
 

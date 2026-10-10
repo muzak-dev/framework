@@ -49,23 +49,17 @@ func TestParamLookupWhenNothingWasCaptured(t *testing.T) {
 }
 
 // TestEnvFileUnopenableIsReported covers the read failure that is not a missing
-// file, which a file the process cannot open produces.
+// file, which a file that is there and cannot be opened produces.
 func TestEnvFileUnopenableIsReported(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root, which can open a file with no permission bits")
-	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "locked.env")
-	if err := os.WriteFile(path, []byte("KEY=value\n"), 0o000); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	path := filepath.Join(t.TempDir(), "locked.env")
+	makeUnopenable(t, path)
 
 	_, err := readEnvFile(path)
 	if err == nil {
-		t.Fatal("readEnvFile succeeded on an unreadable file")
+		t.Fatal("readEnvFile succeeded on a file that cannot be opened")
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		t.Errorf("error = %v, want a permission failure rather than a missing file", err)
+		t.Errorf("error = %v, want the failure reported rather than read as a missing file", err)
 	}
 }
 

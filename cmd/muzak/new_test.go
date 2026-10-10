@@ -470,7 +470,8 @@ func TestNewReportsADirectoryItIsNotAllowedToUse(t *testing.T) {
 	expectRefused(runIn(t, work, "new", "shop"), `shop cannot be (opened|read): `)
 }
 
-// requireGo skips a test that runs the go command when there is none.
+// requireGo returns the go command for a test that runs it, which -short
+// leaves out.
 func requireGo(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
@@ -478,7 +479,7 @@ func requireGo(t *testing.T) string {
 	}
 	tool, err := exec.LookPath("go")
 	if err != nil {
-		t.Skip("the go command is not on PATH")
+		t.Fatalf("the go command is not on PATH: %v", err)
 	}
 	return tool
 }

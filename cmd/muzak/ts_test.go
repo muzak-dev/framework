@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -84,16 +83,19 @@ func TestTSWritesAFileWhole(t *testing.T) {
 	if err := os.WriteFile(reference, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if want, _ := os.Stat(reference); runtime.GOOS != "windows" && info.Mode().Perm() != want.Mode().Perm() {
+	if want, _ := os.Stat(reference); info.Mode().Perm() != want.Mode().Perm() {
 		t.Errorf("a new file has permissions %v, want %v", info.Mode().Perm(), want.Mode().Perm())
 	}
 
 	// Writing again replaces the file, and keeps the permissions it was
-	// given since.
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(filepath.Join(dir, out), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	// given since, as far as the system keeps them: Windows keeps only
+	// whether a file is read-only.
+	if err := os.Chmod(filepath.Join(dir, out), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	given, err := os.Stat(filepath.Join(dir, out))
+	if err != nil {
+		t.Fatal(err)
 	}
 	runIn(t, dir, "ts", "-file", "openapi.json", "-o", out, "-client").expect(t, exitOK)
 	data, err = os.ReadFile(filepath.Join(dir, out))
@@ -103,8 +105,8 @@ func TestTSWritesAFileWhole(t *testing.T) {
 	if string(data) != generated(t, true) {
 		t.Error("the file was not replaced")
 	}
-	if info, _ := os.Stat(filepath.Join(dir, out)); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		t.Errorf("the replaced file has permissions %v, want 0600", info.Mode().Perm())
+	if info, _ := os.Stat(filepath.Join(dir, out)); info.Mode().Perm() != given.Mode().Perm() {
+		t.Errorf("the replaced file has permissions %v, want the %v it was given", info.Mode().Perm(), given.Mode().Perm())
 	}
 	if entries, _ := os.ReadDir(filepath.Join(dir, "web")); len(entries) != 1 {
 		t.Errorf("the directory holds %d entries, want the file alone", len(entries))

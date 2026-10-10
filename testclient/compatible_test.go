@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -137,10 +136,16 @@ func TestAssertCompatibleRecordsTheBaseline(t *testing.T) {
 	if !bytes.Equal(written, append(want, '\n')) {
 		t.Error("the baseline is not the application's document")
 	}
-	if runtime.GOOS != "windows" {
-		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 {
-			t.Errorf("the baseline's mode = %v, %v; want 0644", info.Mode().Perm(), err)
-		}
+	// The baseline is created 0644, as a file the test creates the same way
+	// is, which on Windows is a file that is not read-only.
+	reference := filepath.Join(t.TempDir(), "reference")
+	if err := os.WriteFile(reference, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Errorf("the baseline cannot be examined: %v", err)
+	} else if want, _ := os.Stat(reference); info.Mode().Perm() != want.Mode().Perm() {
+		t.Errorf("the baseline's mode = %v; want %v", info.Mode().Perm(), want.Mode().Perm())
 	}
 	assertOnlyEntry(t, filepath.Dir(path), "openapi.json")
 	assertOnlyEntry(t, dir, "api")

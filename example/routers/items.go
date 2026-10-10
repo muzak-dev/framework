@@ -60,7 +60,7 @@ func Items() *muzak.Router {
 	r.WS("/items/{item_id}/ws", handlers.ItemSocket,
 		muzak.Title("Talk To An Item"),
 		muzak.Summary("Talk to an item over a WebSocket"),
-		muzak.Needs(core.GetSessionOrToken),
+		muzak.Needs(core.GetCaller),
 		muzak.WithWebSocket(muzak.WSOptions{
 			ReadLimit:    64 << 10,
 			PingInterval: 30 * time.Second,

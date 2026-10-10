@@ -2,6 +2,7 @@ package schemas
 
 import (
 	"muzak.dev/framework"
+	"muzak.dev/framework/example/core"
 )
 
 // ItemOut is the response model for a single item.
@@ -84,4 +85,7 @@ type WSItemIn struct {
 	ItemID string `path:"item_id" doc:"The item being talked about"`
 	// Q is an optional number echoed back on every message.
 	Q *int `query:"q" doc:"An optional number echoed back with each reply"`
+	// Caller is who opened the socket, resolved by the route's provider
+	// during the handshake. It is never read from the request.
+	Caller muzak.Dep[core.Caller]
 }

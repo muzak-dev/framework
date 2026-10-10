@@ -53,32 +53,32 @@ func GetCurrentUser(ctx *muzak.Context) (CurrentUser, error) {
 	return CurrentUser{Username: "fakecurrentuser"}, nil
 }
 
-// SessionOrToken is the caller of a WebSocket route, resolved from either a
-// session cookie or a query parameter.
-//
-// A browser cannot set headers on a WebSocket handshake, so the two places a
-// credential can arrive are a cookie the browser attaches itself and a query
-// parameter the page puts in the URL. Both are covered here, which is what
-// [GetSessionOrToken] exists to show.
-type SessionOrToken struct {
-	// Value is the credential that was presented.
-	Value string
-	// FromCookie reports which of the two it came from.
-	FromCookie bool
+// Caller is who is on the other end of a WebSocket route.
+type Caller struct {
+	// Username identifies the caller.
+	Username string
+	// FromToken reports that the caller presented a token query parameter
+	// rather than a signed-in session.
+	FromToken bool
 }
 
-// GetSessionOrToken resolves the caller of a WebSocket route.
+// GetCaller resolves the caller of a WebSocket route from the session a
+// sign-in stored, or from a token query parameter.
 //
-// It runs during the handshake, before a single byte is upgraded, so a caller
-// with no credential receives an ordinary JSON error rather than a connection
-// that closes a moment later.
-func GetSessionOrToken(ctx *muzak.Context) (SessionOrToken, error) {
-	if cookie, err := ctx.Cookie("session"); err == nil && cookie.Value != "" {
-		return SessionOrToken{Value: cookie.Value, FromCookie: true}, nil
+// A browser cannot set headers on a WebSocket handshake, so the two places a
+// credential can arrive are the session cookie the browser attaches itself
+// and a query parameter the page puts in the URL. Both are covered here, which
+// is what [GetCaller] exists to show. It runs during the handshake, before a
+// single byte is upgraded, so a caller with no credential receives an
+// ordinary JSON error rather than a connection that closes a moment later.
+func GetCaller(ctx *muzak.Context) (Caller, error) {
+	if user, ok := muzak.SessionGet[string](ctx.Session(), "user"); ok {
+		return Caller{Username: user}, nil
 	}
 	if token := ctx.Query("token"); token != "" {
-		return SessionOrToken{Value: token}, nil
+		// A real service would verify the token. This example accepts any
+		// token and reports a fixed caller, as GetCurrentUser does.
+		return Caller{Username: "fakecurrentuser", FromToken: true}, nil
 	}
-	return SessionOrToken{}, muzak.Unauthorized(
-		"a session cookie or a token query parameter is required")
+	return Caller{}, muzak.Unauthorized("sign in, or pass a token query parameter")
 }

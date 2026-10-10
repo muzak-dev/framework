@@ -92,7 +92,7 @@ func asHTTPError(err error) error {
 // left is the conversation itself. Returning ends it, and Muzak closes the
 // connection; returning nil closes it normally.
 func ItemSocket(ctx *muzak.Context, in schemas.WSItemIn, conn *muzak.WSConn) error {
-	session := muzak.From[core.SessionOrToken](ctx)
+	caller := in.Caller.Get()
 
 	for {
 		message, err := conn.ReadText(ctx.Context())
@@ -101,7 +101,10 @@ func ItemSocket(ctx *muzak.Context, in schemas.WSItemIn, conn *muzak.WSConn) err
 			// nothing left to say.
 			return nil
 		}
-		if err := conn.WriteText(ctx.Context(), "credential: "+session.Value); err != nil {
+		// The caller is named, never the credential they presented: a
+		// session cookie or a token echoed into a message would end up
+		// wherever messages are logged or shown.
+		if err := conn.WriteText(ctx.Context(), "caller: "+caller.Username); err != nil {
 			return err
 		}
 		if in.Q != nil {

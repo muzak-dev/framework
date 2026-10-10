@@ -327,8 +327,8 @@ func (x *mcpExchange) serveSession(rerr *rpcError) error {
 		// never sends need nothing from it.
 		return x.accepted()
 	}
-	if x.c.r.Header.Values("Mcp-Method") != nil {
-		if method, err := singleHeader(x.c.r.Header, "Mcp-Method"); err != nil || method != x.msg.method {
+	if x.c.r.Header.Values(HeaderMCPMethod) != nil {
+		if method, err := singleHeader(x.c.r.Header, HeaderMCPMethod); err != nil || method != x.msg.method {
 			return x.headerMismatch("the Mcp-Method header does not name the request's method")
 		}
 	}
@@ -366,7 +366,7 @@ func (x *mcpExchange) serveStateless(rerr *rpcError) error {
 			Data:    mcpUnsupportedVersion{Supported: mcpVersions, Requested: clientShorten(x.version)},
 		})
 	}
-	if method, err := singleHeader(x.c.r.Header, "Mcp-Method"); err != nil || method != x.msg.method {
+	if method, err := singleHeader(x.c.r.Header, HeaderMCPMethod); err != nil || method != x.msg.method {
 		return x.headerMismatch("the Mcp-Method header is missing or does not name the request's method")
 	}
 	method, ok := mcpStatelessMethods[x.msg.method]
@@ -637,10 +637,10 @@ func (x *mcpExchange) toolsCall() error {
 		return x.rpcFail(x.invalidParamsStatus(), &rpcError{Code: rpcInvalidParams,
 			Message: "Invalid params: tools/call names the tool to call in name"})
 	}
-	if x.stateless || x.c.r.Header.Values("Mcp-Name") != nil {
+	if x.stateless || x.c.r.Header.Values(HeaderMCPName) != nil {
 		// Required under 2026-07-28, and held to the body wherever it is sent;
 		// see [mcpExchange.serveSession].
-		if header, err := singleHeader(x.c.r.Header, "Mcp-Name"); err != nil || decodeMCPHeaderValue(header) != name {
+		if header, err := singleHeader(x.c.r.Header, HeaderMCPName); err != nil || decodeMCPHeaderValue(header) != name {
 			return x.headerMismatch("the Mcp-Name header is missing or does not name the tool called")
 		}
 	}

@@ -61,15 +61,21 @@ func eraOf(version string) mcpEra {
 }
 
 // Headers of the Streamable HTTP transport, as an application lists them in
-// [CORSOptions] for a browser-based MCP client: AllowedHeaders for both, and
-// ExposedHeaders for the session identifier, which a browser otherwise hides
-// from the page.
+// [CORSOptions] for a browser-based MCP client: AllowedHeaders for all four,
+// and ExposedHeaders for the session identifier, which a browser otherwise
+// hides from the page.
 const (
 	// HeaderMCPSessionID carries the session a legacy client opened with
 	// initialize.
 	HeaderMCPSessionID = "Mcp-Session-Id"
 	// HeaderMCPProtocolVersion carries the protocol revision of a request.
 	HeaderMCPProtocolVersion = "MCP-Protocol-Version"
+	// HeaderMCPMethod repeats a request's JSON-RPC method, which 2026-07-28
+	// requires and a session revision may send. It must match the body.
+	HeaderMCPMethod = "Mcp-Method"
+	// HeaderMCPName repeats the tool a tools/call names, under the same
+	// rules as HeaderMCPMethod.
+	HeaderMCPName = "Mcp-Name"
 )
 
 // Defaults and bounds of [MCPOptions].

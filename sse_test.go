@@ -438,12 +438,24 @@ func TestSSEKeepsAnIdleStreamOpen(t *testing.T) {
 	}
 }
 
+// A keepalive is sent only to a stream that has been quiet for the interval,
+// so a producer that never pauses for that long is never interrupted by one.
+//
+// The producer sends every millisecond, but a loaded machine can stop it, and
+// the whole process, for longer than any interval, and then the stream really
+// was quiet and a keepalive was its due. So the producer records the longest
+// gap between two of its events, and a keepalive counts against the stream
+// only if no gap was as long as the interval. The stream is watched for half
+// as long again as the interval, so that a keepalive that ignored the traffic
+// would have been sent within it.
 func TestSSEKeepAliveSaysNothingOnABusyStream(t *testing.T) {
 	t.Parallel()
-	const keepAlive = time.Second
+	const keepAlive = 250 * time.Millisecond
 	stop := make(chan struct{})
+	var sent, longest atomic.Int64
 	_, server := newSSETestApp(t, func(app *App) {
 		app.SSE("/stream", func(_ *Context, _ Empty, stream *SSEStream[itemOut]) error {
+			last := time.Now()
 			for {
 				select {
 				case <-stop:
@@ -453,13 +465,14 @@ func TestSSEKeepAliveSaysNothingOnABusyStream(t *testing.T) {
 				if err := stream.Send(itemOut{Name: "busy"}); err != nil {
 					return err
 				}
+				now := time.Now()
+				if gap := int64(now.Sub(last)); gap > longest.Load() {
+					longest.Store(gap)
+				}
+				last = now
+				sent.Add(1)
 				time.Sleep(time.Millisecond)
 			}
-			// The producer sends every millisecond, so the interval only has to be
-			// long enough that a stalled scheduler does not look like an idle stream.
-			// A loaded machine stalled it for longer than 250ms. The stream is
-			// watched for half as long again as the interval, so that a keepalive
-			// that ignored the traffic would have been sent within it.
 		}, WithSSE(SSEOptions{KeepAlive: keepAlive}))
 	})
 	defer close(stop)
@@ -467,9 +480,21 @@ func TestSSEKeepAliveSaysNothingOnABusyStream(t *testing.T) {
 	reader := openStream(t, server.URL, "/stream", func(o *SSEDialOptions) { o.KeepComments = true })
 	deadline := time.Now().Add(keepAlive * 3 / 2)
 	for time.Now().Before(deadline) {
-		if message := nextEvent(t, reader); message.Comment != "" {
-			t.Fatalf("a busy stream was sent a keepalive: %+v", message)
+		message := nextEvent(t, reader)
+		if message.Comment == "" {
+			continue
 		}
+		// The gap the keepalive was sent in ends with the producer's next
+		// event, so that is waited for before the gaps are looked at. The
+		// producer's clock is read a moment after the stream's, hence the
+		// tenth of an interval allowed for.
+		after := sent.Load()
+		waitFor(t, func() bool { return sent.Load() > after }, "the producer to send again")
+		if gap := time.Duration(longest.Load()); gap < keepAlive*9/10 {
+			t.Fatalf("a stream that never went more than %v without an event was sent a keepalive: %+v", gap, message)
+		}
+		t.Logf("the producer was held up for %v, longer than the interval, so its keepalive proves nothing", time.Duration(longest.Load()))
+		return
 	}
 }
 

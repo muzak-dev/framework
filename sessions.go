@@ -1129,7 +1129,10 @@ func (s *Session) guardCookie() {
 
 // cookieGuard is the commit hook [Session.guardCookie] leaves on the writer.
 // It holds the response's header and nothing else, so unlike the [Context]
-// it replaces it is safe to call after the request has ended.
+// it replaces it is safe to call after the request has ended. Being a map it
+// is not comparable, which is safe only because the one comparison of hooks,
+// in commitSession, is against a *Context: interface values of different
+// dynamic types compare unequal without comparing what they hold.
 type cookieGuard http.Header
 
 func (g cookieGuard) beforeCommit(int) { keepPrivate(http.Header(g)) }

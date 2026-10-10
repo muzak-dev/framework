@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/github/actions/workflow/status/muzak-dev/framework/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI">
 </a>
 <a href="#test-coverage">
-  <img src="https://img.shields.io/badge/coverage-98.8%25-3fb950?style=flat-square&logo=go&logoColor=white" alt="Coverage">
+  <img src="https://img.shields.io/badge/coverage-99.1%25-3fb950?style=flat-square&logo=go&logoColor=white" alt="Coverage">
 </a>
 <a href="https://pkg.go.dev/muzak.dev/framework">
   <img src="https://img.shields.io/badge/pkg.go.dev-reference-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go Reference">
@@ -72,11 +72,19 @@ type, and the compiler is what tells you rather than a bug report.
 | **Routing** | Segment-wise radix trie. A static match takes 64 ns and allocates nothing |
 | **Request binding** | `path`, `query`, `header`, `cookie`, `form`, `file` or the JSON body, by struct tag, with the plan compiled once per route |
 | **Validation** | Declared against the field itself, so renaming it is a change the compiler checks |
-| **Dependencies** | Guards and typed providers, read with `From[T](ctx)` and no cast anywhere |
+| **Dependencies** | Guards and typed providers, read with `From[T](ctx)` or a `Dep[T]` field and no cast anywhere; providers that release what they acquire, a transaction per request, and overrides for tests |
 | **Real-time** | RFC 6455 WebSockets and typed server-sent events, implemented here rather than delegated |
 | **Versioning** | Per route or router, read from the path, a header, the `Accept` header or a function of your own |
 | **Documentation** | OpenAPI 3.1 at `/openapi.json`, derived from the code, and an optional dashboard with a request console at `/docs` |
 | **Errors** | One envelope for every failure, a constructor per status, and causes that stay server-side |
+| **Responses** | JSON by default; bytes, streams, files with ranges, redirects that refuse to be open, entity tags, and RFC 9457 problem details |
+| **Authentication** | JWT bearer tokens and API keys verified by the schemes the document describes, encrypted sessions, and cross-origin protection without tokens |
+| **Operations** | Liveness and readiness probes, a drain delay, background tasks after the response, per-route timeouts, allowed hosts and an HTTPS redirect |
+| **Observability** | W3C trace context, a span per route, trace ids in every log line, a request metrics hook, and an OTLP exporter |
+| **Calling services** | A client that refuses private and metadata addresses at the socket, retries only what is safe, and calls typed endpoints with the server's own types |
+| **Clients and agents** | TypeScript generated from the document, a test that fails when the API breaks, and chosen routes served to MCP clients as tools |
+| **Interop** | Mount any `net/http` handler beside the routes, behind the same guards |
+| **Tooling** | `muzak new`, `muzak dev`, and `muzak routes`, `diff` and `ts` |
 | **Defaults** | Conservative everywhere. Relaxing one is a decision you make out loud |
 
 ## A whole application
@@ -306,7 +314,8 @@ WebSocket peers are pinged and dropped when they stop answering, unknown JSON
 members are rejected,
 CORS denies every cross-origin request until a policy is written, a cross-origin
 WebSocket handshake is refused, no forwarding header is believed until a proxy
-is named, and a panic becomes a generic 500 with the stack recorded only in the
+is named, an outbound client refuses loopback, private and cloud metadata
+addresses, and a panic becomes a generic 500 with the stack recorded only in the
 log. A panic or an error after the response has started aborts the connection
 instead, so a truncated body cannot pass for a complete one.
 
@@ -333,17 +342,20 @@ method and the rest of the numbers.
 
 ### Test coverage
 
-**98.8% of statements**, measured on Go 1.27.0.
+**99.1% of statements**, measured on Go 1.27.0.
 
 | Package | Covered |
 |---|---:|
-| `muzak.dev/framework` | 98.9% |
+| `muzak.dev/framework` | 99.2% |
 | `muzak.dev/framework/validate` | 98.2% |
 | `muzak.dev/framework/i18n` | 99.2% |
+| `muzak.dev/framework/otlp` | 99.4% |
+| `muzak.dev/framework/tsgen` | 100.0% |
+| `muzak.dev/framework/testclient` | 94.7% |
+| `muzak.dev/framework/cmd/muzak` | 98.8% |
 | `muzak.dev/framework/internal/radix` | 100.0% |
 | `muzak.dev/framework/internal/wsframe` | 100.0% |
 | `muzak.dev/framework/internal/yaml` | 100.0% |
-| `muzak.dev/framework/testclient` | 93.4% |
 
 CI recomputes this on every push and fails below 98%, so the badge cannot
 quietly go stale. The uncovered statements are defensive branches that cannot be
@@ -367,14 +379,25 @@ in the standard library of Go 1.27, including `encoding/json/v2` and `uuid`.
 | [First steps](https://muzak.dev/docs/getting-started/first-steps) | Install, project layout, your first route |
 | [Routers](https://muzak.dev/docs/getting-started/routers) | Paths, methods, nesting, route options |
 | [Request data](https://muzak.dev/docs/getting-started/request-data) | Every place an input field can be read from |
-| [Dependencies](https://muzak.dev/docs/getting-started/dependencies) | Guards, providers, singletons |
+| [Dependencies](https://muzak.dev/docs/getting-started/dependencies) | Guards, providers, singletons, `Dep`, releases, transactions, overrides |
+| [Command line](https://muzak.dev/docs/getting-started/command-line) | `muzak new`, `muzak dev`, and reading a document |
+| [Files, streams and redirects](https://muzak.dev/docs/techniques/files-streams-redirects) | Responses that are not JSON |
 | [Validation](https://muzak.dev/docs/fundamentals/validation) | Rules, transforms, cross-field checks |
 | [Internationalization](https://muzak.dev/docs/fundamentals/internationalization) | Locales, translations, pluralization, localized errors |
 | [Versioning](https://muzak.dev/docs/fundamentals/versioning) | Four schemes, and what each costs |
 | [WebSockets](https://muzak.dev/docs/realtime/websockets) | Handshake, bounds, what a hostile peer cannot do |
 | [Server-sent events](https://muzak.dev/docs/realtime/server-sent-events) | Typed streams, resuming, keepalive |
 | [Testing](https://muzak.dev/docs/fundamentals/testing) | The in-process client |
+| [API compatibility](https://muzak.dev/docs/fundamentals/api-compatibility) | Failing a build that breaks the API |
+| [TypeScript](https://muzak.dev/docs/fundamentals/typescript) | Types and a fetch client from the document |
+| [Observability](https://muzak.dev/docs/fundamentals/observability) | Tracing, log correlation, metrics, OTLP |
+| [Authentication](https://muzak.dev/docs/security/authentication) | JWT bearer tokens, API keys, protected resource metadata |
+| [Sessions](https://muzak.dev/docs/security/sessions) | Encrypted cookie sessions and server-side stores |
+| [HTTP client](https://muzak.dev/docs/techniques/http-client) | Calling URLs someone else chose, safely |
+| [Typed endpoints](https://muzak.dev/docs/techniques/typed-endpoints) | One declaration for the server and its Go callers |
+| [MCP tools](https://muzak.dev/docs/techniques/mcp-tools) | Routes as tools for MCP clients |
 | [Deployment](https://muzak.dev/docs/deployment/server-configuration) | Timeouts, shutdown, running behind a proxy |
+| [Health checks](https://muzak.dev/docs/deployment/health-checks) | Probes, readiness checks, draining |
 
 Machine-readable: [llms.txt](https://muzak.dev/llms.txt) and
 [llms-full.txt](https://muzak.dev/llms-full.txt).

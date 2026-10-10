@@ -191,6 +191,44 @@ func TestValidateFirstReportsMissingFormValuesAndFiles(t *testing.T) {
 	}
 }
 
+// tenantIn binds a header a client's Propagate may also write.
+type tenantIn struct {
+	Tenant *string `header:"X-Tenant"`
+}
+
+func TestEndpointRefusesAPropagateThatRewritesABoundHeader(t *testing.T) {
+	t.Parallel()
+	ep := NewEndpoint[tenantIn, tenantIn](http.MethodGet, "/tenant")
+	sets := endpointServer(t, func(app *App) {
+		app.Implement(ep, func(_ *Context, v tenantIn) (tenantIn, error) { return v, nil })
+	}, func(o *ClientOptions) {
+		// As the documentation of DefaultPropagate composes one.
+		o.Propagate = func(ctx context.Context, h http.Header) {
+			DefaultPropagate(ctx, h)
+			h.Set("X-Tenant", "from-propagate")
+		}
+	})
+	mine := "mine"
+	_, err := ep.Call(context.Background(), sets, tenantIn{Tenant: &mine})
+	assertCallRefused(t, err, "X-Tenant", "Propagate")
+	if strings.Contains(err.Error(), "mine") || strings.Contains(err.Error(), "from-propagate") {
+		t.Errorf("the refusal quotes a value: %v", err)
+	}
+	// A field left out receives what Propagate adds, as documented.
+	got, err := ep.Call(context.Background(), sets, tenantIn{})
+	if err != nil || got.Tenant == nil || *got.Tenant != "from-propagate" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	// Plain requests are Propagate's to change, as they always were.
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+sets.baseURL.Host+"/tenant", nil)
+	req.Header.Set("X-Tenant", "mine")
+	resp, err := sets.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+}
+
 // epPanickingIn has rules that panic on the zero input they are compiled
 // against, as rules that read a Dep without allowing for its absence do.
 type epPanickingIn struct {

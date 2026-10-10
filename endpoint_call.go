@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -118,7 +120,8 @@ func ValidateFirst() CallOption {
 // Idempotency-Key, which [CallHeader] adds. The headers
 // [ClientOptions.Propagate] adds are added after the input is written, so a
 // field bound to one of them, such as X-Request-Id, and left out receives
-// the propagated value.
+// the propagated value. One the input set and Propagate changes is refused
+// with [ErrCallRefused], since the server would not read the input's value.
 func (ep Endpoint[In, Out]) Call(ctx context.Context, c *Client, in In, opts ...CallOption) (Out, error) {
 	var zero Out
 	def := ep.def
@@ -193,6 +196,9 @@ func (p *callPlan) request(ctx context.Context, base *url.URL, encoded *encodedR
 	if p.output == outputRedirect {
 		req = req.WithContext(context.WithValue(req.Context(), keepRedirectKey{}, true))
 	}
+	if bound := p.boundHeaders(req.Header); bound != nil {
+		req = req.WithContext(context.WithValue(req.Context(), boundHeadersKey{}, bound))
+	}
 	return req, nil
 }
 
@@ -205,6 +211,55 @@ type keepRedirectKey struct{}
 // than followed; see [Client.checkRedirect].
 func keepsRedirect(req *http.Request) bool {
 	return req.Context().Value(keepRedirectKey{}) != nil
+}
+
+// boundHeadersKey marks the context of a call with the headers its input
+// wrote, which [Client.Do] holds [ClientOptions.Propagate] to; see
+// [checkBoundHeaders].
+type boundHeadersKey struct{}
+
+// boundHeaders are the headers a call's input bound and wrote, as written.
+type boundHeaders struct {
+	method, path string
+	sent         http.Header
+}
+
+// boundHeaders returns the headers of h the input binds, or nil when it
+// wrote none.
+func (p *callPlan) boundHeaders(h http.Header) *boundHeaders {
+	var sent http.Header
+	for name := range p.headers {
+		if values, set := h[name]; set {
+			if sent == nil {
+				sent = http.Header{}
+			}
+			sent[name] = slices.Clone(values)
+		}
+	}
+	if sent == nil {
+		return nil
+	}
+	return &boundHeaders{method: p.method, path: p.path, sent: sent}
+}
+
+// checkBoundHeaders refuses a call whose [ClientOptions.Propagate] changed a
+// header the input had written, as one that sets a header whatever it holds
+// does. The value sent would not be the input's, and nothing would say so. A
+// header the input left out is Propagate's to fill, as [Endpoint.Call]
+// documents; the value is never quoted. It is linear in the headers the input
+// binds, and costs a request that is not a call one context lookup.
+func checkBoundHeaders(ctx context.Context, h http.Header) error {
+	bound, _ := ctx.Value(boundHeadersKey{}).(*boundHeaders)
+	if bound == nil {
+		return nil
+	}
+	for _, name := range slices.Sorted(maps.Keys(bound.sent)) {
+		if !slices.Equal(h[name], bound.sent[name]) {
+			return refuse(bound.method, bound.path, "ClientOptions.Propagate changed the header %s, which the input binds and had set, so the server would not read the input's value; "+
+				"have Propagate leave a header that is already set alone, as DefaultPropagate does", name)
+		}
+	}
+	return nil
 }
 
 // clientBaseURL parses [ClientOptions.BaseURL], panicking on one that cannot

@@ -210,7 +210,9 @@ type ClientOptions struct {
 	// does nothing to send no such header.
 	//
 	// It is called once per call to Do, with the request's context and a copy
-	// of its header, and what it adds is checked like any other header.
+	// of its header, and what it adds is checked like any other header. On a
+	// call made with [Endpoint.Call] it may fill a header the input binds and
+	// left out, but changing one the input set refuses the call.
 	Propagate func(ctx context.Context, h http.Header)
 
 	// BaseURL is the root the typed endpoints of one service are called
@@ -449,7 +451,13 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		out.Header = make(http.Header)
 	}
 	c.propagate(ctx, out.Header)
-	if err := checkRequestHeaders(out.Header); err != nil {
+	err := checkRequestHeaders(out.Header)
+	if err == nil {
+		// A call made with Endpoint.Call holds Propagate to the headers its
+		// input set; see endpoint_call.go.
+		err = checkBoundHeaders(ctx, out.Header)
+	}
+	if err != nil {
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}

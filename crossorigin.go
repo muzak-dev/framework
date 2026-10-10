@@ -67,7 +67,8 @@ type CrossOriginOptions struct {
 	// could never match the header, with a path, a trailing slash, upper case
 	// or a default port, is a build error naming the spelling to use, a
 	// pattern is a build error, and "null", which any page can send, is
-	// refused outright.
+	// refused outright. Each origin is matched exactly, and nothing decides
+	// one dynamically, so every subdomain to trust is listed.
 	TrustedOrigins []string
 
 	// InsecureBypassPatterns lists the requests exempt from the check, as
@@ -90,6 +91,14 @@ func newCrossOriginProtection(opts CrossOriginOptions) (*http.CrossOriginProtect
 	protection := http.NewCrossOriginProtection()
 	var errs []error
 	for _, origin := range opts.TrustedOrigins {
+		if strings.Contains(origin, "*") {
+			// Refused here rather than by checkOriginEntry, whose advice is
+			// for a list beside an AllowOriginFunc, which this one has none of.
+			errs = append(errs, fmt.Errorf("muzak: CrossOriginOptions.TrustedOrigins entry %q is a pattern, and "+
+				"TrustedOrigins matches each origin exactly, so it never matches; list every origin to trust, "+
+				"subdomains included, since cross-origin protection has no pattern or function that decides one", origin))
+			continue
+		}
 		if err := checkOriginEntry("CrossOriginOptions.TrustedOrigins entry", origin, false); err != nil {
 			errs = append(errs, err)
 			continue

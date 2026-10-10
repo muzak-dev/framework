@@ -612,11 +612,14 @@ func checkCORSOrigin(entry string) error {
 }
 
 // checkOriginEntry reports an allowed-origin entry that can never do what it
-// appears to, with what to write instead. It serves [CORSOptions] and
-// [WSOptions] alike, because both compare their lists with the Origin header a
-// browser sends; subject names the entry in the message, and foldCase says
-// whether the list is compared without regard to case, as a WebSocket route's
-// is, so that a difference of case alone is no mistake there.
+// appears to, with what to write instead. It serves [CORSOptions],
+// [WSOptions], [MCPOptions] and [CrossOriginOptions] alike, because each
+// compares its list with the Origin header a browser sends; subject names the
+// entry in the message, and foldCase says whether the list is compared
+// without regard to case, as a WebSocket route's is, so that a difference of
+// case alone is no mistake there. A pattern is explained as AllowedOrigins
+// beside an AllowOriginFunc, which the first three have, so
+// TrustedOrigins refuses one itself before asking.
 //
 // A browser serializes an origin as a scheme and a host with any port that is
 // not the scheme's default, lowercased, with nothing after them. An entry

@@ -323,3 +323,19 @@ func TestCrossOriginOptionsAreValidated(t *testing.T) {
 	}
 	mustBuild(t, New(options))
 }
+
+// TestTrustedOriginPatternIsExplainedOnItsOwnTerms is the regression test for
+// the build error a pattern in TrustedOrigins gave, which was the one CORS
+// gives: it spoke of AllowedOrigins and sent the reader to AllowOriginFunc,
+// neither of which CrossOriginOptions has.
+func TestTrustedOriginPatternIsExplainedOnItsOwnTerms(t *testing.T) {
+	t.Parallel()
+	for _, entry := range []string{"https://*.example.com", "*"} {
+		options := quietOptions()
+		options.CrossOriginProtection = &CrossOriginOptions{TrustedOrigins: []string{entry}}
+		message := buildError(t, New(options))
+		if !strings.Contains(message, "TrustedOrigins matches each origin exactly") || containsAny(message, "AllowedOrigins", "AllowOriginFunc") {
+			t.Errorf("the build error for %q is not about TrustedOrigins:\n%s", entry, message)
+		}
+	}
+}

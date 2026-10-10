@@ -100,7 +100,8 @@ func ValidateFirst() CallOption {
 // The answer is decoded as follows. A JSON output is decoded with
 // encoding/json/v2, members Out does not have ignored, as a client reading
 // another service should; a 204 decodes to the zero Out. [Bytes] returns the
-// body with its media type and the file name of its Content-Disposition, and
+// body with its media type and the file name of its Content-Disposition,
+// cleaned to one name as a name Muzak sends is, and
 // [Stream] returns the body unread, as an io.ReadCloser the caller must
 // close, which a handler can return as its own [Stream] to pass it on. A
 // [Redirect] output returns the redirect itself, To and Status, rather than
@@ -301,10 +302,16 @@ func decodeOutput[Out any](resp *http.Response, plan *callPlan) (out Out, err er
 // whether it asks for the body to be saved, as [Bytes] and [Stream] carry
 // them. mime reads the RFC 8187 filename* a name outside ASCII is sent in, and
 // prefers it to the ASCII filename beside it, as RFC 6266 asks.
+//
+// The name is the other server's, and is cleaned as a name Muzak sends is,
+// by [cleanFilename]: RFC 6266 section 4.3 asks a recipient not to let it
+// name a place other than one file, so a "/" or a "\" becomes "_", and a
+// control character, a line break or an override that draws it other than
+// it is goes. A name Muzak sent is clean already and arrives as it was.
 func readDisposition(h http.Header) (filename string, download bool) {
 	disposition, params, err := mime.ParseMediaType(h.Get("Content-Disposition"))
 	if err != nil {
 		return "", false
 	}
-	return params["filename"], disposition == "attachment"
+	return cleanFilename(params["filename"]), disposition == "attachment"
 }

@@ -46,6 +46,41 @@ func TestEndpointReturnsBytesWithTheirTypeAndName(t *testing.T) {
 	}
 }
 
+func TestEndpointCleansTheFileNameAnotherServerOffers(t *testing.T) {
+	t.Parallel()
+	bytesEP := NewEndpoint[Empty, Bytes](http.MethodGet, "/report")
+	streamEP := NewEndpoint[Empty, Stream](http.MethodGet, "/report")
+	for disposition, want := range map[string]string{
+		// A name offered for saving is a single name: a caller that saves
+		// under it must not be led out of the directory it saves into.
+		`attachment; filename="../../.ssh/authorized_keys"`: ".._.._.ssh_authorized_keys",
+		`attachment; filename="C:\\Windows\\win.ini"`:       "C:_Windows_win.ini",
+		// A control character, a line break or an override that draws the
+		// name other than it is, as RFC 8187 lets a server spell them.
+		`attachment; filename*=UTF-8''report%E2%80%AEfdp.exe%0D%0A`:  "reportfdp.exe",
+		`attachment; filename*=UTF-8''%20%20spaced%00%20name.txt%20`: "spaced name.txt",
+		`inline; filename="plain.txt"`:                               "plain.txt",
+	} {
+		client := rawServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Disposition", disposition)
+			_, _ = w.Write([]byte("data"))
+		})
+		got, err := bytesEP.Call(context.Background(), client, Empty{})
+		if err != nil || got.Filename != want {
+			t.Errorf("%s: got %q, %v; want %q", disposition, got.Filename, err, want)
+		}
+		stream, err := streamEP.Call(context.Background(), client, Empty{})
+		if err != nil {
+			t.Fatalf("%s: %v", disposition, err)
+		}
+		_ = stream.Body.(io.Closer).Close()
+		if stream.Filename != want {
+			t.Errorf("%s: the stream's name is %q, want %q", disposition, stream.Filename, want)
+		}
+	}
+}
+
 func TestEndpointReturnsAStreamToReadAndPassOn(t *testing.T) {
 	t.Parallel()
 	ep := NewEndpoint[Empty, Stream](http.MethodGet, "/export")

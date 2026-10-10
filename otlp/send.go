@@ -152,13 +152,17 @@ func (e *Exporter) backoff(tries int) time.Duration {
 // made: the run was cancelled, or Stop has begun and the wait would end past
 // its deadline. A Stop that begins during the wait is checked the same way.
 func (e *Exporter) sleep(r *run, wait time.Duration) bool {
+	// The wait ends when it is due, which a Stop that begins part way through
+	// it compares with its deadline: a whole wait counted from the Stop gave
+	// up on retries the deadline could still reach.
+	due := time.Now().Add(wait)
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	stopping := r.stopping
 	for {
 		select {
 		case <-stopping:
-			if !r.stopDeadline.IsZero() && time.Now().Add(wait).After(r.stopDeadline) {
+			if !r.stopDeadline.IsZero() && due.After(r.stopDeadline) {
 				return false
 			}
 			// Closed for good, so it is not waited on again.

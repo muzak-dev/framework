@@ -1140,14 +1140,52 @@ func TestStopWithAnExpiredContext(t *testing.T) {
 	assertNoExporterGoroutines(t)
 }
 
+// TestStopWaitsForARetryItsDeadlineCanReach lets a Stop that begins part way
+// through a wait make the retry when what is left of the wait ends before the
+// Stop's deadline, though the whole wait would not have fitted in it: the
+// wait ends when it was due to, not a whole wait after the Stop began.
+func TestStopWaitsForARetryItsDeadlineCanReach(t *testing.T) {
+	c := newCollector(t, statusResponder([]int{503}, http.Header{"Retry-After": {"4"}}))
+	opts, _ := testOptions(c.server.URL)
+	opts.RetryInitialInterval = 4 * time.Second
+	opts.RetryMaxInterval = 4 * time.Second
+	opts.RetryMaxElapsedTime = time.Minute
+	e, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	endSpans(e, 1)
+	go func() { _ = e.Flush(context.Background()) }()
+	waitFor(t, func() bool { return len(c.all()) == 1 }, "the first refusal")
+	// Two and a half seconds into a wait of four, a Stop with three seconds
+	// left reaches the retry with a second and a half to spare, where a wait
+	// of four counted from the Stop would not have fitted.
+	time.Sleep(2500 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := e.Stop(ctx); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
+	if stats := e.Stats(); stats.Exported != 1 || len(c.all()) != 2 {
+		t.Errorf("stats = %+v after %d requests, want the retry made", stats, len(c.all()))
+	}
+	assertNoExporterGoroutines(t)
+}
+
 // TestStopDuringARetryWait checks that a retry the collector asked to be made
 // later than Stop's deadline is abandoned at once rather than waited for.
 func TestStopDuringARetryWait(t *testing.T) {
+	// The collector asks for thirty seconds and the cap allows them, so the
+	// retry is due twenty seconds after the deadline below, however the
+	// clock rounds.
 	c := newCollector(t, statusResponder([]int{503, 503, 503}, http.Header{"Retry-After": {"30"}}))
 	opts, _ := testOptions(c.server.URL)
-	opts.RetryMaxInterval = 10 * time.Second
+	opts.RetryMaxInterval = time.Minute
 	opts.RetryInitialInterval = time.Second
-	opts.RetryMaxElapsedTime = time.Minute
+	opts.RetryMaxElapsedTime = 2 * time.Minute
 	e, err := New(opts)
 	if err != nil {
 		t.Fatal(err)

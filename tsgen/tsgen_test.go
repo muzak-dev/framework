@@ -334,6 +334,10 @@ func TestGenerateNamesSafely(t *testing.T) {
 		"models.Item": {Type: "string"}, "Page_app.Item": {Type: "string"},
 		"GetPetsParams": {Type: "string"}, "x/y~z": {Type: "string"},
 		"Uses": {Type: "array", Items: ref("x~1y~0z")},
+		// The names the client's runtime declares for itself.
+		"Fields": {Type: "object", Properties: map[string]*muzak.Schema{"a": {Type: "string"}}},
+		"Sent":   {Type: "object", Properties: map[string]*muzak.Schema{"path": {Type: "string"}}},
+		"Wants":  {Type: "array", Items: ref("Fields")},
 	}}, Paths: map[string]*muzak.PathItem{
 		"/pets": {Get: &muzak.Operation{OperationID: "get_pets", Responses: map[string]*muzak.Response{"200": {Description: "ok"}}}},
 		"/a":    {Get: &muzak.Operation{OperationID: "get-pets", Responses: map[string]*muzak.Response{"200": {Description: "ok"}}}},
@@ -350,6 +354,7 @@ func TestGenerateNamesSafely(t *testing.T) {
 		"export type _1st = string;", "export type Schema = string;", "export type Schema2 = string;",
 		"export type ModelsItem = string;", "export type PageAppItem = string;",
 		"export type GetPetsParams = string;", "export type XYZ = string;", "export type Uses = XYZ[];",
+		"export interface Fields2 {", "export interface Sent2 {", "export type Wants = Fields2[];",
 		// Operations are named after their ids, apart from what the
 		// components took, and so are their methods.
 		"export interface GetPets2Params", "export interface GetPets3Params", "export interface PostBParams",

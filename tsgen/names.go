@@ -9,8 +9,11 @@ import (
 
 // reserved are the names a generated identifier may not take: the words
 // JavaScript and TypeScript reserve, or give a meaning to in a type position,
-// and the globals the output itself refers to, which a declaration of the same
-// name would shadow for the whole file.
+// the globals the output itself refers to, which a declaration of the same
+// name would shadow for the whole file, and the types the client declares for
+// itself, Fields and Sent among them, which a component of the same name would
+// collide with. They are reserved whether or not the client is written, so
+// that a component is named the same either way.
 var reserved = map[string]bool{}
 
 func init() {
@@ -24,7 +27,7 @@ func init() {
 		Array ArrayBuffer Blob BodyInit Boolean Date Error File FormData Function Headers JSON Map
 		Math Number Object Partial Promise Readonly ReadonlyArray Record Request RequestInit
 		Response Set String Symbol TypeError URL URLSearchParams
-		ApiError ClientOptions Operations createClient fetch toString valueOf hasOwnProperty
+		ApiError ClientOptions Fields Operations Sent createClient fetch toString valueOf hasOwnProperty
 		isPrototypeOf propertyIsEnumerable toLocaleString prototype __proto__`) {
 		reserved[word] = true
 	}

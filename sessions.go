@@ -469,7 +469,8 @@ func (m *sessionManager) storeContext(c *Context, write bool) (context.Context, 
 // as the status line goes out, if that status is below 400, since a cookie
 // cannot follow it. An event stream or a WebSocket started its response
 // before its handler ran, so a session changed there is not saved, and a
-// warning is logged.
+// warning is logged; so is a change made after a handler's own response
+// started.
 //
 // A cookie that was tampered with, truncated, encrypted under a secret no
 // longer listed, copied from a cookie of another name, or past its idle
@@ -1173,6 +1174,12 @@ func (c *Context) commitSession(failure error) error {
 			failure, s.lateErr = s.lateErr, nil
 			c.handled = false
 		}
+		if failure == nil && c.w.written && c.w.status < http.StatusBadRequest && (s.err == nil || s.destroyed) {
+			// Settled as the response started, so a change made since could
+			// not follow the header out; one a failed response discarded on
+			// purpose is not warned of.
+			c.warnUnsaved()
+		}
 		return failure
 	}
 	s.settled = true
@@ -1189,11 +1196,7 @@ func (c *Context) commitSession(failure error) error {
 		// The response began before the handler returned, as an event
 		// stream's or a WebSocket's does, and a cookie can no longer follow
 		// it. A renewal can wait for the next request; a change is lost.
-		if s.changed {
-			c.logger.WarnContext(c.Context(), "muzak: the session changed after the response had started, so the change was not saved",
-				slog.String("route", c.route.pathOrRequest(c.r)),
-				slog.String(RequestIDKey, c.RequestID()))
-		}
+		c.warnUnsaved()
 		return nil
 	}
 	if err := s.write(); err != nil {
@@ -1203,6 +1206,20 @@ func (c *Context) commitSession(failure error) error {
 		return err
 	}
 	return nil
+}
+
+// warnUnsaved logs a change to the session that no cookie can carry any
+// more, because the response has started. The change is dropped as it is
+// warned of, so that a request settled more than once warns of it once.
+func (c *Context) warnUnsaved() {
+	s := c.session
+	if !s.changed {
+		return
+	}
+	s.changed = false
+	c.logger.WarnContext(c.Context(), "muzak: the session changed after the response had started, so the change was not saved",
+		slog.String("route", c.route.pathOrRequest(c.r)),
+		slog.String(RequestIDKey, c.RequestID()))
 }
 
 // commitHook is told when a response is about to start, which is the last

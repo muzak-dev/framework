@@ -674,6 +674,50 @@ func TestSessionChangedAfterTheResponseStarted(t *testing.T) {
 	}
 }
 
+// TestSessionChangedAfterItWentOutWithTheResponse covers a change lost the
+// same way by a session that was read before the response started, and so
+// was settled as it did: by a handler writing its own response, and by an
+// event stream whose guard reads the session. The change is not saved, and is
+// warned of once, while a change a failed response discarded on purpose is
+// not warned of at all.
+func TestSessionChangedAfterItWentOutWithTheResponse(t *testing.T) {
+	t.Parallel()
+	const warning = "the session changed after the response had started"
+	app, _, logs := sessionTestApp(t, nil, func(app *App) {
+		app.Post("/read-then-late", func(ctx *Context, _ Empty) (Empty, error) {
+			s := ctx.Session()
+			_, _ = ctx.ResponseWriter().Write([]byte("x"))
+			return Empty{}, s.Set("v", "late")
+		})
+		app.Post("/failed-then-late", func(ctx *Context, _ Empty) (Empty, error) {
+			s := ctx.Session()
+			ctx.ResponseWriter().WriteHeader(http.StatusConflict)
+			return Empty{}, s.Set("v", "late")
+		})
+		app.SSE("/events", func(ctx *Context, _ Empty, _ *SSEStream[string]) error {
+			return ctx.Session().Set("v", "late")
+		}, WithDependencies(func(ctx *Context) error {
+			_ = ctx.Session()
+			return nil
+		}))
+	})
+	for _, c := range []struct {
+		method, target string
+		warnings       int
+	}{
+		{"POST", "/read-then-late", 1},
+		{"POST", "/failed-then-late", 0},
+		{"GET", "/events", 1},
+	} {
+		before := strings.Count(logs.String(), warning)
+		rec := sessionRequest(t, app, c.method, c.target)
+		assertNoSessionCookie(t, rec)
+		if got := strings.Count(logs.String(), warning) - before; got != c.warnings {
+			t.Errorf("%s %s logged %d warnings of a lost change, want %d:\n%s", c.method, c.target, got, c.warnings, logs.String())
+		}
+	}
+}
+
 // TestSessionWithoutConfigurationPanics covers the programming error of
 // asking for a session an application never configured: a 500, with the
 // reason in the log.

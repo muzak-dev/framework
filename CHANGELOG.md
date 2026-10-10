@@ -9,6 +9,747 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-10
+
+This release adds what a service needs beside its routes: dependencies that
+clean up after themselves and can be replaced in tests, responses that are not
+JSON, any net/http handler mounted beside the routes, health checks,
+background tasks and timeouts, tracing and request metrics, an outbound HTTP
+client that is safe to point at a URL someone else chose, authentication that
+enforces what the document describes, sessions with cross-origin protection,
+typed endpoints a Go client calls with the server's own types, TypeScript for
+every other client, a check that fails a build which breaks the API, an MCP
+endpoint that offers chosen routes to AI clients as tools, and a `muzak`
+command. Every feature is opt-in and costs nothing until it is used. Each was
+written test first, fuzzed wherever it parses what a client or another server
+sends, and then reviewed by someone trying to break it. What those reviews
+found was fixed before the release and is described with the feature it
+belongs to; what they found and left is under **Known limits**, each with the
+reason. An existing application behaves as it did unless a change is listed
+under **Changed**.
+
+### Added
+
+#### Dependencies
+
+- **`muzak.Dep[T]` declares a dependency on the input type.** A field such as
+  `User muzak.Dep[CurrentUser]` receives the value the route's provider
+  resolved, read with `in.User.Get()`. A Dep without a provider of exactly its
+  type on the route's chain is a build error naming the route, the field and
+  the type, instead of a 500 on the first request, and a Dep placed where it
+  could never be filled (behind a pointer, in a slice or nested struct,
+  unexported, or tagged) is refused the same way. It is never read from the
+  request, never a body member and never in the OpenAPI document, and it costs
+  no allocation over `From`. Migration: none.
+
+- **`muzak.Acquire` declares a provider that cleans up after the request.**
+  Its provider returns a `muzak.Release` beside the value. Releases run
+  exactly once each, last acquired first, on every way a request ends:
+  success, error, panic, a later refusal, the rate limit counted after the
+  dependencies, binding or validation failure, the client leaving, and the end
+  of an event stream or WebSocket. Each release is told whether the request
+  failed. For a buffered response they run after encoding and before anything
+  is written, so a release that fails replaces the success with its error,
+  rendered like a handler's error. A file mount and the documentation, which
+  already ran the providers they inherit, release what an application-wide
+  `Acquire` acquired for them, a file mount answering beneath a handler mount
+  included. Migration: none.
+
+- **`muzak.Transaction(db, opts)` gives each request a `*sql.Tx`.** It is
+  committed only if the handler and everything after it succeeded, and rolled
+  back otherwise. A failed commit is an opaque 500 with the cause logged. A
+  handler that carries on past a route's `Timeout` finds its transaction
+  already rolled back by database/sql, and is answered with the 503 the
+  deadline calls for rather than a 500. Migration: none.
+
+- **`App.Override`, `App.OverrideAcquire`, `testclient.Override` and
+  `testclient.OverrideAcquire` replace providers in tests.** Every provider of
+  a type in that one application is replaced (routes, mounts and the
+  documentation), keeping its lifetime and leaving guards alone. An override
+  for a type nothing provides is a build error, and overriding after the build
+  panics. Migration: none.
+
+#### Responses that are not JSON
+
+- **`muzak.Bytes`, `muzak.Stream` and `muzak.FileResponse` send a body that is
+  not JSON.** A handler returns them as its Out; they are recognised at
+  registration and documented as binary content. `Bytes` writes a body held in
+  memory under the media type it names, with Content-Length. `Stream` copies
+  an `io.Reader` through a pooled buffer and closes it exactly once on every
+  path (success, failed copy, client gone, HEAD, an error returned beside it,
+  a panic); it aborts the connection when the body fails, ends short of its
+  declared `Length` or runs past it, compression included. The route's
+  `Acquire` releases run before a stream's body is read, so a stream does not
+  read from what they release. `FileResponse` serves one file from an `fs.FS`
+  with `http.ServeContent`, so ranges and conditional requests work. Its
+  `Name` is refused as a missing file when `fs.ValidPath` refuses it, when it
+  names a dotfile, or when it holds a backslash or control character; on
+  Windows also for a drive, stream, device name, trailing dot or space, or 8.3
+  short name. Types come from the extension, never the content, and HTML, SVG
+  and XML are sandboxed unless `AllowActiveContent` is set. A content type
+  that is not an RFC 9110 media type fails with a 500 rather than reaching the
+  header. Every such response carries `X-Content-Type-Options: nosniff`, and
+  `Filename` and `Download` build a cleaned `Content-Disposition` with an RFC
+  8187 `filename*`. Migration: none.
+
+- **`muzak.Redirect` refuses open redirects by default.** It sends a Location
+  and no body, with 302 for GET and HEAD and 303 otherwise unless `Status` or
+  the route says otherwise. Only a path on this origin is accepted: `//`,
+  `/\`, tabs, line breaks, controls, non-ASCII, and paths that decode (up to
+  three times) or dot-resolve to another host are a 500 with the reason logged
+  and the target left out. An absolute http or https URL needs its host listed
+  with the new `muzak.RedirectHosts(...)` option (exact, case-insensitive,
+  port-aware, no user information or encoded hosts) or `External: true`.
+  Migration: none.
+
+- **`muzak.Produces` documents the media types of a Bytes, Stream or
+  FileResponse route** as `format: binary` with `contentMediaType`; it is a
+  build error anywhere else. The document gains `Response.Headers`
+  (`muzak.ResponseHeader`) and `Schema.ContentMediaType`; a document of
+  JSON-only routes is unchanged. Migration: none.
+
+- **`muzak.AutoETag()` answers a client that already holds the body with
+  304.** On GET and HEAD 200 responses whose body is JSON, HTML or Bytes it
+  sets a strong ETag (SHA-256 truncated to 128 bits, base64url) unless the
+  handler set one. `If-None-Match` is compared weakly as RFC 9110 says, read
+  in one pass that allocates nothing, and ignored when malformed. The 304
+  keeps ETag, Cache-Control, Content-Location, Date, Expires and Vary and
+  drops body metadata. JSON is encoded with sorted map keys on tagged routes.
+  It composes with `Compress` and with guarded routes. It is off by default
+  and free when off. Migration: none.
+
+#### Serving beside net/http
+
+- **`Router.Mount` serves any `http.Handler` at a prefix.** pprof, a metrics
+  handler, a connect-go service or a legacy application is served at a fixed
+  prefix and everything beneath it, for every method, with the most specific
+  answer winning: a route beneath the prefix keeps the methods it registers
+  and the mount answers the rest, which is what moving a legacy application
+  route by route needs. The handler runs inside the middleware chain and
+  behind the rate limit, guards and providers of its routers and of the
+  options given to `Mount`. It receives the original `*http.Request` with the
+  request id and the prefix as its route template, its body is bounded by
+  `MaxBodySize`, and its panics are recovered as a route's are.
+  `StripPrefix()` gives it paths relative to the mount, and a handler mounted
+  that way that parses a multipart body has its temporary files removed when
+  it returns or panics, as a route's are. Nothing normalises the path, so a
+  request reaches the mount only through its exact prefix, and whatever it
+  serves has passed its guards. `App.Override` reaches the providers given to
+  `Mount`, and a provider given to it with a nil argument is a build error. A
+  `Timeout` given to `Mount` is a build error; one inherited from a router is
+  not applied to a mounted handler, as it is not to an event stream.
+  Conflicting mounts and invalid prefixes are build errors, and mounts are not
+  in the OpenAPI document. Migration: none.
+
+- **`AppOptions.AllowedHosts` refuses requests for hosts the application does
+  not serve.** Anything else gets 421 Misdirected Request through the error
+  renderer, and is logged, before CORS, middleware, routing or documentation
+  run. Entries are `host` or `host:port`, case-insensitive for ASCII only; a
+  trailing dot is ignored, a leading `*.` matches subdomains but not the
+  domain, and IPv6 goes in brackets. Forwarding headers are never consulted.
+  Entries that can never match are build errors. Unset, it costs nothing.
+  Migration: none.
+
+- **`AppOptions.RedirectHTTPS` redirects plain HTTP to https.** GET and HEAD
+  get 301, everything else 308. A request counts as https over TLS, or when a
+  trusted proxy's own `X-Forwarded-Proto` (or `Forwarded proto=`) says so; a
+  claim from any other peer is ignored. The redirect only names a host the
+  application vouches for, so enabling it without `AllowedHosts` or
+  `RedirectHTTPSOptions.Host` is a build error. ACME HTTP-01 challenges are
+  never redirected. Migration: none.
+
+- **`AppOptions.ProblemDetails` renders errors as RFC 9457 problem details.**
+  Every error becomes a `muzak.Problem` sent as `application/problem+json`,
+  with `type`, `title` (translatable at `muzak.status.<code>`), `status`,
+  `detail`, `instance` (`urn:uuid:` and the request id), `code`, `errors` and
+  `request_id`, and the OpenAPI document describes errors that way. That
+  includes the 405 the documentation answers and the 500 of an application
+  that did not build. It decides everything by asking `DefaultErrorRenderer`,
+  so codes, details, translations, 5xx opacity and preserved headers are
+  identical. `muzak.ProblemDetails` is exported for composition. The default
+  envelope stays the default. Migration: none.
+
+#### Operations
+
+- **`AppOptions.Health` serves liveness and readiness endpoints a platform can
+  probe.** With `Enabled` set, `/livez` answers 200 for as long as the process
+  serves, and `/readyz` answers 503 until the lifecycle components have
+  started, 200 once every `HealthCheck` passes, and 503 again from the moment
+  a shutdown begins, before any connection is closed. Probes are answered
+  ahead of routing: before `AllowedHosts`, `RedirectHTTPS`, `App.Use`
+  middleware, guards, the rate limit and CORS. They take GET and HEAD only,
+  are sent `Cache-Control: no-store` and are not in the OpenAPI document.
+  Checks run concurrently under their own timeouts; concurrent probes share
+  one run and the result is reused for `CacheInterval`, so a flood of probes
+  costs one run of the checks per interval, and a check that hangs is not
+  started again while it runs. A body carries `{"status":"ok"}` or
+  `{"status":"unavailable"}` and, only with `ReportChecks`, each check's name
+  and outcome; what a check returned is logged when its state changes, never
+  sent. Probes are access-logged at debug level. A health path that a route, a
+  mount or the documentation answers is a build error, and so is a health path
+  at `/` beside a frontend or a handler mounted at the root. Migration: none;
+  the zero value serves nothing.
+
+- **`ServerOptions.DrainDelay` keeps serving, with readiness down, before the
+  listeners close.** It gives a load balancer, or Kubernetes removing a
+  terminating pod from its Service, time to stop sending traffic, replacing a
+  `sleep` in a `preStop` hook. The delay counts against `ShutdownTimeout`; a
+  negative one, or one not shorter than `ShutdownTimeout`, is a build error.
+  Migration: none; it defaults to zero.
+
+- **`Context.AfterResponse` runs work the client should not wait for.** A task
+  registered from a handler, guard or provider runs on a bounded pool
+  (`AppOptions.Background`, 4 workers and a queue of 64 by default) once the
+  handler has returned nil without panicking and the releases were told the
+  request succeeded, so a task never follows a transaction that was rolled
+  back or a value that failed to encode. It runs with a context that keeps the
+  request's values but not its cancellation, and is cancelled at the shutdown
+  deadline. It never receives the pooled `Context`. A full queue returns
+  `ErrBackgroundQueueFull` and a shutdown that has closed the listeners
+  returns `ErrBackgroundShuttingDown`, at once and without starting a
+  goroutine. Workers start only when a task is queued and exit when idle. A
+  shutdown drains in-flight requests, then the tasks, then stops the lifecycle
+  components, so a task can still use them; at the deadline queued tasks are
+  dropped and running ones cancelled. A panic in a task is recovered and
+  logged with the request identifier. It is refused on event stream and
+  WebSocket routes. Migration: none.
+
+- **`muzak.Timeout(d)` gives a route or router a cooperative deadline.** The
+  deadline is set on the request's context before the route's dependencies,
+  binding and handler run; no second goroutine ever runs on the request's
+  behalf. A failure the route's own deadline caused, before the response
+  started, is answered 503 with `Retry-After: 1` through the error renderer
+  and documented in the OpenAPI document; an error with its own status, a
+  client that left and a shorter deadline the handler set are left alone, and
+  a handler that ignores the deadline has its success sent. The narrower
+  declaration wins and a negative value removes an inherited one. Declared on
+  an event stream or WebSocket route it is a build error naming `MaxLifetime`;
+  inherited from a router it is not applied to them. A route without one pays
+  nothing. Migration: none.
+
+#### Observability
+
+- **Tracing with W3C trace context, through `AppOptions.Tracing`.** Naming a
+  `Tracer` gives every request one server span named after its method and
+  route template, never its path, with the OpenTelemetry HTTP attributes. A
+  valid `traceparent` is continued along with its sampling decision;
+  `TracingOptions.Parent` can limit that to `ClientIP.TrustedProxies` or turn
+  it off. `traceparent` and `tracestate` are parsed strictly and fuzzed, and
+  identifiers come from crypto/rand. A 5xx, an aborted response and a failed
+  stream or WebSocket mark the span an error. A failure the log records
+  becomes an `exception` event with the same text. The span ends when the
+  response, stream or connection does. `SpanContextFromContext`,
+  `InjectTraceContext`, `SpanFromContext` and `StartSpan` give handlers the
+  trace, and `SampleRatio` samples new traces. Left unset, nothing is
+  installed and nothing is allocated. Migration: none.
+
+- **The access log and `Context.Logger` carry `trace_id` and `span_id` when
+  tracing is on.** Migration: none; records are unchanged when it is off.
+
+- **`AppOptions.Observer` is the request metrics hook.** A `RequestObserver`
+  is called exactly once per request after the response, including 404s,
+  failures, panics, aborts, event streams and WebSockets. It receives a
+  bounded method, the route template, status, duration, request and response
+  sizes, whether the response was aborted, and the span context for exemplars.
+  A method no standard defines is recorded as itself only when a route
+  registered for that method answered; through a handler mount, which answers
+  every method, it is `_OTHER`, so a client cannot mint labels. A Tracer or
+  observer that implements `Lifecycle` is started and stopped with the
+  application, and one that panics is logged and contained. Migration: none.
+
+- **`muzak.dev/framework/otlp` exports spans to any OpenTelemetry collector.**
+  It uses OTLP/HTTP with the JSON encoding and the standard library only, and
+  is a `Tracer` and a `Lifecycle`. Spans go into a bounded queue that drops
+  and counts rather than waits, and are batched by size or interval, with
+  optional gzip. A span is held to 64 KiB, counting every value it keeps, not
+  only its text. It retries 429, 502, 503 and 504 with backoff and jitter,
+  honouring a capped `Retry-After` that asks for longer but never one that
+  would shorten the backoff, never follows redirects, and reads answers up to
+  64 KiB. `Stop` flushes within its deadline and leaves no goroutine behind,
+  and a second `Stop` returns at once. Header values are validated and never
+  printed, an endpoint with credentials in it is refused, and `Stop` closes
+  idle connections only on a transport the exporter made itself, never on a
+  supplied client's or on `http.DefaultTransport`. Migration: none.
+
+#### Calling other services
+
+- **`muzak.NewClient` builds an outbound HTTP client that is safe to point at
+  a URL someone else chose.** Loopback, private, link-local, shared, reserved,
+  documentation and cloud metadata addresses are refused on the socket at the
+  moment of connecting. So a name that resolves to one, DNS rebinding and
+  redirects all meet the same check, as do IPv6 forms that embed a refused
+  IPv4 address (NAT64, 6to4, IPv4-compatible and the IPv4-translated form of
+  SIIT) and spellings such as `127.1` or `2130706433`. The local-use NAT64
+  block `64:ff9b:1::/48` is refused as a private range is, and is read in
+  every layout a translator may use, so a metadata service or a denied network
+  stays refused through it. `AllowPrivateNetworks`, `AllowedNetworks` and
+  `DeniedNetworks` relax or tighten the policy, and a metadata service stays
+  refused unless it is named. Environment proxies are never read. A refusal is
+  an `*AddressRefusedError`. Migration: none.
+
+- **The client bounds everything and retries only what is safe.** There is a
+  30-second overall timeout that covers the body, beside dial, TLS and header
+  timeouts, and a 10 MiB body cap counted after decompression
+  (`ErrResponseTooLarge`). At most five redirects are followed, never from
+  https to http, and credentials are dropped once a redirect leaves the
+  origin. TLS 1.2 is the minimum, and headers carrying CR, LF or NUL are
+  refused. Idempotent requests, and requests with an `Idempotency-Key`, are
+  retried on connection errors and on 429, 502, 503 and 504. The wait between
+  attempts is randomised and doubles, and honours `Retry-After` up to a cap. A
+  `RetryBudget` stops retry storms. Migration: none.
+
+- **An opt-in per-host circuit breaker, propagation and JSON helpers.**
+  `CircuitBreakerOptions{Threshold}` opens a host's circuit after consecutive
+  failures, sends one probe after `Cooldown`, and keeps a bounded LRU of
+  failing hosts; an open circuit returns `ErrCircuitOpen`. `DefaultPropagate`
+  copies the request id into `X-Request-Id` and, when the request is traced,
+  the trace context into `traceparent` and `tracestate`, leaving alone what
+  the caller set. `GetJSON`, `PostJSON` and `DoJSON` decode bounded JSON and
+  report any other status as a `*RemoteError`. Migration: none.
+
+#### API compatibility
+
+- **`muzak.CompareDocuments` reports what a change to the API does to its
+  clients.** It compares two OpenAPI documents the way a client meets them: a
+  request schema may only widen and a response schema may only narrow, so a
+  new required request member, a narrowed request type, or a response member
+  that is gone or may now be null is `Breaking`, a new value in a response
+  enum or a relaxed response bound is `PossiblyBreaking`, and a new optional
+  member or operation is `Compatible`. Operations, parameters, bodies,
+  statuses, media types, the headers each response documents and security
+  requirements are judged too: a required response header that is gone or may
+  now be absent is breaking, and a removed operation that was deprecated is
+  only possibly breaking. Each `APIChange` carries a stable kind, a JSON
+  pointer location and a one-sentence message, and the list is sorted.
+  References are followed through components, so a renamed component, or the
+  `Input` copy of a type a response also uses, is compatible. Each pair of
+  components is compared once per direction, so shared and recursive schemas
+  cost time linear in the documents. The work is charged for every value, name
+  and byte a schema holds each time it is read, the report is capped at
+  100,000 changes or 64 MiB of text, and a document built to be expensive
+  stops at that bound and says so with a breaking `comparison-incomplete`.
+  `muzak.ReadDocument` reads a stored document strictly, within 16 MiB and 128
+  levels, refuses a null response or header, and escapes terminal control
+  characters in every location an error quotes; `muzak.WriteChanges` prints a
+  report grouped by severity with the same escaping. Migration: none.
+
+- **`testclient.AssertCompatible` fails a test that breaks the committed
+  API.** It compares the application's document with a baseline file, fails
+  listing the breaking changes and logs the possibly breaking ones. Run with
+  `MUZAK_UPDATE_OPENAPI=1` it records the current document instead, creating
+  the directories it needs and writing through a temporary file renamed into
+  place, and logs what the new baseline accepts. A missing baseline fails with
+  instructions to create it. Migration: none.
+
+#### Authentication
+
+- **`muzak.JWTBearer` is a security scheme that verifies the JWT bearer tokens
+  it documents.** A route whose `WithSecurity` names it refuses a request
+  without a valid token before any guard, provider or handler runs, and hands
+  the verified `*muzak.Claims` to `From`, `TryFrom` and `Dep`. Tokens are
+  checked against an explicit allowlist of HS, RS, PS, ES and EdDSA
+  algorithms, never `none`, with a key of the algorithm's own kind that the
+  token's `kid` selects, so an RSA public key is never an HMAC secret and a
+  token cannot pick its key. Issuer, audience, `exp`, `nbf` and `iat` are
+  checked with a bounded leeway. `crit`, `jku`, `jwk`, `x5u` and `x5c` are
+  refused. The token's length, its base64url and the depth of its JSON are all
+  bounded, and JSON members may not repeat. Keys are configured in the
+  application or fetched from a JWKS through the SSRF-safe client: within
+  size, count and time bounds, cached as `Cache-Control` allows, refreshed in
+  the background as a lifecycle component, fetched again for an unknown `kid`
+  at most once per interval, and the last good set is kept when a fetch fails.
+  A key set is used only when it arrived over https, or plain http to a
+  loopback address, wherever a redirect took the client, so a redirect down to
+  plain http cannot replace the keys. A refusal is RFC 6750's `401` or `403
+  insufficient_scope`, rendered by the error renderer and saying nothing about
+  which check failed. `muzak.ClaimsAs[T]` decodes custom claims. Migration:
+  none.
+
+- **`muzak.APIKeyVerifier` verifies API keys in a header, query parameter or
+  cookie.** Keys are held as SHA-256 digests and compared with every key in
+  constant time. A request that sends its key twice is refused. Neither a key
+  nor its digest is ever logged. A `Lookup` resolves keys stored elsewhere.
+  The verified caller is a `*muzak.APIKeyPrincipal`, and its scopes are
+  checked against `Require`. Migration: none.
+
+- **`JWTOptions.ResourceMetadata` publishes RFC 9728 protected resource
+  metadata** at `/.well-known/oauth-protected-resource`, public and left out
+  of the OpenAPI document, and every challenge names it in
+  `resource_metadata`. This is how an OAuth or MCP client finds the
+  authorization server. Off by default. Migration: none.
+
+#### Sessions and cross-origin requests
+
+- **`AppOptions.Sessions` gives every request a session through
+  `ctx.Session()`.** It is read the first time a handler, guard or provider
+  asks for it, so a request that never asks parses, decrypts and writes
+  nothing. By default the session lives in the cookie, encrypted with
+  AES-256-GCM under keys derived with HKDF-SHA256 from
+  `SessionOptions.Secrets`: the first secret encrypts, all decrypt, and
+  secrets under 32 bytes are a build error. Each cookie uses its own key
+  derived from a random 192-bit nonce, and the cookie name is bound as
+  additional data, so a cookie cannot be replayed under another name. A
+  `SessionStore` (`Load`, `Create`, `Update`, `Delete`), such as the bounded
+  `NewMemorySessionStore`, keeps sessions on the server; the cookie then
+  carries a random 256-bit identifier that the store only sees hashed. A
+  session another request ended, such as by signing out, is never brought
+  back: not by `Update`, not by a `Save` followed by another change, and not
+  by `Regenerate`, which first checks that the old entry still exists. The
+  idle timeout (2h) and lifetime (24h) are kept inside the authenticated
+  record, and tampered, truncated, foreign or expired cookies read as no
+  session. The cookie is HttpOnly, Secure, SameSite=Lax and named
+  `__Host-session` by default; attribute mistakes are build errors. It is
+  written once, after the releases and before the response, only when the
+  request succeeded and the session changed or is due for renewal; `Save`
+  keeps a change regardless of what follows. A response carrying the cookie is
+  never stored by a shared cache, whatever sets `Cache-Control` after the
+  cookie (the handler after `Save`, an error renderer, or a file range). An
+  event stream keeps its `no-transform`, a session read on an event stream or
+  WebSocket leaves their `Cache-Control` to them, and a change made after the
+  response started is warned of. `muzak.SessionGet[T]`, `Set`, `Delete`,
+  `Clear`, `Regenerate` (call it on sign-in) and `Destroy` work on it, and
+  `Set` refuses growth past `MaxSize` with `ErrSessionTooLarge`. Migration:
+  none.
+
+- **`AppOptions.CrossOriginProtection` refuses state-changing requests a
+  browser sends from another origin.** It is built on net/http's
+  `CrossOriginProtection` (Sec-Fetch-Site, falling back to Origin against
+  Host), needs no tokens and never refuses GET, HEAD or OPTIONS. A refusal is
+  a `403` classified `cross_origin_request` (`CodeCrossOriginRequest`),
+  rendered by the error renderer (problem details included) with `Vary:
+  Origin, Sec-Fetch-Site`, logged, and made before any middleware, guard,
+  handler, mount or documentation runs. `TrustedOrigins` are validated as CORS
+  origins are, and a CORS-allowed origin is not trusted for unsafe methods
+  unless it is listed. `TrustedOrigins` are matched exactly, so a pattern in
+  one is a build error saying that each origin must be listed.
+  `InsecureBypassPatterns` are `ServeMux` patterns; invalid, conflicting and
+  safe-method patterns are build errors, and so is a pattern whose path is
+  `/`, with or without a method or host, since it would turn the protection
+  off for everything beneath it. Any other pattern ending in `/` covers its
+  whole subtree, as a `ServeMux` pattern does, and is warned of at build;
+  ending it in `{$}` matches one path. WebSocket handshakes stay with
+  `WSOptions.AllowedOrigins`. Sessions cannot be configured without it.
+  Migration: none.
+
+#### Typed endpoints and TypeScript
+
+- **Typed endpoints: declare an operation once and call it from Go.**
+  `muzak.NewEndpoint[In, Out](method, path, opts...)` puts the method, path
+  template, route options and both types in one value, which a package shared
+  by a service and its callers declares. `Router.Implement(ep, handler,
+  opts...)` registers it exactly as `Handle` would, and a handler of the wrong
+  types does not compile. `Endpoint.Call(ctx, client, in, opts...)` writes
+  `in` as the exact inverse of binding, compiled from the binder's own plan:
+  path segments escaped, query and header lists, quoted cookies, a JSON body
+  of body members only, and multipart forms. An input that decodes itself is
+  written from its body members alone, never its located fields, so a
+  credential bound to a header never lands in a body. Before sending, a call
+  refuses any value no request carries unchanged, wrapping `ErrCallRefused`
+  and never quoting the value: that includes a body member with a default that
+  its json tag's `omitzero` or `omitempty` would leave out, which would
+  otherwise arrive as the default, and a client's `Propagate` that changes a
+  header the input set. Outputs `Bytes`, `Stream` and `Redirect` come back as
+  themselves, a redirect is returned rather than followed, and the file name
+  another server offers for a Bytes or Stream is cleaned to one name.
+  `CallHeader` adds unbound headers, and `ValidateFirst` runs the input's
+  rules before sending. An input whose `Validate` panics while the call is
+  compiled panics alike on every call. Migration: none.
+
+- **`ClientOptions.BaseURL` names the service a client calls endpoints on.**
+  It must be an absolute http or https URL with no query, fragment or user
+  information, or `NewClient` panics. `Do` ignores it. Migration: none.
+
+- **`RemoteError` reads the error envelope.** `Code`, `Message`, `Details` and
+  `RequestID` are filled from the default envelope or from problem details.
+  The body is read only under a JSON media type, at most 64 KiB, whole or not
+  at all, keeping at most a hundred details. `Error()` names the code when it
+  is a plain identifier of at most 64 bytes (`muzak: GET
+  https://api.example.com answered with status 404 (not_found)`). This applies
+  to `Call` and to `DoJSON`, `GetJSON` and `PostJSON`. Migration: none.
+
+- **The `tsgen` package writes TypeScript for an application's API.**
+  `tsgen.Generate(doc, tsgen.Options{Client: true})` writes an interface or
+  alias per component, `Params`, `Body`, `Response` and `Error` types per
+  operation with an `Operations` map, and optionally a small fetch client.
+  Output is deterministic and safe to generate from a document someone else
+  wrote: names are sanitised, every string is escaped so nothing in the
+  document can break out of a comment or a string literal, and the client's
+  own type names are reserved. With `Client`, the static text of a path is
+  escaped so a request cannot leave the `baseUrl` it is given, and a path
+  holding a dot segment is an error. A parameter described twice is one
+  member. Generation is bounded in depth and work and linear in what a
+  document repeats. Migration: none.
+
+#### MCP
+
+- **`App.MCP` serves a Model Context Protocol endpoint, through which an AI
+  client calls the routes you choose as tools.** The endpoint speaks the
+  Streamable HTTP transport of MCP 2025-03-26, 2025-06-18 and 2025-11-25,
+  opening a session with `initialize`, and of 2026-07-28 statelessly,
+  answering every message as `application/json`. Nothing is a tool until it is
+  chosen, with `muzak.MCPTool()`, `MCPOptions.Tags` or `MCPOptions.Include`;
+  WebSocket, event stream and hidden routes, mounts, static files, the
+  documentation and the endpoint itself never are. A tool is described from
+  the OpenAPI document: its name is the operation id, its input is grouped by
+  path, query, header, cookie, body and form, and its output is the success
+  schema, with every reference resolved. A call decodes its arguments by the
+  binder's rules, writes them with the typed-endpoint encoder, and serves the
+  request in-process through the whole application, so the route's security,
+  guards, providers, rate limit, validation and releases apply, and the call
+  can reach its own route alone. It carries the MCP request's `Authorization`,
+  the headers and cookies the options forward, the client's address, the
+  request identifier, the trace and the cancellation, and nothing else. A
+  failure is an `isError` result carrying the application's error envelope,
+  and every answer is bounded by `MaxResultSize`. The `Origin` is checked
+  against DNS rebinding. Messages are read strictly within the body limit and
+  128 levels of nesting. Sessions are bounded and bound to the principal that
+  opened them, and `tools/list` cursors are authenticated. An application
+  without an endpoint behaves and allocates exactly as before. A tool call's
+  credentials come only from the client's request: a route whose input binds
+  the header, query parameter or cookie that an API key scheme or the session
+  reads one from cannot be a tool, so a model can never choose whose key a
+  call is made with. The request a call writes is held to the smaller of its
+  route's body limit and the endpoint's, so a short argument cannot be written
+  out as a request hundreds of times its size, and a request carrying
+  `Mcp-Method` or `Mcp-Name` is held to them whatever revision it speaks.
+  Migration: none.
+
+#### The muzak command
+
+- **The `muzak` command creates, runs and inspects an application.** `go
+  install muzak.dev/framework/cmd/muzak@latest` installs a command that is
+  part of the framework's own module and uses the standard library alone, so
+  the command at a version matches the framework of that version. `muzak new
+  <dir> [-module path]` creates a project laid out as `example/` is: a
+  `go.mod` requiring that framework version, `cmd/server`, `routers`,
+  `handlers`, `schemas`, a handler test served through `testclient`, a
+  `.gitignore` and a README. It writes only into a directory it creates or one
+  that is empty, refuses a file or a symbolic link in the way, writes every
+  file exclusively through an `os.Root` so nothing can lead a write outside
+  the directory, checks the module path as the go command would, and removes
+  what it created when a write fails. Everything the command prints from a
+  document, a server or a file is escaped for the terminal, and an unknown
+  command or flag exits 2 with a suggestion. Migration: none.
+
+- **`muzak dev` rebuilds and restarts an application when its sources
+  change.** It builds the package with `go build`, runs it, and polls the tree
+  by stat, which works the same on every platform and file system. It watches
+  only the `-ext` extensions (by default Go sources, module files, YAML and
+  `.env`, so an application writing a database or log into its tree does not
+  restart itself), skips `.git`, `node_modules`, `vendor`, `testdata` and
+  dot-directories, and refuses a tree of more than 10,000 watched files. A
+  rebuild waits for a save to settle, and a build that fails prints the
+  compiler's output and leaves the running application up. On Unix the
+  application runs in a process group of its own: `SIGINT`, `SIGTERM`, a
+  terminal hang-up (`SIGHUP`) and Ctrl-\ (`SIGQUIT`) are forwarded to the
+  whole group, which is given `-grace` before it is killed, so processes the
+  application started are stopped too, closing the terminal never leaves the
+  application holding its port, and none is left as a zombie. On Windows the
+  application is killed at once and a process it started is left running. A
+  `-watch` root that is a symbolic link is followed. Migration: none.
+
+- **`muzak routes`, `muzak diff` and `muzak ts` read an OpenAPI document from
+  a file, standard input or a running application.** `routes` prints each
+  operation's method, path, operation id, summary and security requirements.
+  `diff` runs `CompareDocuments`, prints the `WriteChanges` report, and exits
+  1 on changes as serious as `-fail-on breaking|possibly|never` names and 2
+  when a document cannot be read, for a CI step to gate on. `ts` writes the
+  `tsgen` declarations, with `-client` the fetch client too, to standard
+  output or atomically to the `-o` file. `-url` fetches through a
+  `muzak.Client` bounded at 30 seconds and 16 MiB that may reach loopback and
+  private addresses, where a developer's own server listens, but never a cloud
+  metadata address. A new `-o` file is created under the umask. Migration:
+  none.
+
+### Changed
+
+- **`WithSecurity` and `Public` enforce a scheme built by `JWTBearer` or
+  `APIKeyVerifier`.** Every descriptive scheme behaves exactly as before.
+  Where a verifying scheme is named, the requirements are enforced as the
+  document describes them: alternatives, schemes needed together, scopes, and
+  an empty requirement for anonymous access. Enforcement also covers the HEAD
+  a GET route answers, the `Mount`, `Static` and `Frontend` beneath the
+  router, and, for a declaration on `New`, the documentation. The requirements
+  are judged before a route declared with `CaptureBody` reads its body, so a
+  request without a valid credential cannot make the server buffer one.
+  Alternatives that mix verifying and descriptive schemes are a build error,
+  and so is a `Dep[*Claims]` or `Dep[*APIKeyPrincipal]` that the route's
+  security does not always fill. Migration: none for an existing application;
+  this applies only once a verifying scheme is declared.
+
+- **The documentation's 405 is rendered by the error renderer.** A method
+  other than GET or HEAD on the OpenAPI document or the documentation UI is
+  answered with the JSON envelope (or a problem) and `Allow: GET, HEAD`
+  instead of a line of text/plain; on guarded documentation it is still
+  answered after the guards. Migration: none unless a client read that text.
+
+- **An OpenAPI document that cannot be encoded as JSON is a build error.** The
+  document was encoded only when it was first served, and a failure was logged
+  and `/openapi.json` silently left unserved, so an application learned of it
+  from a client. Text a struct tag supplies that is not valid UTF-8 is how one
+  gets there. The document is now encoded once at build, a failure is a build
+  error saying why, and the documentation serves the bytes that were checked.
+  Migration: fix the tag the error names.
+
+- **A request that failed because its client went away is logged at debug
+  level.** A session store read, a rate limit count, or a handler that
+  returned the request's own cancellation was logged as an error (or a warning
+  with `FailOpen`), so a client could write error lines at will by connecting
+  and hanging up. These are now logged at debug level, as an event stream or
+  WebSocket its client ended already was. A `StoreTimeout` or `StorageTimeout`
+  that runs out is still logged as the failure it is, and what the client is
+  sent does not change. Migration: none, though an alert on those error lines
+  stops firing for abandoned requests.
+
+- **A frontend file that cannot be opened, measured or read is answered
+  through the error renderer.** It was answered with a line of text/plain from
+  `http.Error` and settled as a success, so `ProblemDetails` and a custom
+  renderer were bypassed and the releases were told the request succeeded. It
+  is now rendered as any failure is, still 404 for a file that vanished and
+  500 for one that could not be read, the read failure is logged, and the
+  request counts as failed. Migration: none unless a client read that text.
+
+- **The example application signs in with a session.** `example/` signs in
+  with `Regenerate`, signs out at `/logout/` with `Destroy`, and no longer
+  returns a `session_id` from sign-in. Its item WebSocket resolves its caller
+  from the session, or a token, as a `Dep`, instead of reading a raw cookie
+  and echoing the credential in every message. Its `SESSION_SECRETS` has a
+  development default, as `ADMIN_TOKEN` does, which a deployment must replace.
+  Migration: none for the framework; a client of the example that read
+  `session_id` reads the cookie instead.
+
+### Fixed
+
+- **A HEAD answered by a GET route is named after that route.** The route
+  template was published where a request is dispatched, which a HEAD answered
+  by its GET route never passes through, so the access log and
+  `RouteFromContext` saw a request to no route at all, and so would the new
+  server span and request observer. It is now published where every route is
+  run. Migration: none.
+
+### Documentation
+
+- **The documentation site has a page for each feature.** New pages: Command
+  Line, Observability, TypeScript, API Compatibility, Files, Streams and
+  Redirects, Problem Details, Mounting net/http Handlers, Background Tasks,
+  Timeouts, HTTP Client, Typed Endpoints, MCP Tools, Allowed Hosts and HTTPS,
+  Sessions, Cross-Origin Requests, and Health Checks. The dependencies and
+  authentication pages are rewritten, and the pages the new features extend
+  link to them.
+
+- **The package documentation describes each feature** in its own section:
+  dependencies, responses that are not JSON, serving beside net/http,
+  operations, observability, calling other services, API compatibility,
+  authentication, sessions and cross-origin requests, typed endpoints, routes
+  as MCP tools and the `muzak` command.
+
+### Tests and continuous integration
+
+- **Tests that failed only on a loaded machine no longer do.** Tests that
+  compared a duration with a fixed deadline now measure a yardstick on the
+  same machine, or wait for the state they expect instead of sleeping: event
+  streams and their keepalives, WebSockets, `Unique`, the client and exporter,
+  the server, lifecycle and background states, singleton waiters and the
+  request timing tests. The two tests that assert no goroutine leaked run one
+  at a time, the WebSocket connection caps count only upgraded sockets, and
+  the comparisons of allocation counts are skipped under the race detector,
+  which allocates on its own account.
+
+- **The source checks skip a nested checkout**, such as a git worktree inside
+  the tree, which is another copy of the code rather than part of it.
+
+- **36 new fuzz targets** cover every parser the release adds and every value
+  it builds from one: `traceparent` and `tracestate`, a JWS, its claims and a
+  JWKS, the session cookie, identifier, record and request, the host
+  allowlist, `Forwarded` parameters, redirect targets, media types, file names
+  and `Content-Disposition` both ways, `If-None-Match`, `Retry-After` and
+  cache lifetimes, an OTLP partial success, the client's address policy, mount
+  prefixes, health probes, cross-origin headers, `Dep` fields a request must
+  never fill, typed endpoint round trips, TypeScript generation, reading and
+  comparing documents, what the command prints, and the MCP message reader,
+  tool arguments and transport headers.
+
+### Known limits
+
+The reviews found these and left them, each with the reason.
+
+- **Calling other services.** A NAT64 translator using a network-specific
+  prefix cannot be told apart from a public IPv6 address; name its prefix in
+  `DeniedNetworks` where a network has one. A 307 or 308 that a client follows
+  to another origin sends the body again (credentials are dropped), as
+  net/http does; with `AllowPrivateNetworks` that origin can be another
+  internal service. `DefaultPropagate` sends the request id and trace context
+  to every host a client calls; a client that calls hosts someone else chose
+  can use a `Propagate` of its own.
+- **Responses.** `FileResponse` serves an uploaded `.js` or `.css` file under
+  its real type, which a `script-src 'self'` policy trusts; serve uploads from
+  another origin or as `application/octet-stream`, since `Download` alone does
+  not stop a page loading one as a script. `Bytes` and `Stream` sent as
+  `text/html` are not sandboxed, since the handler chose the type.
+- **Logging.** The access log logs every 5xx at error level by its documented
+  rule, so a fail-closed 503 answered to a client that has already left is
+  still an error line there.
+- **Operations.** A slow request holds its `AfterResponse` queue slot from the
+  moment it registers a task, which is what makes a full queue an answer at
+  registration rather than a task dropped later. With `ReportChecks`, a
+  check's name and outcome are readable through any host name, a DNS-rebinding
+  page included, because probes are answered before `AllowedHosts`; leave it
+  off where the probe port is reachable from outside. Probes reach the
+  observer and the tracer with an empty route. A refused host is logged at
+  warning level on each request.
+- **Observability.** The default `TraceParentAccept` lets a client ask for its
+  request to be sampled; use `TraceParentFromTrustedProxies` where that
+  matters. One `otlp.Exporter` shared by two applications is stopped by the
+  first to stop. An application that failed to build does not call its
+  observer for the 500s it answers. The 64 KiB span bound does not count the
+  name, status and `tracestate`, which are bounded on their own.
+- **Authentication.** Several issuers in one `JWTBearer` scheme share its
+  keys, so give each identity provider a scheme of its own. An API key in a
+  cookie is sent by the browser on its own, so pair it with
+  `CrossOriginProtection`. An event stream or WebSocket outlives the token
+  that opened it; set `MaxLifetime`. The request that starts a JWKS fetch
+  waits for it, up to `JWKSOptions.Timeout`, and a key set is kept for as long
+  as fetches fail. A `Public()` or descriptive `WithSecurity` on an inner
+  router replaces a verifying requirement given at `Include`, as OpenAPI's own
+  rule for nested requirements says.
+- **Sessions.** Two applications sharing one `SessionStore` share sessions,
+  since keys are not namespaced by application or cookie name; give each its
+  own store. A deletion that lands between `Regenerate`'s check and its delete
+  can still be raced.
+- **Typed endpoints and TypeScript.** A nil slice or map body member arrives
+  as `[]` or `{}`, a pointer to a nil pointer arrives as nil, and a
+  `time.Time` keeps its instant but not its location. A path value that spells
+  a static sibling route reaches that route, and a header the input leaves out
+  (a nil pointer or an empty list) is filled by `Propagate`. A `BaseURL` with
+  dot or empty segments is accepted as written, since it is the operator's own
+  setting. A schema property named `toString` makes a generated interface
+  unassignable from an object literal, which is TypeScript's own rule.
+- **MCP.** Sessions of the session-based revisions live in memory, so a
+  deployment of several instances needs sticky routing for them; 2026-07-28
+  clients do not. Batches are refused for every revision, including
+  2025-03-26, which allowed them. A route that binds a non-pointer
+  `User-Agent` cannot be called unless the model supplies one, and an optional
+  non-pointer string header or cookie is sent empty, as `Endpoint.Call` does.
+  A path that `App.Use` middleware or the documentation answers, which a
+  wildcard argument can spell, runs before the result is refused; only routes
+  are refused beforehand. A route's response headers, `Set-Cookie` among them,
+  are not returned, so a cookie session a tool changes is not kept, and a 401
+  or 403 is an error result rather than a challenge the client can answer. An
+  API key read from the query string cannot authenticate a tool call. A
+  session opened without credentials is bound to nobody, a flood of
+  `initialize` on an unguarded endpoint evicts the longest-idle sessions, and
+  `tools/list` shows every tool to whoever the endpoint admits; guard or
+  rate-limit the endpoint. `MCPTool` on a route of an application without an
+  endpoint is ignored, so one router can serve applications with and without
+  one.
+- **The muzak command.** On Windows `muzak dev` kills the application at once
+  and leaves a process it started running. A poll reads every directory under
+  `-watch` that is not skipped, and only watched files count toward its cap,
+  so a large data directory belongs outside the watched tree. A `muzak dev`
+  killed with `SIGKILL` leaves the application running. An interrupted `muzak
+  ts -o` can leave a temporary file beside its output. `tsgen` refuses schemas
+  nested more than 64 levels, where 128 are read.
+
 ## [0.2.9] - 2026-10-09
 
 This release is the result of a fifth review of the framework, done the way

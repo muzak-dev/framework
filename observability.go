@@ -349,7 +349,7 @@ func observedMethod(method string, registered bool) string {
 // [observedMethod] records one no route vouches for.
 func registeredMethod(r *http.Request) bool {
 	holder, ok := r.Context().Value(routeContextKey{}).(*routeHolder)
-	return ok && holder.method != "" && holder.method == r.Method
+	return ok && holder.route != nil && holder.route.Method != mountKind && holder.route.Method == r.Method
 }
 
 // spanMethod returns the method as it appears in a span name, where

@@ -69,11 +69,14 @@ type routeContextKey struct{}
 //
 // No lock: one request is handled by one goroutine from the chain root to the
 // handler and back, and the read happens after next.ServeHTTP has returned.
+//
+// It holds the route that answered rather than copies of its template and
+// method, so publishing one costs a request nothing: the application keeps
+// every route for as long as it serves. A handler mount publishes the stand-in
+// route it is rate limited through, whose method is mountKind; see
+// [registeredMethod].
 type routeHolder struct {
-	template string
-	// method is the method the matched route was registered for. A handler
-	// mount answers every method and leaves it empty; see [registeredMethod].
-	method string
+	route *Route
 }
 
 // RouteFromContext returns the template of the route this request matched,
@@ -103,10 +106,10 @@ type routeHolder struct {
 // a 404 is counted as a 404 rather than as traffic to a route named "".
 func RouteFromContext(ctx context.Context) (string, bool) {
 	holder, ok := ctx.Value(routeContextKey{}).(*routeHolder)
-	if !ok || holder.template == "" {
+	if !ok || holder.route == nil {
 		return "", false
 	}
-	return holder.template, true
+	return holder.route.Path, true
 }
 
 // withRouteHolder installs the holder RouteFromContext reads.
@@ -776,18 +779,25 @@ func setIfAbsent(h http.Header, key, value string) {
 // version header the response was chosen by, and a shared cache would store
 // it for every client. Compression makes the same promise the same way; see
 // [compressWriter].
+//
+// session and cookieGuarded are what the response's session needs told just
+// before the response starts, the last moment a header can still be added:
+// session is the [Context] of a request that read its session and has not
+// settled it, which is how the session of a handler writing its own response
+// reaches it, and cookieGuarded says that a settled session's cookie is on
+// the response, which must then stay out of shared caches; see sessions.go.
+//
+// Every request allocates one of these, so its fields are laid out to keep
+// it at 64 bytes: status is an int32 beside the flags rather than an int.
 type responseWriter struct {
 	http.ResponseWriter
-	status   int
-	bytes    int64
-	written  bool
-	hijacked bool
-	vary     []string
-	// commitHook is told the status just before the response starts, the
-	// last moment a header can still be added: it is how the session of a
-	// handler that writes its own response reaches it. Nil unless a request
-	// read its session; see sessions.go.
-	commitHook commitHook
+	bytes         int64
+	vary          []string
+	session       *Context
+	status        int32
+	written       bool
+	hijacked      bool
+	cookieGuarded bool
 }
 
 // asResponseWriter wraps w unless it is already a *responseWriter, so that
@@ -800,7 +810,7 @@ func asResponseWriter(w http.ResponseWriter) *responseWriter {
 }
 
 // Status returns the code written so far, satisfying [StatusRecorder].
-func (w *responseWriter) Status() int { return w.status }
+func (w *responseWriter) Status() int { return int(w.status) }
 
 // WriteHeader records the status and forwards it, ignoring repeated calls the
 // way net/http does.
@@ -816,7 +826,7 @@ func (w *responseWriter) WriteHeader(status int) {
 		return
 	}
 	w.beforeCommit(status)
-	w.status = status
+	w.status = int32(status)
 	w.written = true
 	w.ResponseWriter.WriteHeader(status)
 }
@@ -846,9 +856,13 @@ func (w *responseWriter) commitVary() {
 // starts with status: the commit hook, once, and then the Vary fields, which
 // the hook may have added to.
 func (w *responseWriter) beforeCommit(status int) {
-	if hook := w.commitHook; hook != nil {
-		w.commitHook = nil
-		hook.beforeCommit(status)
+	if c := w.session; c != nil {
+		w.session = nil
+		c.beforeCommit(status)
+	}
+	if w.cookieGuarded {
+		w.cookieGuarded = false
+		keepPrivate(w.Header())
 	}
 	w.commitVary()
 }
@@ -976,5 +990,5 @@ func (w *responseWriter) statusOrDefault() int {
 	if w.status == 0 {
 		return http.StatusOK
 	}
-	return w.status
+	return int(w.status)
 }

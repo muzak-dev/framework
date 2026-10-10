@@ -455,7 +455,7 @@ func (a *App) frontendBeneath(m *mountPoint, requestPath string) (f *frontend, r
 func (a *App) serveMount(c *Context, m *mountPoint) {
 	// Published for instrumentation, as dispatch does for a route.
 	if holder, ok := c.r.Context().Value(routeContextKey{}).(*routeHolder); ok {
-		holder.template = m.template
+		holder.route = m.limits
 	}
 	defer a.recoverMount(c, m)
 	if err := m.admit(c); err != nil {

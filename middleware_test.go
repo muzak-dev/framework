@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -530,6 +531,20 @@ func TestCORSOriginFunc(t *testing.T) {
 		if got := doRequest(t, app, req).Header().Get("Access-Control-Allow-Origin"); got != want {
 			t.Errorf("origin %q received %q, want %q", origin, got, want)
 		}
+	}
+}
+
+// TestPerRequestRecordsStayInTheirSizeClass keeps the two records every
+// request allocates as small as they were before the features that read them
+// were added, so an application that uses none of those features pays nothing
+// for them. A field added to either moves it to the next size class the
+// allocator has, which is a cost on every request and wants a reason.
+func TestPerRequestRecordsStayInTheirSizeClass(t *testing.T) {
+	if size := reflect.TypeFor[responseWriter]().Size(); size > 64 {
+		t.Errorf("responseWriter is %d bytes, over the 64 every request allocated before", size)
+	}
+	if size := reflect.TypeFor[routeHolder]().Size(); size > 8 {
+		t.Errorf("routeHolder is %d bytes; it holds a pointer to the route and nothing else", size)
 	}
 }
 

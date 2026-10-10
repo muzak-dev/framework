@@ -566,7 +566,7 @@ func (c *Context) Session() *Session {
 		setIfAbsent(c.w.Header(), "Cache-Control", privateCacheControl)
 	}
 	// So a response the handler writes itself carries the session too.
-	c.w.commitHook = c
+	c.w.session = c
 	return s
 }
 
@@ -1124,18 +1124,11 @@ func (s *Session) guardCookie() {
 		return
 	}
 	keepPrivate(w.Header())
-	w.commitHook = cookieGuard(w.Header())
+	// The writer keeps it private as it starts, from its own header and
+	// nothing else, so unlike the session hook this is safe after the request
+	// has ended.
+	w.cookieGuarded = true
 }
-
-// cookieGuard is the commit hook [Session.guardCookie] leaves on the writer.
-// It holds the response's header and nothing else, so unlike the [Context]
-// it replaces it is safe to call after the request has ended. Being a map it
-// is not comparable, which is safe only because the one comparison of hooks,
-// in commitSession, is against a *Context: interface values of different
-// dynamic types compare unequal without comparing what they hold.
-type cookieGuard http.Header
-
-func (g cookieGuard) beforeCommit(int) { keepPrivate(http.Header(g)) }
 
 // keepsPrivate reports whether a Cache-Control already keeps a response out
 // of shared caches, with a private or no-store directive.
@@ -1168,8 +1161,8 @@ func (c *Context) commitSession(failure error) error {
 	// Every request that read its session ends here, before its Context goes
 	// back to the pool, so this is where the writer stops calling back into
 	// it.
-	if c.w.commitHook == commitHook(c) {
-		c.w.commitHook = nil
+	if c.w.session == c {
+		c.w.session = nil
 	}
 	defer s.guardCookie()
 	if s.settled {
@@ -1223,12 +1216,6 @@ func (c *Context) warnUnsaved() {
 	c.logger.WarnContext(c.Context(), "muzak: the session changed after the response had started, so the change was not saved",
 		slog.String("route", c.route.pathOrRequest(c.r)),
 		slog.String(RequestIDKey, c.RequestID()))
-}
-
-// commitHook is told when a response is about to start, which is the last
-// moment a header can be added to it.
-type commitHook interface {
-	beforeCommit(status int)
 }
 
 // beforeCommit writes the session of a handler that is writing its response

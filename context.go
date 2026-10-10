@@ -340,7 +340,7 @@ func (c *Context) SetStatus(code int) {
 	if c.w.written {
 		c.logger.WarnContext(c.Context(), "muzak: SetStatus called after the response body started; ignoring",
 			slog.Int("requested_status", code),
-			slog.Int("written_status", c.w.status),
+			slog.Int("written_status", c.w.Status()),
 			slog.String("route", c.route.Path))
 		return
 	}

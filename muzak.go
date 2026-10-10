@@ -1065,7 +1065,7 @@ func (a *App) run(c *Context, route *Route) {
 	// named after that route too, in the access log, the span and the
 	// observer alike.
 	if holder, ok := c.r.Context().Value(routeContextKey{}).(*routeHolder); ok {
-		holder.template, holder.method = route.Path, route.Method
+		holder.route = route
 	}
 	if err := unescapeParams(&c.params); err != nil {
 		// coverage: net/http normalises the request URL before a handler runs,

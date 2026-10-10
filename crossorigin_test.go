@@ -297,6 +297,10 @@ func TestCrossOriginOptionsAreValidated(t *testing.T) {
 		{"conflicting patterns", CrossOriginOptions{InsecureBypassPatterns: []string{"POST /x", "POST /x"}}, []string{"is not a pattern net/http accepts"}},
 		{"safe method", CrossOriginOptions{InsecureBypassPatterns: []string{"GET /x"}}, []string{"names GET", "bypasses nothing"}},
 		{"head", CrossOriginOptions{InsecureBypassPatterns: []string{"HEAD /x"}}, []string{"names HEAD"}},
+		{"safe method after a tab", CrossOriginOptions{InsecureBypassPatterns: []string{"GET\t/x"}}, []string{"names GET"}},
+		{"the whole application", CrossOriginOptions{InsecureBypassPatterns: []string{"/"}}, []string{`"/" turns cross-origin protection off`}},
+		{"the whole application for one method", CrossOriginOptions{InsecureBypassPatterns: []string{"POST /"}}, []string{`"POST /" turns cross-origin protection off`}},
+		{"a whole host", CrossOriginOptions{InsecureBypassPatterns: []string{"PUT api.example.com/"}}, []string{`"PUT api.example.com/" turns cross-origin protection off`}},
 		{"several", CrossOriginOptions{TrustedOrigins: []string{"null", "x"}, InsecureBypassPatterns: []string{"OPTIONS /x"}}, []string{
 			"null", "not an origin", "names OPTIONS",
 		}},
@@ -322,6 +326,34 @@ func TestCrossOriginOptionsAreValidated(t *testing.T) {
 		InsecureBypassPatterns: []string{"POST /hooks/", "/callback", "example.com/form"},
 	}
 	mustBuild(t, New(options))
+}
+
+// TestBypassPatternCoveringASubtreeIsWarnedOf covers a bypass pattern ending
+// in a slash, which matches every path beneath it as a ServeMux pattern does.
+// Routes here conventionally end in one, so listing a route's path that way
+// silently turns the check off below it: the application is built, and a
+// warning says so and how to match the one path.
+func TestBypassPatternCoveringASubtreeIsWarnedOf(t *testing.T) {
+	t.Parallel()
+	for pattern, warned := range map[string]bool{
+		"POST /hooks/":               true,
+		"example.com/hooks/":         true,
+		"POST /hooks/{$}":            false,
+		"POST /hooks":                false,
+		"POST /hooks/{provider}":     false,
+		"POST /hooks/{provider...}":  false,
+		"POST /hooks/{provider}/{$}": false,
+	} {
+		logger, logs := captureLogger(t)
+		options := quietOptions()
+		options.Logger = logger
+		options.CrossOriginProtection = &CrossOriginOptions{InsecureBypassPatterns: []string{pattern}}
+		mustBuild(t, New(options))
+		line := `"level":"WARN","msg":"muzak: CrossOriginOptions.InsecureBypassPatterns entry \"` + pattern + `\"`
+		if got := strings.Contains(logs.String(), line) && strings.Contains(logs.String(), "{$}"); got != warned {
+			t.Errorf("%q: warned = %t, want %t; the log holds:\n%s", pattern, got, warned, logs.String())
+		}
+	}
 }
 
 // TestTrustedOriginPatternIsExplainedOnItsOwnTerms is the regression test for

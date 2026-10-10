@@ -72,7 +72,7 @@ type CrossOriginOptions struct {
 	TrustedOrigins []string
 
 	// InsecureBypassPatterns lists the requests exempt from the check, as
-	// [http.ServeMux] patterns: "POST /webhooks/{provider}" or "/callback/".
+	// [http.ServeMux] patterns: "POST /webhooks/{provider}" or "/callback".
 	// A bypassed route accepts a forged request from any page, so list only
 	// one that authenticates the request some other way, such as a webhook
 	// that verifies its signature, or an endpoint a third party posts a form
@@ -82,12 +82,22 @@ type CrossOriginOptions struct {
 	// ServeMux would refuse, two that conflict, and one whose method is GET,
 	// HEAD or OPTIONS, which are never refused and so bypass nothing, are
 	// build errors.
+	//
+	// A pattern whose path ends in a slash matches every path beneath it, as
+	// in ServeMux: "POST /hooks/" bypasses the check for "/hooks/stripe" and
+	// "/hooks/admin/delete" alike. End it in {$}, as "POST /hooks/{$}", to
+	// match that one path. Such a pattern is warned of when the application
+	// is built, since a route's path is often written with a trailing slash,
+	// and one whose path is "/" alone, with or without a method or a host, is
+	// a build error: it turns the check off for everything rather than
+	// exempting a route.
 	InsecureBypassPatterns []string
 }
 
 // newCrossOriginProtection builds the check, reporting every entry that
-// cannot be served as one joined error.
-func newCrossOriginProtection(opts CrossOriginOptions) (*http.CrossOriginProtection, error) {
+// cannot be served as one joined error and warning of every bypass pattern
+// that covers a whole subtree.
+func newCrossOriginProtection(opts CrossOriginOptions, logger *slog.Logger) (*http.CrossOriginProtection, error) {
 	protection := http.NewCrossOriginProtection()
 	var errs []error
 	for _, origin := range opts.TrustedOrigins {
@@ -110,7 +120,7 @@ func newCrossOriginProtection(opts CrossOriginOptions) (*http.CrossOriginProtect
 		}
 	}
 	for _, pattern := range opts.InsecureBypassPatterns {
-		if err := addBypassPattern(protection, pattern); err != nil {
+		if err := addBypassPattern(protection, pattern, logger); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -122,13 +132,18 @@ func newCrossOriginProtection(opts CrossOriginOptions) (*http.CrossOriginProtect
 
 // addBypassPattern adds one bypass pattern, turning the panic net/http raises
 // for a pattern it cannot parse or that conflicts with another into an error.
-func addBypassPattern(protection *http.CrossOriginProtection, pattern string) (err error) {
-	if method, _, found := strings.Cut(pattern, " "); found {
-		switch method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
-			return fmt.Errorf("muzak: CrossOriginOptions.InsecureBypassPatterns entry %q names %s, which cross-origin "+
-				"protection never refuses, so it bypasses nothing; name the method that changes state, or none", pattern, method)
-		}
+//
+// A pattern whose path ends in a slash matches every path beneath it, and a
+// route's path is often written that way, so a bypass meant for one route
+// easily covers all of those below it. That is warned of. A path of "/"
+// alone covers everything, which is the check turned off rather than a route
+// exempted, and is refused.
+func addBypassPattern(protection *http.CrossOriginProtection, pattern string, logger *slog.Logger) (err error) {
+	method, host, path := splitPattern(pattern)
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return fmt.Errorf("muzak: CrossOriginOptions.InsecureBypassPatterns entry %q names %s, which cross-origin "+
+			"protection never refuses, so it bypasses nothing; name the method that changes state, or none", pattern, method)
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -137,7 +152,35 @@ func addBypassPattern(protection *http.CrossOriginProtection, pattern string) (e
 		}
 	}()
 	protection.AddInsecureBypassPattern(pattern)
+	switch {
+	case path == "/":
+		covered := "the whole application"
+		if host != "" {
+			covered = "everything served for " + host
+		}
+		return fmt.Errorf("muzak: CrossOriginOptions.InsecureBypassPatterns entry %q turns cross-origin protection off for %s, "+
+			"because a path ending in a slash matches every path beneath it; list only the routes that authenticate "+
+			"their requests some other way", pattern, covered)
+	case strings.HasSuffix(path, "/"):
+		Scoped(logger, ScopeServer).Warn(fmt.Sprintf("muzak: CrossOriginOptions.InsecureBypassPatterns entry %q ends in a slash, "+
+			"so it bypasses the check for every path beneath %s, not that path alone; end it in {$}, as %q, to match "+
+			"that one path", pattern, path, pattern+"{$}"))
+	}
 	return nil
+}
+
+// splitPattern splits a [http.ServeMux] pattern into its method, host and
+// path as net/http does: the method ends at the first space or tab, and the
+// path begins at the first slash after it. A part the pattern lacks is empty.
+func splitPattern(pattern string) (method, host, path string) {
+	rest := pattern
+	if i := strings.IndexAny(pattern, " \t"); i >= 0 {
+		method, rest = pattern[:i], strings.TrimLeft(pattern[i+1:], " \t")
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return method, rest[:i], rest[i:]
+	}
+	return method, rest, ""
 }
 
 // crossOriginMiddleware returns the check as middleware.
@@ -190,7 +233,7 @@ func (a *App) refuseCrossOrigin(w http.ResponseWriter, r *http.Request) {
 // log is read by nobody until it matters.
 func (a *App) buildSessions(state *buildState) {
 	if opts := a.opts.CrossOriginProtection; opts != nil {
-		protection, err := newCrossOriginProtection(*opts)
+		protection, err := newCrossOriginProtection(*opts, a.logger)
 		if err != nil {
 			state.errs = append(state.errs, err)
 		} else {

@@ -274,7 +274,9 @@ func (f *frontend) resolve(in inherited) error {
 		f.fallback, f.notFound = f.opts.Fallback, f.opts.NotFound
 		return nil
 	}
-	files, err := f.resolveFS()
+	// The filesystem the requests will use, opened once: a directory opened
+	// here and again for the requests left the first one open for good.
+	files, err := f.fsys()
 	if err != nil {
 		return fmt.Errorf("muzak: %s at %q: %w", f.kind, f.mountPath(), err)
 	}
@@ -338,13 +340,7 @@ func (f *frontend) resolveFS() (fs.FS, error) {
 		}
 		return fs.Sub(f.opts.FS, f.opts.Dir)
 	}
-	// os.OpenRoot resolves every path inside the directory, so a symbolic link
-	// pointing out of the build output cannot be followed out of it.
-	root, err := os.OpenRoot(f.opts.Dir)
-	if err != nil {
-		return nil, err
-	}
-	return root.FS(), nil
+	return openServedDir(f.opts.Dir)
 }
 
 // matches reports whether a request path falls under this mount, and returns

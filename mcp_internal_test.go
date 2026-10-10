@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -605,5 +606,84 @@ func TestCallBodyLimit(t *testing.T) {
 				t.Fatalf("%s under %d of its %d bytes: %v", c.route, limit, len(whole.body), err)
 			}
 		}
+	}
+}
+
+// limitedFormIn and limitedRowsIn are inputs a short value of which is written
+// as a long body: an empty string is a form part with a boundary and headers,
+// and an empty row every member of a struct.
+type limitedFormIn struct {
+	Tags []string `form:"tags"`
+}
+
+type limitedRow struct {
+	A, B, C, D, E, F, G, H, I, J string
+	K, L, M, N, O, P, Q, R, S, T int
+}
+
+type limitedRowsIn struct {
+	Rows []limitedRow `json:"rows"`
+}
+
+// allocatedBy reports what the whole process allocates while work runs.
+func allocatedBy(work func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	work()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// TestCallBodyLimitBoundsTheWork shows that a body past its limit costs about
+// the limit to refuse, where written out whole a list of empty form values or
+// empty rows costs a hundred times the bytes a client sent for it, and that a
+// tool call's body argument past the limit is refused before it is decoded,
+// which is where a list of empty objects becomes a list of structs. Each is
+// measured against the work it saves, built the same way, so that what the
+// race detector adds to both does not count.
+//
+// It is not parallel: it measures what the whole process allocates.
+func TestCallBodyLimitBoundsTheWork(t *testing.T) {
+	const entries, limit = 80_000, 64 << 10
+	for _, in := range []any{
+		&limitedFormIn{Tags: make([]string, entries)},
+		&limitedRowsIn{Rows: make([]limitedRow, entries)},
+	} {
+		value := reflect.ValueOf(in).Elem()
+		plan, err := compileCall(value.Type(), reflect.TypeFor[Empty](), http.MethodPost, "/limited", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bounded := allocatedBy(func() { _, err = plan.encode(value, &callConfig{maxBody: limit}) })
+		if !errors.Is(err, errCallBodyTooLarge) {
+			t.Fatalf("%s: %v", value.Type(), err)
+		}
+		whole := allocatedBy(func() { _, err = plan.encode(value, &callConfig{}) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bounded*10 > whole {
+			t.Errorf("%s: refusing at the limit allocated %d bytes, and writing it whole %d", value.Type(), bounded, whole)
+		}
+	}
+
+	app := New(quietOptions())
+	app.MCP("/mcp", MCPOptions{})
+	app.Post("/rows", func(*Context, limitedRowsIn) (Empty, error) { return Empty{}, nil }, MaxBodySize(limit), MCPTool())
+	tool := mustBuild(t, app).mcp.byName["post_rows"]
+	args := jsontext.Value(`{"body":{"rows":[{}` + strings.Repeat(`,{}`, entries-1) + `]}}`)
+	var err error
+	bounded := allocatedBy(func() { _, err = tool.decode(args) })
+	if !errors.Is(err, errCallBodyTooLarge) {
+		t.Fatalf("a body argument past the limit: %v", err)
+	}
+	tool.maxBody = 1 << 30
+	whole := allocatedBy(func() { _, err = tool.decode(args) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounded*10 > whole {
+		t.Errorf("refusing the body argument allocated %d bytes, and decoding it %d", bounded, whole)
 	}
 }

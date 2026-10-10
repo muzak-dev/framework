@@ -12,7 +12,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -613,9 +612,8 @@ type wideRowsIn struct {
 // struct each with every member, hundreds of times the bytes the arguments
 // took. The route's limit holds, MaxUploadSize for files, and a route that
 // removed its limit is held to the endpoint's, which the arguments came in
-// under. The route never runs, and what the refusal costs is bounded too.
-//
-// It is not parallel: it measures what the whole process allocates.
+// under. The route never runs; TestCallBodyLimitBoundsTheWork shows the
+// refusal costs no more than the limit.
 func TestMCPCallRequestIsBounded(t *testing.T) {
 	const routeLimit, endpointLimit = 64 << 10, 512 << 10
 	var ran atomic.Int32
@@ -654,21 +652,8 @@ func TestMCPCallRequestIsBounded(t *testing.T) {
 		// Under the limit as arguments, and over it written out.
 		{"post_rows", map[string]any{"body": map[string]any{"rows": list(map[string]any{}, 2000)}}, routeLimit},
 	}
-	messages := make([]string, len(calls))
-	for i, call := range calls {
-		messages[i] = m.message("tools/call", map[string]any{"name": call.tool, "arguments": call.args})
-	}
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&before)
-	replies := make([]*testclient.Response, len(calls))
-	for i := range calls {
-		replies[i] = m.post(messages[i])
-	}
-	runtime.ReadMemStats(&after)
-	for i, call := range calls {
-		got := result[toolResult](t, decodeReply(t, replies[i], http.StatusOK))
-		envelope := errorEnvelope(t, got)
+	for _, call := range calls {
+		envelope := errorEnvelope(t, m.call(call.tool, call.args))
 		if envelope.Error.Status != http.StatusRequestEntityTooLarge {
 			t.Fatalf("%s: %+v", call.tool, envelope)
 		}
@@ -676,14 +661,6 @@ func TestMCPCallRequestIsBounded(t *testing.T) {
 	}
 	if ran.Load() != 0 {
 		t.Fatalf("a route ran %d times for a body it would not read", ran.Load())
-	}
-	// Decoded and written out whole, the calls allocate some 440 MiB,
-	// the form parts a header map each and the rows a struct each; held to
-	// their limits they allocate some 55 MiB, most of it reading the
-	// messages' lists.
-	const tolerated = 160 << 20
-	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > tolerated {
-		t.Errorf("the calls allocated %d MiB, want less than %d", allocated>>20, tolerated>>20)
 	}
 }
 

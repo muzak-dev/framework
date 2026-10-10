@@ -39,7 +39,8 @@ the quit Ctrl-\ sends. The application is sent the same signal and given
 -grace to shut down before it is killed. On Unix the application runs
 in a process group of its own and the signal goes to the whole group, so a
 process it started is stopped with it. On Windows there is no signal to send:
-the application is killed at once, and a process it started is left running.`,
+the application runs in a job object of its own, and the job, with every
+process the application started, is stopped at once.`,
 	make: func() runner { return &devRunner{} },
 }
 
@@ -231,6 +232,8 @@ func (s *devSession) rebuild(ctx context.Context, signals <-chan os.Signal) os.S
 	}
 	select {
 	case <-build.done:
+		// Whatever the go command left running is stopped with it.
+		build.kill()
 	case sig := <-signals:
 		build.kill()
 		return sig

@@ -1,4 +1,4 @@
-//go:build !unix
+//go:build !unix && !windows
 
 package main
 
@@ -8,20 +8,29 @@ import (
 	"time"
 )
 
-// ownProcessGroup does nothing where there are no Unix process groups. On
-// Windows a process started by the application is not stopped with it: doing
-// that takes a job object, which the standard library does not offer.
-func ownProcessGroup(*exec.Cmd) {}
-
-// signalGroup kills the process. Windows has no way to send another process
-// an interrupt it can handle, as os.Process.Signal documents, so an
-// application dev runs there is stopped without the chance to shut down
-// gracefully.
-func signalGroup(p *os.Process, _ os.Signal) {
-	_ = p.Kill()
+// processGroup is a child dev started, alone: where there are neither process
+// groups nor job objects, what the child starts cannot be reached through it.
+type processGroup struct {
+	process *os.Process
 }
 
-// finishGroup kills the process if it is still running.
-func finishGroup(p *os.Process, _ time.Time) {
-	_ = p.Kill()
+// startGroup starts cmd.
+func startGroup(cmd *exec.Cmd) (processGroup, error) {
+	if err := cmd.Start(); err != nil {
+		return processGroup{}, err
+	}
+	return processGroup{process: cmd.Process}, nil
 }
+
+// signal kills the process, which these systems give no way to interrupt.
+func (g processGroup) signal(os.Signal) {
+	_ = g.process.Kill()
+}
+
+// finish kills the process if it is still running.
+func (g processGroup) finish(time.Time) {
+	_ = g.process.Kill()
+}
+
+// release does nothing.
+func (processGroup) release() {}

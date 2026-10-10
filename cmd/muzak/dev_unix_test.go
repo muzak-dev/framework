@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+// deliversSignals reports whether one process can send another a signal it
+// handles, which every Unix can.
+const deliversSignals = true
+
+// killedExit is how dev reports an application that was killed.
+const killedExit = `signal: killed`
+
 // expectGone fails unless no process has the id, which also means it was
 // waited for: a process that exited and was not would still be found, as a
 // zombie.
@@ -34,21 +41,6 @@ func expectAlive(t *testing.T, pid int) {
 	if err := syscall.Kill(pid, 0); err != nil {
 		t.Errorf("process %d is gone: %v", pid, err)
 	}
-}
-
-func TestDevStopsAGrandchildLeftByAnApplicationThatExited(t *testing.T) {
-	t.Parallel()
-	p := newProject(t)
-	// The application starts a grandchild, and then the test kills the
-	// application alone, as a crash would end it.
-	d := startDev(t, p, []string{"-pkg", ".", "-poll", "20ms"}, "FAKE_MODE=grandchild")
-	started := p.waitFor(t, `^start 1 (\d+) `)
-	grandchild := p.waitFor(t, `^grandchild (\d+)$`)
-	if err := syscall.Kill(pidOf(t, started[1]), syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	d.waitStderr(t, `the application exited \(signal: killed\); waiting for a change`)
-	expectGone(t, pidOf(t, grandchild[1]))
 }
 
 // TestDevStopsOnARealSignal runs this test binary as the muzak command, in a

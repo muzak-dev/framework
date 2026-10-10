@@ -219,15 +219,6 @@ func pidOf(t *testing.T, s string) int {
 	return pid
 }
 
-// requireSignals skips a test of signal delivery where there are no signals
-// to deliver.
-func requireSignals(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows cannot deliver an interrupt to another process; dev kills the application instead")
-	}
-}
-
 // expectNoBuilds fails unless dev removed every directory it built into.
 func expectNoBuilds(t *testing.T, p *project) {
 	t.Helper()
@@ -249,8 +240,10 @@ func TestDevRestartsTheApplicationWhenAFileChanges(t *testing.T) {
 
 	p.generation(t, 2)
 	second := p.waitFor(t, `^start 2 (\d+) `)
-	if runtime.GOOS != "windows" && !p.recorded(`^signal 1 `+first[1]+` interrupt$`) {
-		t.Errorf("the first build was not interrupted before the second started:\n%s", strings.Join(p.lines(), "\n"))
+	// Where there are signals, the first build is interrupted before the
+	// second starts; on Windows it is stopped at once.
+	if interrupted := p.recorded(`^signal 1 ` + first[1] + ` interrupt$`); interrupted != deliversSignals {
+		t.Errorf("the first build was interrupted: %v, want %v:\n%s", interrupted, deliversSignals, strings.Join(p.lines(), "\n"))
 	}
 	expectGone(t, firstPID)
 	expectAlive(t, pidOf(t, second[1]))
@@ -322,9 +315,12 @@ func TestDevReportsAnApplicationThatFinished(t *testing.T) {
 	d.waitStderr(t, `muzak dev: the application exited; waiting for a change`)
 }
 
+// TestDevForwardsTheSignalItReceives stops dev with each signal it handles.
+// Where one process can signal another, the application receives the same
+// signal; on Windows, where it cannot, the application is stopped at once.
+// Either way dev exits cleanly and leaves no process and no build behind.
 func TestDevForwardsTheSignalItReceives(t *testing.T) {
 	t.Parallel()
-	requireSignals(t)
 	for _, sig := range []os.Signal{syscall.SIGTERM, os.Interrupt} {
 		t.Run(sig.String(), func(t *testing.T) {
 			t.Parallel()
@@ -335,8 +331,9 @@ func TestDevForwardsTheSignalItReceives(t *testing.T) {
 			if code := d.wait(t); code != exitOK {
 				t.Errorf("dev exited with %d", code)
 			}
-			if !p.recorded(`^signal 1 ` + started[1] + ` ` + sig.String() + `$`) {
-				t.Errorf("the application did not receive %s:\n%s", sig, strings.Join(p.lines(), "\n"))
+			received := p.recorded(`^signal 1 ` + started[1] + ` ` + sig.String() + `$`)
+			if received != deliversSignals {
+				t.Errorf("the application received %s: %v, want %v:\n%s", sig, received, deliversSignals, strings.Join(p.lines(), "\n"))
 			}
 			expectGone(t, pidOf(t, started[1]))
 			expectNoBuilds(t, p)
@@ -344,28 +341,35 @@ func TestDevForwardsTheSignalItReceives(t *testing.T) {
 	}
 }
 
+// TestDevKillsAnApplicationThatIgnoresTheSignal gives an application that
+// ignores the signal its grace and then kills it. Windows can only stop it at
+// once, so there the grace is set long enough that waiting for it would show.
 func TestDevKillsAnApplicationThatIgnoresTheSignal(t *testing.T) {
 	t.Parallel()
-	requireSignals(t)
 	p := newProject(t)
 	grace := 300 * time.Millisecond
+	if !deliversSignals {
+		grace = time.Minute
+	}
 	d := startDev(t, p, []string{"-pkg", ".", "-poll", "20ms", "-grace", grace.String()}, "FAKE_MODE=ignore")
 	started := p.waitFor(t, `^start 1 (\d+) `)
 	begun := time.Now()
 	d.signals <- syscall.SIGTERM
 	d.wait(t)
-	if elapsed := time.Since(begun); elapsed < grace {
+	elapsed := time.Since(begun)
+	switch {
+	case deliversSignals && elapsed < grace:
 		t.Errorf("the application was killed after %s, before its grace of %s", elapsed, grace)
-	}
-	if !p.recorded(`^signal 1 ` + started[1] + ` terminated$`) {
+	case deliversSignals && !p.recorded(`^signal 1 `+started[1]+` terminated$`):
 		t.Error("the application was killed without first being asked to stop")
+	case !deliversSignals && elapsed >= grace:
+		t.Errorf("the application was stopped after %s, having waited for a grace there is no signal to give", elapsed)
 	}
 	expectGone(t, pidOf(t, started[1]))
 }
 
 func TestDevStopsWhatTheApplicationStarted(t *testing.T) {
 	t.Parallel()
-	requireSignals(t)
 	p := newProject(t)
 	d := startDev(t, p, []string{"-pkg", ".", "-poll", "20ms", "-grace", "300ms"}, "FAKE_MODE=grandchild")
 	started := p.waitFor(t, `^start 1 (\d+) `)
@@ -376,9 +380,29 @@ func TestDevStopsWhatTheApplicationStarted(t *testing.T) {
 	expectGone(t, pidOf(t, grandchild[1]))
 }
 
+// TestDevStopsAGrandchildLeftByAnApplicationThatExited kills the application
+// alone, as a crash would end it, and finds that what it started is stopped
+// with it: dev stops the whole group, the process group of a Unix and the
+// job object of Windows, when the application exits by itself.
+func TestDevStopsAGrandchildLeftByAnApplicationThatExited(t *testing.T) {
+	t.Parallel()
+	p := newProject(t)
+	d := startDev(t, p, []string{"-pkg", ".", "-poll", "20ms"}, "FAKE_MODE=grandchild")
+	started := p.waitFor(t, `^start 1 (\d+) `)
+	grandchild := p.waitFor(t, `^grandchild (\d+)$`)
+	app, err := os.FindProcess(pidOf(t, started[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	d.waitStderr(t, `the application exited \(`+killedExit+`\); waiting for a change`)
+	expectGone(t, pidOf(t, grandchild[1]))
+}
+
 func TestDevStopsWhenSignalledDuringABuild(t *testing.T) {
 	t.Parallel()
-	requireSignals(t)
 	p := newProject(t)
 	d := startDev(t, p, []string{"-pkg", ".", "-poll", "20ms"})
 	// The first build takes far longer than this, so the signal arrives

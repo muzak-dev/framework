@@ -13,20 +13,23 @@ import (
 // staying behind as a zombie, and the goroutine ends when the process does.
 type process struct {
 	cmd *exec.Cmd
+	// group is the process together with whatever it starts, as the platform
+	// holds them; see processGroup.
+	group processGroup
 	// done is closed once the process has exited and been waited for, after
 	// err is set.
 	done chan struct{}
 	err  error
 }
 
-// startProcess starts cmd in a process group of its own, where the platform
-// has them, so that stopping it stops whatever it started too.
+// startProcess starts cmd in a group of its own, so that stopping it stops
+// whatever it started too.
 func startProcess(cmd *exec.Cmd) (*process, error) {
-	ownProcessGroup(cmd)
-	if err := cmd.Start(); err != nil {
+	group, err := startGroup(cmd)
+	if err != nil {
 		return nil, err
 	}
-	p := &process{cmd: cmd, done: make(chan struct{})}
+	p := &process{cmd: cmd, group: group, done: make(chan struct{})}
 	go func() {
 		p.err = cmd.Wait()
 		close(p.done)
@@ -40,22 +43,24 @@ func startProcess(cmd *exec.Cmd) (*process, error) {
 // already; what it started may not have, and is asked all the same.
 func (p *process) stop(sig os.Signal, grace time.Duration) {
 	deadline := time.Now().Add(grace)
-	signalGroup(p.cmd.Process, sig)
+	p.group.signal(sig)
 	timer := time.NewTimer(grace)
 	select {
 	case <-p.done:
 	case <-timer.C:
 	}
 	timer.Stop()
-	finishGroup(p.cmd.Process, deadline)
+	p.group.finish(deadline)
 	<-p.done
+	p.group.release()
 }
 
 // kill stops the process and its group at once, as a build that is no longer
-// wanted is stopped.
+// wanted is stopped, and as what a process that ended left behind is.
 func (p *process) kill() {
-	finishGroup(p.cmd.Process, time.Now())
+	p.group.finish(time.Now())
 	<-p.done
+	p.group.release()
 }
 
 // lockedWriter serializes writes to w, so that what dev says and what the

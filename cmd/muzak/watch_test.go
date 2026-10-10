@@ -252,3 +252,25 @@ func TestWatcherFollowsALinkToAFile(t *testing.T) {
 	writeFile(t, target, "package shared\n\nconst X = 1\n")
 	expectPoll(t, w, true, "the file a link points to changed")
 }
+
+// TestWatcherWatchesTheTreeALinkedRootNames covers a project reached through
+// a symbolic link, as a shell whose working directory was entered through one
+// reports it: the walk starts at the directory the link names, rather than
+// at the link, which it would take for a file and watch nothing under.
+func TestWatcherWatchesTheTreeALinkedRootNames(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	project := filepath.Join(base, "project")
+	main := filepath.Join(project, "cmd", "server", "main.go")
+	writeFile(t, main, "package main\n")
+	link := filepath.Join(base, "shop")
+	if err := os.Symlink(project, link); err != nil {
+		t.Skipf("symbolic links are unavailable: %v", err)
+	}
+	w := primed(t, link, defaultWatchExtensions, 10)
+	if len(w.files) != 1 {
+		t.Errorf("watching %v, want cmd/server/main.go", w.files)
+	}
+	writeFile(t, main, "package main\n\nfunc main() {}\n")
+	expectPoll(t, w, true, "a file under the linked root grew")
+}

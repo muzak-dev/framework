@@ -104,7 +104,7 @@ func (d *devRunner) run(ctx context.Context, c *console, args, passthrough []str
 		return fmt.Errorf("muzak: dev could not create a directory to build into: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(temp) }()
-	watcher.skip = temp
+	watcher.skip = resolveLinks(temp)
 
 	signals, unsubscribe := c.signals()
 	defer unsubscribe()

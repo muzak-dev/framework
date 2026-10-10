@@ -58,8 +58,13 @@ var errTooManyFiles = errors.New("too many files to watch")
 
 // newWatcher returns a watcher of the files under root with one of the given
 // extensions, which have no dot and are separated by commas.
+//
+// A root that is a symbolic link is watched as the directory it names. A
+// project is often reached through one, and a shell entered through one
+// reports the link as its working directory; a walk started at the link
+// itself takes it for a file and watches nothing.
 func newWatcher(root, extensions, skip string, limit int) (*watcher, error) {
-	w := &watcher{root: root, skip: skip, limit: limit, extensions: map[string]bool{}}
+	w := &watcher{root: resolveLinks(root), skip: resolveLinks(skip), limit: limit, extensions: map[string]bool{}}
 	for _, ext := range strings.Split(extensions, ",") {
 		ext = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(ext), "."))
 		if ext == "" || strings.ContainsAny(ext, `/\.`+" ") {
@@ -68,6 +73,25 @@ func newWatcher(root, extensions, skip string, limit int) (*watcher, error) {
 		w.extensions["."+ext] = true
 	}
 	return w, nil
+}
+
+// resolveLinks returns the path a name leads to once every symbolic link in
+// it is followed, which is how the walk spells the directories under a root
+// it resolved, so that the root and the directory it skips are compared in
+// the same spelling. Of a name that is not there yet, the part that is there
+// is resolved and the rest kept, so a root that does not exist is still
+// reported by the first walk, and a directory to skip may appear later. The
+// climb ends at the first element that is there, or at the root of the file
+// system, or at once for an empty name, which skips nothing; it costs one
+// resolution per element of the name.
+func resolveLinks(name string) string {
+	if resolved, err := filepath.EvalSymlinks(name); err == nil {
+		return resolved
+	}
+	if parent := filepath.Dir(name); name != "" && parent != name {
+		return filepath.Join(resolveLinks(parent), filepath.Base(name))
+	}
+	return name
 }
 
 // prime records the tree as it is, which is what the first poll compares with.

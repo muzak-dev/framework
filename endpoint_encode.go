@@ -116,19 +116,31 @@ func compileCall(in, out reflect.Type, method, path string, opts []RouteOption) 
 	for _, opt := range opts {
 		opt.applyRoute(&cfg)
 	}
-	p := &callPlan{
-		method:   method,
-		path:     path,
-		bind:     bind,
-		headers:  map[string]bool{},
-		output:   outputKindOf(out),
-		html:     out == reflect.TypeFor[HTML](),
-		empty:    out == emptyType,
-		validate: !cfg.skipValidation,
-	}
-	if p.output == outputFile {
+	if outputKindOf(out) == outputFile {
 		return nil, fmt.Errorf("muzak: %s %s answers with a muzak.FileResponse, which names a file on the server and cannot be rebuilt from a response; "+
 			"declare the endpoint's output as muzak.Stream, which the server sends the same way and a call hands back as a body to read", method, path)
+	}
+	p, errs := planCall(bind, out, method, path)
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	p.validate = !cfg.skipValidation
+	return p, nil
+}
+
+// planCall builds how a request is written for an input whose binding plan is
+// bind, answered by out: everything a call plan holds but the endpoint's own
+// options. An MCP tool call writes its route's input through the same plan.
+func planCall(bind *bindPlan, out reflect.Type, method, path string) (*callPlan, []error) {
+	in := bind.typ
+	p := &callPlan{
+		method:  method,
+		path:    path,
+		bind:    bind,
+		headers: map[string]bool{},
+		output:  outputKindOf(out),
+		html:    out == htmlType,
+		empty:   out == emptyType,
 	}
 	if body := bind.body; body != nil {
 		p.bodyShape, p.bodyCopies = body.shape, body.copies
@@ -152,10 +164,7 @@ func compileCall(in, out reflect.Type, method, path string, opts []RouteOption) 
 	if err := p.compilePath(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
-	}
-	return p, nil
+	return p, errs
 }
 
 // headersNotBound are the headers an input may not bind if it is to be

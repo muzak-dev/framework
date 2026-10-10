@@ -56,20 +56,7 @@ type mcpTool struct {
 // credentials, the headers a client address or scheme is read from, and the
 // one that selects the route's version.
 func (s *mcpServer) compileTool(rt *Route) (*mcpTool, []error) {
-	p := &callPlan{
-		method:  rt.Method,
-		path:    rt.Path,
-		bind:    rt.plan,
-		headers: map[string]bool{},
-		output:  outputKindOf(rt.outType),
-		html:    rt.outType == htmlType,
-		empty:   rt.outType == emptyType,
-	}
-	errs := p.compileParams()
-	errs = append(errs, p.compileForm()...)
-	if err := p.compilePath(); err != nil {
-		errs = append(errs, err)
-	}
+	p, errs := planCall(rt.plan, rt.outType, rt.Method, rt.Path)
 	t := &mcpTool{name: mcpToolName(rt.OperationID), route: rt, plan: p, groups: map[string]bool{}}
 	for i := range rt.plan.params {
 		t.groups[rt.plan.params[i].source.String()] = true

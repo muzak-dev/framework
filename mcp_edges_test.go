@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json/v2"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -294,4 +296,78 @@ func TestMCPMessageReading(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	assertStatus(t, doRequest(t, app, req), http.StatusBadRequest)
+}
+
+// mcpSelfDecoding decodes its body itself, beside located fields a tool call
+// sends in the path, a header and the query.
+type mcpSelfDecoding struct {
+	Tenant string `header:"X-Tenant"`
+	ID     string `path:"id"`
+	Search string `query:"search"`
+	Value  string `json:"value"`
+}
+
+func (s *mcpSelfDecoding) UnmarshalJSON(b []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	s.Value, _ = raw["value"].(string)
+	return nil
+}
+
+// TestMCPCallWritesTheBodyAsACallDoes writes a tool's body by the rules
+// Endpoint.Call writes one by: an input that decodes itself sends its body
+// members alone, and a member its json tag would leave out is refused rather
+// than replaced by its default.
+func TestMCPCallWritesTheBodyAsACallDoes(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		body string
+	)
+	app := New(quietOptions())
+	app.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/mcp" {
+				b, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				body = string(b)
+				mu.Unlock()
+				r.Body = io.NopCloser(bytes.NewReader(b))
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	app.MCP("/mcp", MCPOptions{})
+	app.Post("/self/{id}", func(_ *Context, in mcpSelfDecoding) (map[string]string, error) {
+		return map[string]string{"tenant": in.Tenant, "id": in.ID, "search": in.Search, "value": in.Value}, nil
+	}, MCPTool(), OperationID("self"))
+	app.Post("/limits", func(_ *Context, in struct {
+		Limit int `json:"limit,omitzero" default:"10"`
+	}) (map[string]int, error) {
+		return map[string]int{"limit": in.Limit}, nil
+	}, MCPTool(), OperationID("limits"))
+	mustBuild(t, app)
+	session := openMCPSession(t, app)
+
+	got := mcpCall(t, app, session, "self", `{"path":{"id":"id-1"},"header":{"X-Tenant":"acme"},"query":{"search":"q"},"body":{"value":"v"}}`)
+	if got.IsError || got.StructuredContent["tenant"] != "acme" || got.StructuredContent["id"] != "id-1" ||
+		got.StructuredContent["search"] != "q" || got.StructuredContent["value"] != "v" {
+		t.Fatalf("result = %+v", got)
+	}
+	mu.Lock()
+	sent := body
+	mu.Unlock()
+	if sent != `{"value":"v"}` {
+		t.Fatalf("the body is %s", sent)
+	}
+
+	for args, want := range map[string]float64{`{"body":{"limit":3}}`: 3, `{"body":{}}`: 10} {
+		if got := mcpCall(t, app, session, "limits", args); got.IsError || got.StructuredContent["limit"] != want {
+			t.Fatalf("%s: result = %+v", args, got)
+		}
+	}
+	if got := mcpCall(t, app, session, "limits", `{"body":{"limit":0}}`); !got.IsError || !strings.Contains(got.text(t), "default") {
+		t.Fatalf("a limit of 0 the tag leaves out is refused, got %+v", got)
+	}
 }

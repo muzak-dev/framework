@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -105,9 +104,6 @@ func TestNewScaffoldsTheProject(t *testing.T) {
 
 func TestNewWritesFilesReadableByAllAndWritableByTheOwner(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows has no Unix permission bits")
-	}
 	work := t.TempDir()
 	runIn(t, work, "new", "perms", "-module", "example.com/perms").expect(t, exitOK)
 	dir := filepath.Join(work, "perms")
@@ -119,13 +115,8 @@ func TestNewWritesFilesReadableByAllAndWritableByTheOwner(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		perm, want := info.Mode().Perm(), fs.FileMode(0o644)
-		if entry.IsDir() {
-			want = 0o755
-		}
-		// The umask may take bits away, never add them; the owner always
-		// keeps what it needs.
-		if perm&^want != 0 || perm&0o600 != 0o600 || (entry.IsDir() && perm&0o700 != 0o700) {
+		perm := info.Mode().Perm()
+		if want, ok := createdPermission(perm, entry.IsDir()); !ok {
 			t.Errorf("%s has permissions %v, want %v", name, perm, want)
 		}
 		return nil
@@ -209,7 +200,7 @@ func TestNewRefusesASymbolicLinkAsTheTarget(t *testing.T) {
 	outside := t.TempDir()
 	link := filepath.Join(work, "link")
 	if err := os.Symlink(outside, link); err != nil {
-		t.Skipf("symbolic links are unavailable: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	runIn(t, work, "new", "link", "-module", "example.com/link").expect(t, exitFailure, `link is a symbolic link`)
 	if got := treeOf(t, outside); len(got) != 0 {
@@ -360,7 +351,7 @@ func TestScaffoldDoesNotFollowALinkOutOfTheDirectory(t *testing.T) {
 	// A link placed inside the directory while the project is written, here
 	// before the write that would follow it.
 	if err := os.Symlink(outside, filepath.Join(dir, "cmd")); err != nil {
-		t.Skipf("symbolic links are unavailable: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -443,45 +434,40 @@ func TestScaffoldCleansUpAfterAFileItCannotWrite(t *testing.T) {
 	}
 }
 
-// requireUnixPermissions skips a test that relies on permissions binding the
-// user running it.
-func requireUnixPermissions(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs Unix permissions that bind the user running the test")
-	}
-}
-
-// chmod changes a mode for the rest of the test.
-func chmod(t *testing.T, name string, mode fs.FileMode) {
-	t.Helper()
-	if err := os.Chmod(name, mode); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(name, 0o755) })
-}
-
+// TestNewReportsADirectoryItIsNotAllowedToUse refuses access to the
+// directory new would write into in the three ways it can meet one, by the
+// means each system has: permission bits on Unix and access control lists on
+// Windows. Where they do not bind the user, as they do not the superuser,
+// new writes the project, as it may.
 func TestNewReportsADirectoryItIsNotAllowedToUse(t *testing.T) {
 	t.Parallel()
-	requireUnixPermissions(t)
+	expectRefused := func(r result, reason string) {
+		t.Helper()
+		if !restrictionsBind {
+			r.expect(t, exitOK)
+			return
+		}
+		r.expect(t, exitFailure, reason+`.*`+accessDenied)
+	}
+
 	readOnly := t.TempDir()
-	chmod(t, readOnly, 0o555)
-	runIn(t, readOnly, "new", "shop").expect(t, exitFailure, `shop could not be created: .*permission denied`)
+	denyCreate(t, readOnly)
+	expectRefused(runIn(t, readOnly, "new", "shop"), `shop could not be created: `)
 
 	unsearchable := t.TempDir()
 	if err := os.Mkdir(filepath.Join(unsearchable, "shop"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	chmod(t, unsearchable, 0o000)
-	runIn(t, unsearchable, "new", "shop").expect(t, exitFailure, `shop cannot be examined: .*permission denied`)
+	denyExamine(t, unsearchable, "shop")
+	expectRefused(runIn(t, unsearchable, "new", "shop"), `shop cannot be examined: `)
 
 	work := t.TempDir()
 	unreadable := filepath.Join(work, "shop")
 	if err := os.Mkdir(unreadable, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	chmod(t, unreadable, 0o333)
-	runIn(t, work, "new", "shop").expect(t, exitFailure, `shop cannot be (opened|read): .*permission denied`)
+	denyList(t, unreadable)
+	expectRefused(runIn(t, work, "new", "shop"), `shop cannot be (opened|read): `)
 }
 
 // requireGo skips a test that runs the go command when there is none.

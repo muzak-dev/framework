@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -200,22 +199,24 @@ func TestWatcherRefusesARootItCannotRead(t *testing.T) {
 	}
 }
 
+// TestWatcherSkipsWhatItCannotRead refuses the watcher a directory, by
+// permission bits on Unix and the access control list on Windows, and finds
+// it watching what it can read. Where the refusal does not bind the user, as
+// it does not the superuser, both files are watched.
 func TestWatcherSkipsWhatItCannotRead(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs Unix permissions that bind the user running the test")
-	}
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "main.go"), "package main\n")
 	locked := filepath.Join(dir, "locked")
 	writeFile(t, filepath.Join(locked, "x.go"), "package x\n")
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	denyList(t, locked)
 	w := primed(t, dir, "go", 10)
-	if len(w.files) != 1 {
-		t.Errorf("watching %d files, want the readable one", len(w.files))
+	want := 1
+	if !restrictionsBind {
+		want = 2
+	}
+	if len(w.files) != want {
+		t.Errorf("watching %d files, want %d", len(w.files), want)
 	}
 	// A link to nowhere is a file that cannot be read either.
 	if err := os.Symlink(filepath.Join(dir, "gone.go"), filepath.Join(dir, "dangling.go")); err != nil {
@@ -229,7 +230,7 @@ func TestWatcherDoesNotFollowALinkIntoADirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a", "x.go"), "package a\n")
 	if err := os.Symlink(dir, filepath.Join(dir, "a", "loop")); err != nil {
-		t.Skipf("symbolic links are unavailable: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	if err := os.Symlink(filepath.Join(dir, "a"), filepath.Join(dir, "linked.go")); err != nil {
 		t.Fatal(err)
@@ -246,7 +247,7 @@ func TestWatcherFollowsALinkToAFile(t *testing.T) {
 	target := filepath.Join(elsewhere, "shared.go")
 	writeFile(t, target, "package shared\n")
 	if err := os.Symlink(target, filepath.Join(dir, "shared.go")); err != nil {
-		t.Skipf("symbolic links are unavailable: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	w := primed(t, dir, "go", 10)
 	writeFile(t, target, "package shared\n\nconst X = 1\n")
@@ -265,7 +266,7 @@ func TestWatcherWatchesTheTreeALinkedRootNames(t *testing.T) {
 	writeFile(t, main, "package main\n")
 	link := filepath.Join(base, "shop")
 	if err := os.Symlink(project, link); err != nil {
-		t.Skipf("symbolic links are unavailable: %v", err)
+		t.Fatalf("creating a symbolic link: %v", err)
 	}
 	w := primed(t, link, defaultWatchExtensions, 10)
 	if len(w.files) != 1 {

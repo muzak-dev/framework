@@ -293,6 +293,9 @@ type mcpServer struct {
 	forwardHeaders []string
 	forwardCookies []string
 	forwarding     []string
+	// credentials are the other places a credential is read from, which a
+	// tool's input may not bind; see [mcpServer.credentialSources].
+	credentials map[mcpCredential]string
 
 	// cacheScope is what a 2026-07-28 listing says about who may cache it:
 	// private when the endpoint is guarded, since a shared cache would hand
@@ -322,7 +325,10 @@ type mcpServer struct {
 // request's Authorization, and the headers and cookies opts forwards, its
 // client address and request identifier, and its cancellation; nothing else.
 // A token therefore reaches the routes of this application unchanged, and no
-// other service. The answer is bounded by MaxResultSize.
+// other service. A credential is never the model's to choose: a route whose
+// input binds the header, query parameter or cookie an API key scheme or the
+// session reads one from is a build error once it is chosen. The answer is
+// bounded by MaxResultSize.
 //
 // routeOpts configure the endpoint as they would any route: [WithSecurity]
 // makes an unauthenticated client get the 401 whose challenge names the
@@ -377,6 +383,7 @@ func (s *mcpServer) build(healthy bool) []error {
 	// that a tool call is attributed and judged as the MCP request was; see
 	// [mcpServer.innerRequest].
 	s.forwarding = dedupeStrings([]string{"Forwarded", "X-Forwarded-Proto", http.CanonicalHeaderKey(a.clientIP.header)})
+	s.credentials = s.credentialSources()
 	errs = append(errs, s.chooseTools()...)
 	if len(errs) > 0 || !healthy {
 		return errs

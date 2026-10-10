@@ -185,6 +185,53 @@ func TestMCPUncallableInputs(t *testing.T) {
 		"it is chosen as an MCP tool")
 }
 
+// queryKeyIn binds a query parameter an API key scheme reads its key from.
+type queryKeyIn struct {
+	Key string `query:"api_key"`
+}
+
+// browserSessionIn binds the cookie the application's sessions are kept in.
+type browserSessionIn struct {
+	Session string `cookie:"__Host-session"`
+}
+
+// TestMCPInputCannotBindACredential is a build error for a route whose input
+// binds a header, query parameter or cookie a security scheme or the session
+// reads a credential from, even one the endpoint does not forward: a model
+// would choose the credential the call is made with, and present a key it
+// read somewhere as its own. A route reading none of them is a tool.
+func TestMCPInputCannotBindACredential(t *testing.T) {
+	options := quietMCPOptions()
+	options.Sessions = &muzak.SessionOptions{Secrets: []string{"0123456789abcdef0123456789abcdef"}}
+	options.CrossOriginProtection = &muzak.CrossOriginOptions{}
+	options.SecuritySchemes = map[string]muzak.SecurityScheme{
+		"header": muzak.APIKeyVerifier(muzak.APIKeyOptions{Name: "x-api-key", Keys: []muzak.APIKey{{ID: "alice", Key: "alice-key-0123456789"}}}),
+		"query":  muzak.APIKeyVerifier(muzak.APIKeyOptions{In: "query", Name: "api_key", Keys: []muzak.APIKey{{ID: "alice", Key: "alice-key-0123456789"}}}),
+		"cookie": muzak.APIKeyCookie("sid"),
+	}
+	app := muzak.New(options)
+	app.MCP("/mcp", muzak.MCPOptions{})
+	app.Get("/header", func(*muzak.Context, apiKeyIn) (shopItem, error) { return shopItem{}, nil }, muzak.MCPTool())
+	app.Get("/query", func(*muzak.Context, queryKeyIn) (shopItem, error) { return shopItem{}, nil }, muzak.MCPTool())
+	app.Get("/cookie", func(*muzak.Context, struct {
+		ID string `cookie:"sid"`
+	}) (shopItem, error) {
+		return shopItem{}, nil
+	}, muzak.MCPTool())
+	app.Get("/session", func(*muzak.Context, browserSessionIn) (shopItem, error) { return shopItem{}, nil }, muzak.MCPTool())
+	app.Get("/other", func(*muzak.Context, sessionCookieIn) (shopItem, error) { return shopItem{}, nil }, muzak.MCPTool())
+	err := fmt.Sprint(app.Build())
+	mustContain(t, err,
+		`GET /header: field Key binds the header X-Api-Key, which the security scheme "header" reads a credential from`,
+		`GET /query: field Key binds the query parameter "api_key", which the security scheme "query" reads a credential from`,
+		`GET /cookie: field ID binds the cookie "sid", which the security scheme "cookie" reads a credential from`,
+		`GET /session: field Session binds the cookie "__Host-session", which AppOptions.Sessions reads a credential from`,
+		"a tool call's credentials come from the client's request and never from a model")
+	if strings.Contains(err, "GET /other") {
+		t.Fatalf("a cookie no credential is read from was refused:\n%s", err)
+	}
+}
+
 // TestMCPToolsAreDescribedAsTheDocumentDescribesThem lists a tool's
 // description, title and annotations from the route, and its input and output
 // schemas from the OpenAPI document's, every reference resolved.

@@ -54,15 +54,32 @@ type mcpTool struct {
 // what [Endpoint.Call] can write, since a tool call writes it the same way,
 // and may not bind a header the call writes itself: the forwarded
 // credentials, the headers a client address or scheme is read from, and the
-// one that selects the route's version.
+// one that selects the route's version. Nor may it bind any other place a
+// credential is read from, since the value would be the model's.
 func (s *mcpServer) compileTool(rt *Route) (*mcpTool, []error) {
 	p, errs := planCall(rt.plan, rt.outType, rt.Method, rt.Path)
 	t := &mcpTool{name: mcpToolName(rt.OperationID), route: rt, plan: p, groups: map[string]bool{}}
 	for i := range rt.plan.params {
-		t.groups[rt.plan.params[i].source.String()] = true
-		if b := &rt.plan.params[i]; b.source == srcCookie && slices.Contains(s.forwardCookies, b.name) {
-			errs = append(errs, fmt.Errorf("muzak: %s %s: field %s binds the cookie %q, which MCPOptions.ForwardCookies forwards from the MCP request",
-				rt.Method, rt.Path, rt.plan.typ.FieldByIndex(b.index).Name, b.name))
+		b := &rt.plan.params[i]
+		t.groups[b.source.String()] = true
+		field := rt.plan.typ.FieldByIndex(b.index).Name
+		at := mcpCredential{source: b.source, name: b.name}
+		switch b.source {
+		case srcCookie:
+			if slices.Contains(s.forwardCookies, b.name) {
+				errs = append(errs, fmt.Errorf("muzak: %s %s: field %s binds the cookie %q, which MCPOptions.ForwardCookies forwards from the MCP request",
+					rt.Method, rt.Path, field, b.name))
+				continue
+			}
+		case srcHeader:
+			if at.name = b.key; at.name == "Authorization" || slices.Contains(s.forwardHeaders, at.name) || slices.Contains(s.forwarding, at.name) {
+				// Refused below, as a header the call forwards.
+				continue
+			}
+		}
+		if reader, ok := s.credentials[at]; ok {
+			errs = append(errs, fmt.Errorf("muzak: %s %s: field %s binds the %s, which %s reads a credential from, "+
+				"and a tool call's credentials come from the client's request and never from a model", rt.Method, rt.Path, field, at, reader))
 		}
 	}
 	if rt.plan.body != nil {
@@ -87,6 +104,56 @@ func (s *mcpServer) compileTool(rt *Route) (*mcpTool, []error) {
 			"so change the input or leave the route out of the MCP endpoint's tools", err)
 	}
 	return t, errs
+}
+
+// mcpCredential is a place in a request a credential is read from: a header,
+// by its canonical name, a query parameter or a cookie.
+type mcpCredential struct {
+	source paramSource
+	name   string
+}
+
+// String names the place as a build error does.
+func (c mcpCredential) String() string {
+	switch c.source {
+	case srcHeader:
+		return "header " + c.name
+	case srcQuery:
+		return fmt.Sprintf("query parameter %q", c.name)
+	}
+	return fmt.Sprintf("cookie %q", c.name)
+}
+
+// credentialSources lists where the application reads a credential from
+// besides Authorization, each with what reads it: the header, query parameter
+// or cookie of every API key scheme, whether it verifies the key or only
+// describes it for a guard to, and the cookie the sessions are kept in. A
+// tool's input binding one of them would hand the choice of credential to the
+// model, which could then present one it read somewhere as its own.
+func (s *mcpServer) credentialSources() map[mcpCredential]string {
+	sources := map[mcpCredential]string{}
+	add := func(at mcpCredential, reader string) {
+		if _, taken := sources[at]; !taken {
+			sources[at] = reader
+		}
+	}
+	schemes := s.app.opts.SecuritySchemes
+	for _, name := range slices.Sorted(maps.Keys(schemes)) {
+		scheme, reader := schemes[name], fmt.Sprintf("the security scheme %q", name)
+		switch {
+		case scheme.Type != "apiKey":
+		case scheme.In == "header":
+			add(mcpCredential{source: srcHeader, name: http.CanonicalHeaderKey(scheme.Name)}, reader)
+		case scheme.In == "query":
+			add(mcpCredential{source: srcQuery, name: scheme.Name}, reader)
+		case scheme.In == "cookie":
+			add(mcpCredential{source: srcCookie, name: scheme.Name}, reader)
+		}
+	}
+	if s.app.sessions != nil {
+		sources[mcpCredential{source: srcCookie, name: s.app.sessions.name}] = "AppOptions.Sessions"
+	}
+	return sources
 }
 
 // selectVersion arranges for a tool's request to declare the version its route

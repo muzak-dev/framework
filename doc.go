@@ -1255,10 +1255,11 @@
 // tool's error result. The request carries the MCP request's Authorization,
 // the headers and cookies the options forward, its client address and request
 // identifier, and its cancellation, and may reach the tool's own route and no
-// other. The endpoint speaks Streamable HTTP, with sessions for revisions
-// 2025-03-26, 2025-06-18 and 2025-11-25 and statelessly for 2026-07-28; it
-// checks the Origin against DNS rebinding, bounds messages, sessions and
-// results, and is left out of the document.
+// other; a credential is never an argument, so an input binding a place one is
+// read from is a build error. The endpoint speaks Streamable HTTP, with
+// sessions for revisions 2025-03-26, 2025-06-18 and 2025-11-25 and statelessly
+// for 2026-07-28; it checks the Origin against DNS rebinding, bounds messages,
+// sessions and results, and is left out of the document.
 //
 // # Defaults worth knowing
 //

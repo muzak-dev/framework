@@ -255,6 +255,9 @@ func TestEndpointCarriesTenThousandEntries(t *testing.T) {
 }
 
 func TestImplementCostsWhatHandleCosts(t *testing.T) {
+	// The comparison is of exact allocation counts, which sync.Pool makes
+	// unsteady under the race detector.
+	skipAllocationCountsUnderRace(t)
 	type in struct {
 		ID string `path:"id"`
 		Q  int    `query:"q"`

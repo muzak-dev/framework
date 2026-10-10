@@ -89,7 +89,9 @@ func ValidateFirst() CallOption {
 // header with a line break or another control character in it, or a space at
 // either end; a header list entry holding a comma; a cookie outside the
 // characters a cookie may carry; a number that is not finite; a body string
-// that is not valid UTF-8. A nil pointer or an empty list is not sent at all,
+// that is not valid UTF-8; a body member with a default that the omitzero or
+// omitempty option of its json tag leaves out, which would arrive as the
+// default. A nil pointer or an empty list is not sent at all,
 // so the server reads it as absent, which is its default if it has one. The
 // input type itself is checked on the first call, and a type the server binds
 // but a call cannot write, such as one with UnmarshalText and no MarshalText

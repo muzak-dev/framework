@@ -247,6 +247,56 @@ func TestEndpointSendsZeroValuesSoDefaultsDoNotReplaceThem(t *testing.T) {
 	assertEqualValue(t, seen.last(t), epDefaultsIn{Ptr: &nine})
 }
 
+// epOmittedDefaultsIn has body members a zero value leaves out of the body,
+// each with a default the server fills in for a member left out.
+type epOmittedDefaultsIn struct {
+	epOmittedEmbedded
+	Limit int      `json:"limit,omitzero" default:"10"`
+	Name  *string  `json:"name,omitempty" default:"anon"`
+	Tags  []string `json:"tags,omitempty" default:"x"`
+	// omitempty leaves out an empty string, list or object, never a zero
+	// number, so a zero Count is sent and arrives as itself.
+	Count int `json:"count,omitempty" default:"3"`
+	Plain int `json:"plain,omitzero"`
+}
+
+type epOmittedEmbedded struct {
+	Sort string `json:"sort,omitempty" default:"asc"`
+}
+
+func TestEndpointRefusesABodyMemberItsTagWouldLeaveToItsDefault(t *testing.T) {
+	t.Parallel()
+	ep := NewEndpoint[epOmittedDefaultsIn, epOmittedDefaultsIn](http.MethodPost, "/omitted")
+	client := endpointServer(t, func(app *App) {
+		app.Implement(ep, func(_ *Context, v epOmittedDefaultsIn) (epOmittedDefaultsIn, error) { return v, nil })
+	})
+	name, empty := "n", ""
+	sent := epOmittedDefaultsIn{epOmittedEmbedded{"desc"}, 5, &name, []string{"a"}, 0, 0}
+	got, err := ep.Call(context.Background(), client, sent)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	assertEqualValue(t, got, sent)
+	// A nil pointer and an empty list are absent, as they are anywhere in a
+	// request, and absent is what a default is for.
+	anon := "anon"
+	got, err = ep.Call(context.Background(), client, epOmittedDefaultsIn{epOmittedEmbedded{"desc"}, 5, nil, []string{}, 0, 0})
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	assertEqualValue(t, got, epOmittedDefaultsIn{epOmittedEmbedded{"desc"}, 5, &anon, []string{"x"}, 0, 0})
+	// Any other value the tag leaves out would arrive as the default, so
+	// it is refused rather than replaced.
+	for field, in := range map[string]epOmittedDefaultsIn{
+		`"limit"`: {epOmittedEmbedded{"desc"}, 0, &name, nil, 0, 0},
+		`"name"`:  {epOmittedEmbedded{"desc"}, 5, &empty, nil, 0, 0},
+		`"sort"`:  {epOmittedEmbedded{""}, 5, &name, nil, 0, 0},
+	} {
+		_, err := ep.Call(context.Background(), client, in)
+		assertCallRefused(t, err, field, "default")
+	}
+}
+
 // epListsIn holds lists in every location that takes one.
 type epListsIn struct {
 	Q  []string   `query:"q"`

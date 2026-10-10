@@ -3,6 +3,7 @@ package muzak
 import (
 	"bytes"
 	"encoding"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -81,6 +82,9 @@ type callPlan struct {
 	// move the body members of the input into it; see [callPlan.encodeBody].
 	bodyShape  reflect.Type
 	bodyCopies []bodyCopy
+	// omitted are the body members with a default whose json tag may leave
+	// them out of the body; see [callPlan.checkOmitted].
+	omitted []bodyDefault
 }
 
 // pathSegment is one segment of a path template: static text, written as it
@@ -134,6 +138,13 @@ func compileCall(in, out reflect.Type, method, path string, opts []RouteOption) 
 			// which is what its own fields encode as once the located ones
 			// and the Deps are left out; see encodeBody.
 			p.bodyShape, p.bodyCopies = bodyShape(in, nil)
+		}
+		if !encodesItself(in) {
+			for _, d := range body.defaults {
+				if tag, _ := parseJSONTag(in.FieldByIndex(d.index)); tag.omitzero || tag.omitempty {
+					p.omitted = append(p.omitted, d)
+				}
+			}
 		}
 	}
 	errs := p.compileParams()
@@ -736,7 +747,48 @@ func (p *callPlan) encodeBody(v reflect.Value) ([]byte, error) {
 	if err != nil {
 		return nil, refuse(p.method, p.path, "the body could not be encoded as JSON: %v", err)
 	}
+	if len(p.omitted) > 0 {
+		if err := p.checkOmitted(v, data); err != nil {
+			return nil, err
+		}
+	}
 	return data, nil
+}
+
+// checkOmitted refuses a body whose json tags left out a member that has a
+// default, which the server then fills in: a zero value the tag omits would
+// arrive as the default. A nil pointer and an empty list are absent wherever
+// they are in a request, and absent is what a default is for, so those are
+// left out as they are. The body is the call's own encoding of a struct, an
+// object, whose member names are read in one pass.
+func (p *callPlan) checkOmitted(v reflect.Value, body []byte) error {
+	present := map[string]bool{}
+	dec := jsontext.NewDecoder(bytes.NewReader(body))
+	if _, err := dec.ReadToken(); err == nil {
+		for dec.PeekKind() == '"' {
+			name, _ := dec.ReadToken()
+			present[name.String()] = true
+			_ = dec.SkipValue()
+		}
+	}
+	for _, d := range p.omitted {
+		if present[d.name] {
+			continue
+		}
+		switch field := fieldAt(v, d.index); field.Kind() {
+		case reflect.Pointer:
+			if field.IsNil() {
+				continue
+			}
+		case reflect.Slice, reflect.Map:
+			if field.Len() == 0 {
+				continue
+			}
+		}
+		return refuse(p.method, p.path, "the body member %q would be left out by the omitzero or omitempty option of its json tag, and the server would read its default in its place; "+
+			"send a value the tag keeps, or a nil pointer for the default", d.name)
+	}
+	return nil
 }
 
 // encodeForm writes a form body, always as multipart/form-data.

@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -904,14 +905,21 @@ func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	address := strings.TrimPrefix(server.URL, "http://")
-	conn, err := net.Dial("tcp", address)
+	// The receive buffer is set before the connection is made, since the
+	// window it offers is agreed then: set afterwards, Windows went on
+	// offering the window it had tuned the connection to.
+	dialer := net.Dialer{Control: func(_, _ string, raw syscall.RawConn) error {
+		var setErr error
+		if err := raw.Control(func(fd uintptr) { setErr = setReceiveBuffer(fd, smallSocketBuffer) }); err != nil {
+			return err
+		}
+		return setErr
+	}}
+	conn, err := dialer.Dial("tcp", address)
 	if err != nil {
 		t.Fatalf("dialling: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := conn.(*net.TCPConn).SetReadBuffer(smallSocketBuffer); err != nil {
-		t.Fatalf("setting the receive buffer: %v", err)
-	}
 	if err := conn.SetDeadline(time.Now().Add(wsTestTimeout)); err != nil {
 		t.Fatalf("setting a deadline: %v", err)
 	}

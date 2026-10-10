@@ -7,10 +7,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
 	"reflect"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -283,12 +286,11 @@ func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { r
 
 func TestTransportAndClient(t *testing.T) {
 	t.Parallel()
-	if _, ok := newTransport(roundTripperFunc(nil)).(*http.Transport); !ok {
+	if newTransport(roundTripperFunc(nil)) == nil {
 		t.Error("a default transport of another type did not give a plain one")
 	}
 	base := &http.Transport{MaxIdleConns: 7}
-	cloned, ok := newTransport(base).(*http.Transport)
-	if !ok || cloned == base || cloned.MaxIdleConns != 7 {
+	if cloned := newTransport(base); cloned == base || cloned.MaxIdleConns != 7 {
 		t.Errorf("the default transport was not cloned: %v", cloned)
 	}
 	c := newCollector(t, nil)
@@ -309,6 +311,87 @@ func TestTransportAndClient(t *testing.T) {
 	if len(used) == 0 || len(c.spans()) != 1 {
 		t.Errorf("the configured client was not used")
 	}
+}
+
+// idleTracker is a transport that counts the times it was asked to close its
+// idle connections.
+type idleTracker struct {
+	roundTripperFunc
+	closed atomic.Int32
+}
+
+func (t *idleTracker) CloseIdleConnections() { t.closed.Add(1) }
+
+// TestStopClosesOnlyItsOwnTransport is the regression test for Stop closing
+// the idle connections of a transport the exporter did not make: the one in
+// Options.Client, and for a client that names none, http.DefaultTransport,
+// whose connections every other client in the process shares.
+func TestStopClosesOnlyItsOwnTransport(t *testing.T) {
+	t.Parallel()
+	t.Run("the transport of the client given", func(t *testing.T) {
+		t.Parallel()
+		tracker := &idleTracker{}
+		opts, _ := testOptions("http://collector.invalid")
+		opts.Client = &http.Client{Transport: tracker}
+		e, err := New(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.Stop(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if n := tracker.closed.Load(); n != 0 {
+			t.Errorf("Stop closed the idle connections of the caller's transport %d times", n)
+		}
+	})
+	t.Run("the default transport", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		t.Cleanup(server.Close)
+		// get makes a request on the default transport and waits until its
+		// connection is idle, reporting whether it was one already idle.
+		get := func() bool {
+			reused := false
+			idle := make(chan struct{}, 1)
+			trace := &httptrace.ClientTrace{
+				GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+				PutIdleConn: func(err error) {
+					if err == nil {
+						idle <- struct{}{}
+					}
+				},
+			}
+			req, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace), http.MethodGet, server.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := http.DefaultTransport.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, res.Body)
+			_ = res.Body.Close()
+			select {
+			case <-idle:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the connection never became idle")
+			}
+			return reused
+		}
+		get()
+		opts, _ := testOptions(server.URL)
+		opts.Client = &http.Client{Timeout: time.Minute}
+		e, err := New(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.Stop(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if !get() {
+			t.Error("Stop closed the idle connections of http.DefaultTransport")
+		}
+	})
 }
 
 // TestFlushRacingStop checks that a flush asked of a run that has ended

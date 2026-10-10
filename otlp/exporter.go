@@ -52,7 +52,13 @@ var ErrNotRunning = errors.New("otlp: the exporter is not running")
 type Exporter struct {
 	cfg    config
 	client *http.Client
-	queue  chan *span
+	// transport is the one the exporter made for itself when Options.Client
+	// gave none, and the only one whose idle connections Stop closes. It is
+	// nil when the client came from the options: its transport, or
+	// http.DefaultTransport when it names none, is shared with whatever else
+	// uses it.
+	transport *http.Transport
+	queue     chan *span
 	// resource is the converted resource attributes, the same for every
 	// batch, and scopeVersion the framework's version, reported with the
 	// instrumentation scope.
@@ -123,10 +129,12 @@ func New(opts Options) (*Exporter, error) {
 		return nil, err
 	}
 	var client http.Client
+	var transport *http.Transport
 	if opts.Client != nil {
 		client = *opts.Client
 	} else {
-		client.Transport = newTransport(http.DefaultTransport)
+		transport = newTransport(http.DefaultTransport)
+		client.Transport = transport
 	}
 	// A redirect would carry the headers, credentials included, to whatever
 	// the answer named, so the answer is taken as it is: a 3xx is a refusal.
@@ -134,6 +142,7 @@ func New(opts Options) (*Exporter, error) {
 	return &Exporter{
 		cfg:          cfg,
 		client:       &client,
+		transport:    transport,
 		queue:        make(chan *span, cfg.queueSize),
 		resource:     buildResource(cfg),
 		scopeVersion: frameworkVersion(),
@@ -144,7 +153,7 @@ func New(opts Options) (*Exporter, error) {
 // default one so that its proxy and TLS settings apply, so that closing its
 // idle connections on Stop closes nobody else's. A program that replaced the
 // default with a transport of another type gets a plain one.
-func newTransport(base http.RoundTripper) http.RoundTripper {
+func newTransport(base http.RoundTripper) *http.Transport {
 	if t, ok := base.(*http.Transport); ok {
 		return t.Clone()
 	}
@@ -205,11 +214,13 @@ func (e *Exporter) Start(context.Context) error {
 // abandoned, nothing more is sent, and what was not sent is counted as
 // dropped. Stop returns only when the goroutine has exited, which takes no
 // longer than ctx allows and a moment for the abandoned request to unwind,
-// and it closes the client's idle connections, so nothing the exporter
-// started outlives it. The error reports spans lost to the deadline; spans
-// the collector refused are logged and counted, but are not an error of
-// Stop's. Stopping an exporter that is not running drops whatever it had
-// queued.
+// and it closes the idle connections of the transport the exporter made for
+// itself, so nothing the exporter started outlives it. Those of a client
+// given in [Options.Client] are left to whoever owns its transport, which is
+// http.DefaultTransport for a client that names none. The error reports
+// spans lost to the deadline; spans the collector refused are logged and
+// counted, but are not an error of Stop's. Stopping an exporter that is not
+// running drops whatever it had queued.
 func (e *Exporter) Stop(ctx context.Context) error {
 	e.mu.Lock()
 	r := e.current
@@ -226,7 +237,9 @@ func (e *Exporter) Stop(ctx context.Context) error {
 		close(r.stopping)
 	}
 	e.mu.Unlock()
-	defer e.client.CloseIdleConnections()
+	if e.transport != nil {
+		defer e.transport.CloseIdleConnections()
+	}
 	if r == nil {
 		e.dropped.Add(e.discardQueued())
 		return nil

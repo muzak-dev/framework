@@ -126,8 +126,11 @@ type Options struct {
 	// Client sends the requests, which is how a proxy, a custom CA or a
 	// client certificate is configured. The exporter uses a copy that never
 	// follows a redirect, since a redirect would carry Headers to wherever
-	// it pointed, and closes the copy's idle connections when it stops. It
-	// defaults to a client of its own.
+	// it pointed. Its transport, http.DefaultTransport when it names none,
+	// is shared with whatever else uses it, so the exporter leaves its idle
+	// connections alone when it stops. It defaults to a client of the
+	// exporter's own, on a transport cloned from http.DefaultTransport whose
+	// idle connections Stop closes.
 	Client *http.Client
 
 	// Logger receives what the exporter has to report: a batch the

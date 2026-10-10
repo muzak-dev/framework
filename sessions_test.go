@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -750,6 +752,73 @@ func TestSessionCookieKeepsResponsesOutOfSharedCaches(t *testing.T) {
 		mustSessionCookie(t, rec)
 		if got := rec.Header().Get("Cache-Control"); got != want {
 			t.Errorf("with %q, Cache-Control = %q, want %q", policy, got, want)
+		}
+	}
+}
+
+// TestSessionCookieStaysPrivateWhateverFollows covers a cookie put on the
+// response before the last word on its caching was said: by Save, followed
+// by a public Cache-Control the handler set or an error renderer chose, or by
+// the file server, which drops Cache-Control from a range it cannot serve.
+// The response still carries the session, so it must still be kept out of
+// shared caches; a cache that kept it would hand the session to whoever
+// asked next with no cookie of their own.
+func TestSessionCookieStaysPrivateWhateverFollows(t *testing.T) {
+	t.Parallel()
+	saved := func(ctx *Context) error {
+		s := ctx.Session()
+		if err := s.Set("v", "x"); err != nil {
+			return err
+		}
+		if err := s.Save(); err != nil {
+			return err
+		}
+		ctx.SetHeader("Cache-Control", "public, max-age=600")
+		return nil
+	}
+	app, _, _ := sessionTestApp(t, func(o *AppOptions) {
+		o.ErrorRenderer = func(ctx *Context, err error) (int, any) {
+			ctx.SetHeader("Cache-Control", "public, max-age=60")
+			return DefaultErrorRenderer(ctx, err)
+		}
+	}, func(app *App) {
+		app.Post("/saved", func(ctx *Context, _ Empty) (Empty, error) {
+			return Empty{}, saved(ctx)
+		})
+		app.Post("/saved-stream", func(ctx *Context, _ Empty) (Empty, error) {
+			if err := saved(ctx); err != nil {
+				return Empty{}, err
+			}
+			_, err := ctx.ResponseWriter().Write([]byte("streamed"))
+			return Empty{}, err
+		})
+		app.Post("/saved-error", func(ctx *Context, _ Empty) (Empty, error) {
+			if err := saved(ctx); err != nil {
+				return Empty{}, err
+			}
+			return Empty{}, BadRequest("refused after saving the session")
+		})
+		app.Post("/file", func(ctx *Context, _ Empty) (FileResponse, error) {
+			if err := ctx.Session().Set("v", "x"); err != nil {
+				return FileResponse{}, err
+			}
+			return FileResponse{FS: fstest.MapFS{"a.txt": {Data: []byte("abc")}}, Name: "a.txt"}, nil
+		})
+	})
+	for target, status := range map[string]int{
+		"/saved":        http.StatusOK,
+		"/saved-stream": http.StatusOK,
+		"/saved-error":  http.StatusBadRequest,
+		"/file":         http.StatusRequestedRangeNotSatisfiable,
+	} {
+		req := httptest.NewRequest("POST", target, nil)
+		req.Header.Set("Range", "bytes=100-")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		assertStatus(t, rec, status)
+		mustSessionCookie(t, rec)
+		if got := rec.Header().Get("Cache-Control"); !keepsPrivate([]string{got}) {
+			t.Errorf("%s answers %d carrying the session cookie with Cache-Control %q", target, status, got)
 		}
 	}
 }

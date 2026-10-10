@@ -457,9 +457,10 @@ func (m *sessionManager) storeContext(c *Context, write bool) (context.Context, 
 // tenth of its idle timeout old, and a request that never asked for its
 // session writes nothing at all. A response that carries the cookie is marked
 // "Cache-Control: private, no-cache", replacing a Cache-Control that would let
-// a shared cache keep it, since a cache that stored it would hand one user's
-// session to the next; a response from a handler that read the session varies
-// on Cookie and is marked the same way unless the handler set its own.
+// a shared cache keep it, whether that was set before the cookie was added or
+// after it, since a cache that stored it would hand one user's session to the
+// next; a response from a handler that read the session varies on Cookie and
+// is marked the same way unless the handler set its own.
 //
 // A handler that writes its response itself, through
 // [Context.ResponseWriter] or by returning a stream, has its session written
@@ -1074,11 +1075,49 @@ func (s *Session) setCookie(cookie *http.Cookie) error {
 	}
 	header.Add("Set-Cookie", value)
 	s.header = value
+	keepPrivate(header)
+	return nil
+}
+
+// keepPrivate marks a response "Cache-Control: private, no-cache" unless its
+// Cache-Control already keeps it out of shared caches.
+func keepPrivate(header http.Header) {
 	if !keepsPrivate(header.Values("Cache-Control")) {
 		header.Set("Cache-Control", privateCacheControl)
 	}
-	return nil
 }
+
+// keepCookiePrivate keeps the response out of shared caches if the session
+// put its cookie on it. setCookie does so as the cookie is added, but a
+// cookie [Session.Save] added comes before the handler is done, and the
+// handler may set a public Cache-Control after it.
+func (s *Session) keepCookiePrivate() {
+	if s.header != "" {
+		keepPrivate(s.c.w.Header())
+	}
+}
+
+// guardCookie is [Session.keepCookiePrivate] for a response that has not
+// started yet when the session is settled, held until it does: what runs
+// after the session is settled can still change Cache-Control, an error
+// renderer choosing to let an error be cached, or the file server dropping
+// it from a range it cannot serve, and the cookie goes out with whatever it
+// leaves.
+func (s *Session) guardCookie() {
+	w := s.c.w
+	if s.header == "" || w.written {
+		return
+	}
+	keepPrivate(w.Header())
+	w.commitHook = cookieGuard(w.Header())
+}
+
+// cookieGuard is the commit hook [Session.guardCookie] leaves on the writer.
+// It holds the response's header and nothing else, so unlike the [Context]
+// it replaces it is safe to call after the request has ended.
+type cookieGuard http.Header
+
+func (g cookieGuard) beforeCommit(int) { keepPrivate(http.Header(g)) }
 
 // keepsPrivate reports whether a Cache-Control already keeps a response out
 // of shared caches, with a private or no-store directive. It is linear in the
@@ -1106,6 +1145,7 @@ func (c *Context) commitSession(failure error) error {
 	if c.w.commitHook == commitHook(c) {
 		c.w.commitHook = nil
 	}
+	defer s.guardCookie()
 	if s.settled {
 		if failure == nil && s.lateErr != nil {
 			failure, s.lateErr = s.lateErr, nil
@@ -1160,6 +1200,7 @@ type commitHook interface {
 func (c *Context) beforeCommit(status int) {
 	s := c.session
 	s.settled = true
+	defer s.keepCookiePrivate()
 	if status >= http.StatusBadRequest || (s.err != nil && !s.destroyed) {
 		return
 	}

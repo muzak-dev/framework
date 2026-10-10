@@ -829,7 +829,7 @@ func (w *responseWriter) WriteHeader(status int) {
 		return
 	}
 	w.beforeCommit(status)
-	w.status = int32(status)
+	w.status = statusCode(status)
 	w.written = true
 	w.ResponseWriter.WriteHeader(status)
 }
@@ -985,6 +985,16 @@ func markHijacked(w http.ResponseWriter) {
 		}
 		w = unwrapper.Unwrap()
 	}
+}
+
+// statusCode narrows a status to the int32 the writer keeps it in. One outside
+// the three digits net/http accepts makes the WriteHeader that follows it
+// panic, so it is recorded as no status rather than as a code it is not.
+func statusCode(status int) int32 {
+	if status < 100 || status > 999 {
+		return 0
+	}
+	return int32(status)
 }
 
 // statusOrDefault returns the status written, or 200 for a handler that

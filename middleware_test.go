@@ -548,6 +548,17 @@ func TestPerRequestRecordsStayInTheirSizeClass(t *testing.T) {
 	}
 }
 
+// TestStatusCodeKeepsOnlyWhatNetHTTPAccepts records a status as the writer
+// stores it, and one net/http would refuse, a value too large for an int32
+// among them, as none.
+func TestStatusCodeKeepsOnlyWhatNetHTTPAccepts(t *testing.T) {
+	for status, want := range map[int]int32{100: 100, 204: 204, 999: 999, 99: 0, 1000: 0, -1: 0, 1 << 40: 0} {
+		if got := statusCode(status); got != want {
+			t.Errorf("statusCode(%d) = %d, want %d", status, got, want)
+		}
+	}
+}
+
 func TestResponseWriter(t *testing.T) {
 	t.Parallel()
 

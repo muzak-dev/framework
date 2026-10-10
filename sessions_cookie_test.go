@@ -107,7 +107,19 @@ func TestCookieSealerRefusesTruncationAndExtension(t *testing.T) {
 func TestCookieSealerRefusesOtherSpellings(t *testing.T) {
 	t.Parallel()
 	sealer := testSealer(t, "__Host-session", testSessionSecret)
+	// A value holding a character the standard alphabet spells differently,
+	// so that its standard spelling below is another spelling and not the
+	// value itself: about one value in fifteen holds neither.
 	value, _ := sealer.seal(testRecord())
+	for range 100 {
+		if strings.ContainsAny(value, "-_") {
+			break
+		}
+		value, _ = sealer.seal(testRecord())
+	}
+	if !strings.ContainsAny(value, "-_") {
+		t.Fatal("a hundred cookies in a row were spelled the same in both alphabets")
+	}
 	spellings := []string{
 		value[:10] + "\n" + value[10:],
 		value[:10] + "\r" + value[10:],

@@ -1236,6 +1236,30 @@
 // envelope. The TypeScript side of the same API is generated from the
 // document by the tsgen package, muzak.dev/framework/tsgen.
 //
+// # Routes as MCP tools
+//
+// [App.MCP] serves a Model Context Protocol endpoint through which an AI
+// client calls routes as tools. Nothing is a tool until it is chosen, with
+// [MCPTool] on a route or with the tags and the rule of [MCPOptions]:
+//
+//	app.MCP("/mcp", muzak.MCPOptions{Tags: []string{"agent"}},
+//		muzak.WithSecurity(muzak.Require("oidc")))
+//
+// A tool is described from the OpenAPI document: named after the operation
+// id, its input an object with a member for each part of the request the route
+// reads, path, query, header, cookie, body or form, and its output the success
+// response's schema, references resolved. A call is the route's own request,
+// written from the arguments with the encoder [Endpoint.Call] uses and served
+// in-process by the whole application, so its security, guards, providers,
+// rate limit, validation and releases apply, and its error answer is the
+// tool's error result. The request carries the MCP request's Authorization,
+// the headers and cookies the options forward, its client address and request
+// identifier, and its cancellation, and may reach the tool's own route and no
+// other. The endpoint speaks Streamable HTTP, with sessions for revisions
+// 2025-03-26, 2025-06-18 and 2025-11-25 and statelessly for 2026-07-28; it
+// checks the Origin against DNS rebinding, bounds messages, sessions and
+// results, and is left out of the document.
+//
 // # Defaults worth knowing
 //
 // Muzak starts from settings that are safe rather than permissive. Every

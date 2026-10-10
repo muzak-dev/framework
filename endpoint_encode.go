@@ -77,6 +77,10 @@ type callPlan struct {
 	// validate is false when the endpoint was declared with
 	// [SkipValidation], which [ValidateFirst] honours as the server does.
 	validate bool
+	// bodyShape is the type the JSON body is encoded from, and bodyCopies
+	// move the body members of the input into it; see [callPlan.encodeBody].
+	bodyShape  reflect.Type
+	bodyCopies []bodyCopy
 }
 
 // pathSegment is one segment of a path template: static text, written as it
@@ -121,6 +125,16 @@ func compileCall(in, out reflect.Type, method, path string, opts []RouteOption) 
 	if p.output == outputFile {
 		return nil, fmt.Errorf("muzak: %s %s answers with a muzak.FileResponse, which names a file on the server and cannot be rebuilt from a response; "+
 			"declare the endpoint's output as muzak.Stream, which the server sends the same way and a call hands back as a body to read", method, path)
+	}
+	if body := bind.body; body != nil {
+		p.bodyShape, p.bodyCopies = body.shape, body.copies
+		if !body.direct && body.shape == in && !encodesItself(in) {
+			// The input decodes itself, so the binder reads the body into
+			// the input whole. It is written from its body members alone,
+			// which is what its own fields encode as once the located ones
+			// and the Deps are left out; see encodeBody.
+			p.bodyShape, p.bodyCopies = bodyShape(in, nil)
+		}
 	}
 	errs := p.compileParams()
 	errs = append(errs, p.compileForm()...)
@@ -690,15 +704,32 @@ func (p *callPlan) addHeaders(h http.Header, extra [][2]string) error {
 // [bodyPlan.narrow]. Writing goes the other way through the same struct, so a
 // located field and a Dep are never sent, whatever their json tags say, and a
 // member is named and encoded exactly as it is decoded. An input whose every
-// field is a body member, or that decodes itself, is written whole, as the
-// binder reads it whole.
+// field is a body member is written whole, as the binder reads it whole.
+//
+// So is an input that decodes itself, which the binder hands the body whole.
+// Writing it whole put its located fields in the body beside the headers and
+// cookies they were sent in, the credential in an Authorization field among
+// them, where a body is logged and kept, and a Dep in it failed every call,
+// since a Dep has no exported field to encode. One with no encoder of its own
+// is written from the same struct as any other input, which its own fields
+// encode as once those are left out. One that encodes itself is handed a copy
+// with its located fields and Deps zeroed.
 func (p *callPlan) encodeBody(v reflect.Value) ([]byte, error) {
-	body := p.bind.body
 	source := v
-	if body.shape != v.Type() {
-		source = reflect.New(body.shape).Elem()
-		for _, c := range body.copies {
+	switch {
+	case p.bodyShape != v.Type():
+		source = reflect.New(p.bodyShape).Elem()
+		for _, c := range p.bodyCopies {
 			fieldAt(source, c.from).Set(fieldAt(v, c.to))
+		}
+	case !p.bind.body.direct:
+		source = reflect.New(v.Type()).Elem()
+		source.Set(v)
+		for i := range p.params {
+			fieldAt(source, p.params[i].index).SetZero()
+		}
+		for _, dep := range p.bind.deps {
+			fieldAt(source, dep.index).SetZero()
 		}
 	}
 	data, err := json.Marshal(source.Addr().Interface(), durationJSON, json.Deterministic(true))

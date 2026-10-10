@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"uuid"
@@ -396,6 +398,89 @@ func TestEndpointRoundTripsBodyShapes(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 	assertEqualValue(t, seenSelf.last(t), epSelfDecoding{ID: "p", Value: "SHOUT"})
+}
+
+// epSelfDecodingSecrets decodes itself, with located fields that carry
+// credentials beside its one body member, and encodes itself as any struct is.
+type epSelfDecodingSecrets struct {
+	epSelfDecodingShared
+	Token  string `header:"Authorization"`
+	Sess   string `cookie:"session"`
+	ID     string `path:"id"`
+	Search string `query:"search"`
+	User   Dep[depUser]
+	Value  string `json:"value"`
+}
+
+// epSelfDecodingShared is embedded by value and holds a located field.
+type epSelfDecodingShared struct {
+	Tenant string `header:"X-Tenant"`
+}
+
+func (s *epSelfDecodingSecrets) UnmarshalJSON(b []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	s.Value, _ = raw["value"].(string)
+	return nil
+}
+
+// epSelfEncodingSecrets reads and writes itself, and writes every field it
+// has, as a careless encoder would.
+type epSelfEncodingSecrets struct {
+	Token string `header:"Authorization"`
+	User  Dep[*depUser]
+	Value string `json:"value"`
+}
+
+func (s *epSelfEncodingSecrets) UnmarshalJSON(b []byte) error {
+	var raw struct{ Value string }
+	err := json.Unmarshal(b, &raw)
+	s.Value = raw.Value
+	return err
+}
+
+func (s epSelfEncodingSecrets) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{"Value": s.Value, "Token": s.Token, "User": s.User.Get()})
+}
+
+func TestEndpointKeepsLocatedFieldsOutOfABodyTheInputDecodesItself(t *testing.T) {
+	t.Parallel()
+	ep := NewEndpoint[epSelfDecodingSecrets, Empty](http.MethodPost, "/self/{id}")
+	writes := NewEndpoint[epSelfEncodingSecrets, Empty](http.MethodPost, "/writes")
+	var (
+		mu   sync.Mutex
+		body []byte
+	)
+	client := rawServer(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	sentBody := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return string(body)
+	}
+	sent := epSelfDecodingSecrets{epSelfDecodingShared{"tenant-secret"}, "Bearer token-secret", "session-secret", "id-secret", "search-secret", Dep[depUser]{}, "v"}
+	if _, err := ep.Call(context.Background(), client, sent); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	// The input is written whole, as the binder reads it whole, but a
+	// located field is the path's, a header's or a cookie's to carry, and a
+	// credential in one does not belong in a body that is logged and kept.
+	if got := sentBody(); got != `{"value":"v"}` {
+		t.Fatalf("the body is %s", got)
+	}
+	// One that writes itself is handed nothing to write but its members.
+	if _, err := writes.Call(context.Background(), client, epSelfEncodingSecrets{Token: "Bearer token-secret", Value: "v"}); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if got := sentBody(); strings.Contains(got, "secret") || !strings.Contains(got, `"Value":"v"`) {
+		t.Fatalf("the body is %s", got)
+	}
 }
 
 func TestEndpointRoundTripsTheCatchAllEdges(t *testing.T) {

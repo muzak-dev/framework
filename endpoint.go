@@ -57,12 +57,14 @@ type endpointDef struct {
 	// see [NewEndpoint].
 	err error
 
-	// call is how a value of the input is written as a request, compiled on
-	// the first call rather than at declaration, so a program that only
-	// serves the endpoint never pays for it; see endpoint_encode.go.
-	once    sync.Once
-	call    *callPlan
-	callErr error
+	// compile returns how a value of the input is written as a request,
+	// compiled on the first call rather than at declaration, so a program
+	// that only serves the endpoint never pays for it; see endpoint_encode.go.
+	// It is a sync.OnceValues, so a panic while compiling, such as one from
+	// rules that meet the zero input they are compiled against, is the panic
+	// of every call, rather than of the first and a plan never built for the
+	// rest.
+	compile func() (*callPlan, error)
 }
 
 // NewEndpoint declares an endpoint: the method and path template it answers,
@@ -89,6 +91,9 @@ type endpointDef struct {
 func NewEndpoint[In, Out any](method, path string, opts ...RouteOption) Endpoint[In, Out] {
 	def := &endpointDef{method: strings.ToUpper(method), path: path, opts: slices.Clone(opts)}
 	def.err = checkEndpoint(def.method, path)
+	def.compile = sync.OnceValues(func() (*callPlan, error) {
+		return compileCall(reflect.TypeFor[In](), reflect.TypeFor[Out](), def.method, def.path, def.opts)
+	})
 	return Endpoint[In, Out]{def: def}
 }
 

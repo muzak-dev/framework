@@ -131,17 +131,14 @@ func (ep Endpoint[In, Out]) Call(ctx context.Context, c *Client, in In, opts ...
 	case c.baseURL == nil:
 		return zero, fmt.Errorf("muzak: %s %s was called with a client that has no BaseURL; set ClientOptions.BaseURL to the root the service is served under", def.method, def.path)
 	}
-	def.once.Do(func() {
-		def.call, def.callErr = compileCall(reflect.TypeFor[In](), reflect.TypeFor[Out](), def.method, def.path, def.opts)
-	})
-	if def.callErr != nil {
-		return zero, def.callErr
+	plan, err := def.compile()
+	if err != nil {
+		return zero, err
 	}
 	var cfg callConfig
 	for _, opt := range opts {
 		opt.applyCall(&cfg)
 	}
-	plan := def.call
 	encoded, err := plan.encode(reflect.ValueOf(&in).Elem(), &cfg)
 	if err != nil {
 		return zero, err

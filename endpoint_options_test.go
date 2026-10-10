@@ -191,6 +191,38 @@ func TestValidateFirstReportsMissingFormValuesAndFiles(t *testing.T) {
 	}
 }
 
+// epPanickingIn has rules that panic on the zero input they are compiled
+// against, as rules that read a Dep without allowing for its absence do.
+type epPanickingIn struct {
+	Q    string `query:"q"`
+	User Dep[*depUser]
+}
+
+func (in *epPanickingIn) Validate(*Validation) {
+	if in.User.Get() == nil {
+		panic("the rules met a user that was not there")
+	}
+}
+
+func TestEndpointPanicsAlikeOnEveryCallItCannotCompile(t *testing.T) {
+	t.Parallel()
+	ep := NewEndpoint[epPanickingIn, Empty](http.MethodGet, "/panics")
+	client := rawServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	// The first call meets the rules' panic while compiling the call, and
+	// every later one meets it again, rather than a plan that was never
+	// built.
+	for i := range 3 {
+		func() {
+			defer func() {
+				if got := recover(); got != "the rules met a user that was not there" {
+					t.Errorf("call %d panicked with %v, want the rules' own panic", i+1, got)
+				}
+			}()
+			_, _ = ep.Call(context.Background(), client, epPanickingIn{})
+		}()
+	}
+}
+
 func TestEndpointCompilesOnceUnderConcurrentFirstCalls(t *testing.T) {
 	t.Parallel()
 	type in struct {

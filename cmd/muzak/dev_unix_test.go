@@ -72,10 +72,11 @@ func TestDevStopsOnARealSignal(t *testing.T) {
 			}
 			exited := make(chan error, 1)
 			go func() { exited <- cmd.Wait() }()
+			// Whatever happens to the test, the process is ended and
+			// waited for; the wait below hands its result back for this.
 			t.Cleanup(func() {
 				_ = cmd.Process.Kill()
 				<-exited
-				exited <- nil
 			})
 			started := p.waitFor(t, `^start 1 (\d+) `)
 			if err := cmd.Process.Signal(sig); err != nil {

@@ -104,25 +104,31 @@ func TestRoutesFetchFailures(t *testing.T) {
 	closedURL := closed.URL
 	closed.Close()
 
+	// Only the servers that never finish are given a short time; the others
+	// have the time a loaded machine needs to send sixteen mebibytes.
+	const short = 500 * time.Millisecond
 	cases := []struct {
-		url  string
-		want string
+		url     string
+		timeout time.Duration
+		want    string
 	}{
-		{notFound, `answered with status 404 rather than the document`},
-		{tooLarge, `exceeds the client's limit`},
-		{declaredTooLarge, `exceeds the client's limit`},
-		{notADocument, `muzak: http://127\.0\.0\.1:\d+: the OpenAPI document is malformed`},
-		{hostileMember, `muzak: http://127\.0\.0\.1:\d+: the OpenAPI document is malformed`},
-		{slow, `muzak: http://127\.0\.0\.1:\d+ did not send the document within 500ms`},
-		{stalled, `muzak: http://127\.0\.0\.1:\d+ did not send the document within 500ms`},
-		{closedURL + "/openapi.json", `muzak: GET http://127\.0\.0\.1:\d+ `},
+		{notFound, 0, `answered with status 404 rather than the document`},
+		{tooLarge, 0, `exceeds the client's limit`},
+		{declaredTooLarge, 0, `exceeds the client's limit`},
+		{notADocument, 0, `muzak: http://127\.0\.0\.1:\d+: the OpenAPI document is malformed`},
+		{hostileMember, 0, `muzak: http://127\.0\.0\.1:\d+: the OpenAPI document is malformed`},
+		{slow, short, `muzak: http://127\.0\.0\.1:\d+ did not send the document within 500ms`},
+		{stalled, short, `muzak: http://127\.0\.0\.1:\d+ did not send the document within 500ms`},
+		{closedURL + "/openapi.json", 0, `muzak: GET http://127\.0\.0\.1:\d+ `},
 		// A metadata address is refused before anything is sent, even
 		// though loopback and private addresses are allowed.
-		{"http://169.254.169.254/openapi.json", `169\.254\.169\.254.*(metadata|link-local)`},
+		{"http://169.254.169.254/openapi.json", 0, `169\.254\.169\.254.*(metadata|link-local)`},
 	}
 	for _, c := range cases {
 		console, _, _ := testConsole(t.TempDir())
-		console.fetchTimeout = 500 * time.Millisecond
+		if c.timeout != 0 {
+			console.fetchTimeout = c.timeout
+		}
 		r := runWith(console, "routes", "-url", c.url)
 		r.expect(t, exitFailure, c.want)
 		checkPrintable(t, r.stderr, true)

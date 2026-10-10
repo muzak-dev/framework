@@ -303,7 +303,10 @@ func isLegacyVersion(version string) bool {
 // MCP-Protocol-Version header, which 2025-03-26 did not have, may be left out,
 // since the session says which revision is spoken; one that names another is
 // refused with 400, as the transport requires for a version that is not the
-// one in use.
+// one in use. So may Mcp-Method and Mcp-Name, which these revisions do not
+// have either; but a request that carries them is held to them as a
+// 2026-07-28 one is, since a gateway that admits tools by those headers would
+// otherwise be told of one tool while another is called.
 func (x *mcpExchange) serveSession(rerr *rpcError) error {
 	session, ok := x.s.sessions.lookup(x.sessionID)
 	if !ok || !session.ownedBy(mcpOwner(x.c)) {
@@ -318,6 +321,11 @@ func (x *mcpExchange) serveSession(rerr *rpcError) error {
 		// The client's notifications and its answers to requests this server
 		// never sends need nothing from it.
 		return x.accepted()
+	}
+	if x.c.r.Header.Values("Mcp-Method") != nil {
+		if method, err := singleHeader(x.c.r.Header, "Mcp-Method"); err != nil || method != x.msg.method {
+			return x.headerMismatch("the Mcp-Method header does not name the request's method")
+		}
 	}
 	method, ok := mcpSessionMethods[x.msg.method]
 	switch {
@@ -624,7 +632,9 @@ func (x *mcpExchange) toolsCall() error {
 		return x.rpcFail(x.invalidParamsStatus(), &rpcError{Code: rpcInvalidParams,
 			Message: "Invalid params: tools/call names the tool to call in name"})
 	}
-	if x.stateless {
+	if x.stateless || x.c.r.Header.Values("Mcp-Name") != nil {
+		// Required under 2026-07-28, and held to the body wherever it is sent;
+		// see [mcpExchange.serveSession].
 		if header, err := singleHeader(x.c.r.Header, "Mcp-Name"); err != nil || decodeMCPHeaderValue(header) != name {
 			return x.headerMismatch("the Mcp-Name header is missing or does not name the tool called")
 		}

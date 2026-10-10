@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"muzak.dev/framework"
@@ -77,6 +78,72 @@ func TestMCPStatelessHeadersMustMatchTheBody(t *testing.T) {
 	m.version = ""
 	missing := decodeReply(t, m.post(call, statelessHeaders("tools/call", "get_item")...), http.StatusBadRequest)
 	mustContain(t, fault(t, missing, -32020).Message, "MCP-Protocol-Version header is missing")
+}
+
+// TestMCPSessionHeadersMustMatchTheBody holds a session's request to the
+// Mcp-Method and Mcp-Name headers it carries, which a legacy client need not
+// send: a gateway that allows tools by those headers is not told one tool
+// while another is called, whatever revision the session speaks.
+func TestMCPSessionHeadersMustMatchTheBody(t *testing.T) {
+	app := muzak.New(quietMCPOptions())
+	app.MCP("/mcp", muzak.MCPOptions{})
+	var deleted atomic.Int32
+	app.Get("/items/{id}", func(_ *muzak.Context, in getItemIn) (shopItem, error) { return shopItem{ID: in.ID}, nil },
+		muzak.OperationID("get_item"), muzak.MCPTool())
+	app.Delete("/items/{id}", func(*muzak.Context, getItemIn) (muzak.Empty, error) { deleted.Add(1); return muzak.Empty{}, nil },
+		muzak.OperationID("delete_item"), muzak.MCPTool())
+	m := newMCPClient(t, app)
+	m.initialize("2025-11-25")
+	call := m.message("tools/call", map[string]any{"name": "delete_item", "arguments": map[string]any{"path": map[string]any{"id": "1"}}})
+	for name, headers := range map[string][]testclient.RequestOption{
+		"another Mcp-Method":  {testclient.Header("Mcp-Method", "tools/list")},
+		"another Mcp-Name":    {testclient.Header("Mcp-Method", "tools/call"), testclient.Header("Mcp-Name", "get_item")},
+		"Mcp-Name not base64": {testclient.Header("Mcp-Name", "=?base64?***?=")},
+	} {
+		reply := decodeReply(t, m.post(call, headers...), http.StatusBadRequest)
+		if e := fault(t, reply, -32020); string(reply.ID) == "" {
+			t.Fatalf("%s: the answer to a request with an id carries none: %s", name, e.Message)
+		}
+	}
+	// Sent twice, even alike, which two components could read differently.
+	for _, header := range []string{"Mcp-Method", "Mcp-Name"} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, m.http.URL()+"/mcp", strings.NewReader(call))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", mcpAccept)
+		req.Header.Set(muzak.HeaderMCPSessionID, m.session)
+		value := map[string]string{"Mcp-Method": "tools/call", "Mcp-Name": "delete_item"}[header]
+		req.Header.Add(header, value)
+		req.Header.Add(header, value)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s sent twice: status %d, want 400", header, res.StatusCode)
+		}
+	}
+	if deleted.Load() != 0 {
+		t.Fatalf("a call the headers disagreed with ran %d times", deleted.Load())
+	}
+	// Headers that agree, in either spelling, and none at all, are served.
+	for _, headers := range [][]testclient.RequestOption{
+		nil,
+		statelessHeaders("tools/call", "delete_item"),
+		{testclient.Header("Mcp-Name", "=?base64?ZGVsZXRlX2l0ZW0=?=")},
+	} {
+		got := result[toolResult](t, decodeReply(t, m.post(call, headers...), http.StatusOK))
+		if got.IsError {
+			t.Fatalf("a call whose headers agree failed: %+v", got)
+		}
+	}
+	fault(t, decodeReply(t, m.post(m.message("ping", nil), testclient.Header("Mcp-Method", "tools/call")), http.StatusBadRequest), -32020)
+	if deleted.Load() != 3 {
+		t.Fatalf("the agreeing calls ran %d times, want 3", deleted.Load())
+	}
 }
 
 // TestMCPStatelessUnsupportedVersion answers a revision the server does not

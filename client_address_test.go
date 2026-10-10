@@ -285,6 +285,9 @@ func TestClientAllowPrivateNetworksNeverOpensMetadata(t *testing.T) {
 	for _, target := range []string{
 		"http://169.254.169.254/", "http://[fd00:ec2::254]/", "http://168.63.129.16/",
 		"http://[64:ff9b::a9fe:a9fe]/", "http://[::169.254.169.254]/", "http://169.254.1.1/",
+		// The IPv4-translated form SIIT (RFC 2765) delivers to the address
+		// it carries, as NAT64 does.
+		"http://[::ffff:0:a9fe:a9fe]/",
 	} {
 		_, err := client.Do(mustRequest(t, t.Context(), http.MethodGet, target))
 		var refused *AddressRefusedError

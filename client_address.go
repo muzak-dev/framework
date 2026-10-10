@@ -154,6 +154,7 @@ var (
 	nat64LocalUse  = netip.MustParsePrefix("64:ff9b:1::/48")
 	sixToFour      = netip.MustParsePrefix("2002::/16")
 	ipv4Compatible = netip.MustParsePrefix("::/96")
+	ipv4Translated = netip.MustParsePrefix("::ffff:0:0:0/96")
 )
 
 // classifyAddress names the special-purpose range an address belongs to, and
@@ -184,8 +185,9 @@ func classifyAddress(addr netip.Addr) (reason string, metadata bool) {
 
 // embeddedIPv4 returns the IPv4 address an IPv6 address carries, for the forms
 // that deliver to it at a place the form fixes: NAT64 under its well known
-// prefix, 6to4, and the deprecated IPv4-compatible form. The second result
-// names the form. The local-use NAT64 block has no one place; see
+// prefix, 6to4, the deprecated IPv4-compatible form, and the IPv4-translated
+// form of SIIT (RFC 2765), which a translator delivers as NAT64 does. The
+// second result names the form. The local-use NAT64 block has no one place; see
 // [localUseNAT64].
 //
 // Teredo carries an IPv4 address too, but its block is refused outright: the
@@ -203,6 +205,8 @@ func embeddedIPv4(addr netip.Addr) (netip.Addr, string, bool) {
 		return netip.AddrFrom4([4]byte(b[2:6])), "a 6to4 address", true
 	case ipv4Compatible.Contains(addr) && addr != netip.IPv6Unspecified() && addr != netip.IPv6Loopback():
 		return netip.AddrFrom4([4]byte(b[12:16])), "an IPv4-compatible address", true
+	case ipv4Translated.Contains(addr):
+		return netip.AddrFrom4([4]byte(b[12:16])), "an IPv4-translated address", true
 	}
 	return netip.Addr{}, "", false
 }
@@ -320,12 +324,12 @@ func (p *addressPolicy) check(host string, addr netip.Addr) error {
 // refuses whatever else would allow it, AllowedNetworks allows whatever else
 // would refuse it, a metadata service stays refused when private networks are
 // allowed, and only then do the special-purpose ranges apply. An address that
-// carries an IPv4 address inside it is judged by both, so that a NAT64 or 6to4
-// spelling of a refused address is refused with it. A local-use NAT64 address,
-// whose IPv4 address could sit in any of several places, is denied or refused
-// as a metadata service when any reading of it would be, and allowed through
-// AllowedNetworks only by its own IPv6 address, since a reading an allowed
-// network contains may not be the one the translator uses.
+// carries an IPv4 address inside it is judged by both, so that a NAT64, 6to4
+// or SIIT spelling of a refused address is refused with it. A local-use NAT64
+// address, whose IPv4 address could sit in any of several places, is denied
+// or refused as a metadata service when any reading of it would be, and
+// allowed through AllowedNetworks only by its own IPv6 address, since a
+// reading an allowed network contains may not be the one the translator uses.
 func (p *addressPolicy) refusal(host string, addr netip.Addr) *AddressRefusedError {
 	normal := addr.WithZone("").Unmap()
 	inner, form, embeds := embeddedIPv4(normal)

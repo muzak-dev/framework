@@ -268,9 +268,6 @@ func TestTimezoneRefusesSpellingsTheDatabaseDoesNot(t *testing.T) {
 			t.Errorf("%q was accepted", spelling)
 		}
 	}
-	if !TimezoneDataAvailable() {
-		t.Skip("this host has no time zone database to accept the correct spellings from")
-	}
 	for _, name := range []string{"Europe/Paris", "Asia/Calcutta", "Asia/Kolkata", "Etc/GMT-5", "UTC"} {
 		if !isTimezone(name) {
 			t.Errorf("%q was refused", name)
@@ -279,19 +276,19 @@ func TestTimezoneRefusesSpellingsTheDatabaseDoesNot(t *testing.T) {
 }
 
 // TestZoneNamesAreSpelledAsTheyLoad checks the table itself: every entry is a
-// name the shape check lets through, none is listed twice, and on a host with
-// zone data every one of them loads, which is what catches a typo.
+// name the shape check lets through, none is listed twice, and every one of
+// them loads from the database the test binary carries, which is what catches
+// a typo.
 func TestZoneNamesAreSpelledAsTheyLoad(t *testing.T) {
 	t.Parallel()
 	if len(zoneIndex()) != len(zoneNames) {
 		t.Errorf("the table lists %d names but indexes %d: one is listed twice", len(zoneNames), len(zoneIndex()))
 	}
-	available := TimezoneDataAvailable()
 	for _, name := range zoneNames {
 		if !isZoneShaped(name) {
 			t.Errorf("%q is not shaped like a zone name", name)
 		}
-		if available && !isTimezone(name) {
+		if !isTimezone(name) {
 			t.Errorf("%q does not load", name)
 		}
 	}

@@ -55,8 +55,10 @@ func TestConcurrentChecks(t *testing.T) {
 // refuse to run without a zone database.
 func TestTimezoneDataAvailable(t *testing.T) {
 	t.Parallel()
+	// The test binary embeds time/tzdata, so a database is there whatever
+	// the host has, and the probe must find it.
 	if !TimezoneDataAvailable() {
-		t.Skip("this host has no time zone database, which is the case the probe exists to report")
+		t.Fatal("the probe found no zone database where time/tzdata is compiled in")
 	}
 	// It must resolve a real zone rather than UTC, which the standard library
 	// answers without reading anything and so would report a database that is

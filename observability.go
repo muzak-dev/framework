@@ -38,6 +38,11 @@ type observability struct {
 	// [TraceParentFromTrustedProxies].
 	clientIP *clientIPResolver
 	logger   *slog.Logger
+
+	// inProcessParent names the span a request made inside the application,
+	// a tool call of its MCP endpoint, continues whatever parent says; it is
+	// nil unless that endpoint is served. See mcp_call.go.
+	inProcessParent func(*http.Request) (SpanContext, bool)
 }
 
 // newObservability returns the state for opts, or nil when neither tracing nor
@@ -108,7 +113,10 @@ func (o *observability) middleware(next http.Handler) http.Handler {
 func (o *observability) startServerSpan(r *http.Request, start time.Time) (*http.Request, *activeSpan) {
 	var parent SpanContext
 	continued := false
-	if o.acceptsParent(r) {
+	if o.inProcessParent != nil {
+		parent, continued = o.inProcessParent(r)
+	}
+	if !continued && o.acceptsParent(r) {
 		parent, continued = extractTraceContext(r.Header)
 	}
 	active := &activeSpan{tracer: o.tracer}

@@ -149,6 +149,9 @@ type routeConfig struct {
 	// output is what the route declares about its response; see
 	// responses.go.
 	output outputOptions
+
+	// mcpTool is set by [MCPTool]; see mcp.go.
+	mcpTool bool
 }
 
 // WithPrefix mounts a router under a path prefix.

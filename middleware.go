@@ -162,10 +162,20 @@ type RequestIDOptions struct {
 // "request_id" member of the error envelope, and the access log records it
 // under [RequestIDKey].
 func RequestID(opts RequestIDOptions) Middleware {
+	return requestIDMiddleware(opts, nil)
+}
+
+// requestIDMiddleware is [RequestID] with a way for the application to hand a
+// request the identifier of the request it is part of: a tool call of the MCP
+// endpoint shares the identifier of the MCP request; see mcp_call.go.
+func requestIDMiddleware(opts RequestIDOptions, inherited func(*http.Request) string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := ""
-			if opts.TrustInboundHeader {
+			if inherited != nil {
+				id = inherited(r)
+			}
+			if id == "" && opts.TrustInboundHeader {
 				if inbound := r.Header.Get(HeaderRequestID); inbound != "" {
 					if parsed, err := uuid.Parse(inbound); err == nil {
 						id = parsed.String()

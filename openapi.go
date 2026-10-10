@@ -398,6 +398,15 @@ func (a *App) Document() (*Document, error) {
 // All of the reflection it performs happens here, once, so that nothing on the
 // request path ever inspects a type.
 func (a *App) buildDocument() *Document {
+	doc, _ := a.describeOperations()
+	return doc
+}
+
+// describeOperations is [App.buildDocument], also returning the operation
+// written for each route the document describes. A path item has one slot per
+// method, and routes a header or media type versions share one, so the map is
+// how the MCP endpoint finds every route's own; see mcp_schema.go.
+func (a *App) describeOperations() (*Document, map[*Route]*Operation) {
 	doc := &Document{
 		OpenAPI: OpenAPIVersion,
 		Info: Info{
@@ -479,7 +488,11 @@ func (a *App) buildDocument() *Document {
 	if len(builder.schemas) > 0 || len(schemes) > 0 {
 		doc.Components = &Components{Schemas: builder.schemas, SecuritySchemes: schemes}
 	}
-	return doc
+	byRoute := make(map[*Route]*Operation, len(operations))
+	for _, d := range operations {
+		byRoute[d.route] = d.op
+	}
+	return doc, byRoute
 }
 
 // tagList describes and orders the groups the routes are sorted into.

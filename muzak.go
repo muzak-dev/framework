@@ -418,6 +418,11 @@ type App struct {
 	readiness  readinessState
 	health     *healthEndpoints
 	background *backgroundPool
+
+	// mcp is the Model Context Protocol endpoint [App.MCP] serves, and nil
+	// for an application that serves none, which then pays a comparison for
+	// it; see mcp.go.
+	mcp *mcpServer
 }
 
 // buildState collects everything discovered while walking the router tree, so
@@ -525,9 +530,9 @@ func (o AppOptions) withDefaults() AppOptions {
 // as a response, and the access log wraps the router so it observes the final
 // status.
 func (a *App) installDefaultMiddleware() {
-	a.middleware = append(a.middleware, RequestID(RequestIDOptions{
+	a.middleware = append(a.middleware, requestIDMiddleware(RequestIDOptions{
 		TrustInboundHeader: a.opts.TrustRequestIDHeader,
-	}))
+	}, a.inheritedRequestID))
 	if a.obs != nil {
 		// Above recovery and the access log; see [observability.middleware].
 		a.middleware = append(a.middleware, a.obs.middleware)
@@ -748,6 +753,8 @@ func (a *App) build() {
 	// checked against the mounts as well as the routes.
 	a.buildInterop(state)
 	a.validateOperations(state)
+	// The MCP endpoint's tools; see mcp.go.
+	a.buildMCP(state)
 
 	// Built with the other checks, not while the handler is assembled, so a
 	// policy that cannot be served is reported with them: after that point the
@@ -774,7 +781,10 @@ func (a *App) build() {
 			a.routers, plural(a.routers, "router")))
 
 	if !a.opts.DisableDocs {
-		a.spec = a.buildDocument()
+		if a.spec == nil {
+			// An MCP endpoint described its tools from the document already.
+			a.spec = a.buildDocument()
+		}
 		// Encoded here rather than when the documentation is served, so a
 		// document that cannot be is a build error. It was logged and the
 		// document silently left unserved, which an application only learned
@@ -939,6 +949,13 @@ func (a *App) dispatch(w http.ResponseWriter, r *http.Request) {
 	defer rw.commitVary()
 
 	entry, found := a.tree.Lookup(r.URL.EscapedPath(), &c.params)
+	if a.mcp != nil {
+		// A tool call reaches its own route and nothing else; see mcp_call.go.
+		if sub := subrequestOf(r.Context()); sub != nil {
+			a.dispatchSubrequest(c, sub, entry, found)
+			return
+		}
+	}
 	if !found {
 		// Every route is matched before any frontend is consulted, so a
 		// frontend mounted at the root cannot shadow an API.

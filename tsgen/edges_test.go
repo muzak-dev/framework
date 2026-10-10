@@ -1,6 +1,7 @@
 package tsgen
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
@@ -121,6 +122,51 @@ func TestGenerateSpendsItsBudgetEverywhere(t *testing.T) {
 			t.Errorf("%s: got %v", name, err)
 		}
 	}
+}
+
+// twiceIn binds one query parameter from two fields, which an application
+// builds and documents as two parameters of the same name.
+type twiceIn struct {
+	Text string `query:"q"`
+	Num  *int   `query:"q"`
+}
+
+func TestGenerateWritesAParameterDescribedTwiceOnce(t *testing.T) {
+	t.Parallel()
+	doc := &muzak.Document{Paths: map[string]*muzak.PathItem{"/x/{id}": {Get: &muzak.Operation{OperationID: "x",
+		Parameters: []muzak.Parameter{
+			{Name: "id", In: "path", Required: true, Schema: &muzak.Schema{Type: "string"}},
+			{Name: "q", In: "query", Description: "As text.", Schema: &muzak.Schema{Type: "string"}},
+			{Name: "id", In: "path", Required: true, Schema: &muzak.Schema{Type: "string"}},
+			{Name: "q", In: "query", Required: true, Description: "As a number.", Schema: &muzak.Schema{Type: "integer"}},
+			{Name: "q", In: "header", Schema: &muzak.Schema{Type: "boolean"}},
+		},
+		Responses: map[string]*muzak.Response{"204": {}}}}}}
+	out := must(Generate(doc, Options{Client: true}))
+	text := string(out)
+	// One member per name and location, whose value must be every type it
+	// is described with, as the one value sent is read by each.
+	for want, count := range map[string]int{
+		"    id: string;\n": 1, "    q: string & number;\n": 1, "    q?: boolean;\n": 1, "As text.": 1, "As a number.": 1,
+	} {
+		if got := strings.Count(text, want); got != count {
+			t.Errorf("%q appears %d times, want %d, in:\n%s", want, got, count, text)
+		}
+	}
+	typeCheck(t, out)
+
+	app := muzak.New(muzak.AppOptions{LoggerOptions: muzak.LoggerOptions{Format: muzak.LogFormatNone}})
+	app.Implement(muzak.NewEndpoint[twiceIn, muzak.Empty](http.MethodGet, "/twice"),
+		func(*muzak.Context, twiceIn) (muzak.Empty, error) { return muzak.Empty{}, nil })
+	built, err := app.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = must(Generate(built, Options{Client: true}))
+	if got := strings.Count(string(out), "    q?: "); got != 1 {
+		t.Errorf("the parameter q is written %d times in:\n%s", got, out)
+	}
+	typeCheck(t, out)
 }
 
 func TestCommentSkipsBlankLines(t *testing.T) {

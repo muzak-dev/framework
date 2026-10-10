@@ -447,20 +447,38 @@ func (g *generator) params(parameters []muzak.Parameter) (string, error) {
 			optional = ""
 		}
 		b.WriteString("  " + location + optional + ": {\n")
-		for _, p := range members {
-			if err := g.spend(); err != nil {
-				return "", err
+		for i := 0; i < len(members); {
+			// A name described more than once, as two fields that bind one
+			// parameter describe it, is written as one member, since
+			// TypeScript refuses a member declared twice. The one value sent
+			// is read by each of them, so it is every type it is described
+			// with, and required if any of them requires it.
+			var types, docs union
+			name, mark := members[i].Name, "?"
+			for ; i < len(members) && members[i].Name == name; i++ {
+				p := members[i]
+				if err := g.spend(); err != nil {
+					return "", err
+				}
+				expr, err := g.typeOf(p.Schema, false, 2)
+				if err != nil {
+					return "", err
+				}
+				types.add(expr)
+				docs.add(p.Description)
+				if p.Required || location == "path" {
+					mark = ""
+				}
 			}
-			expr, err := g.typeOf(p.Schema, false, 2)
-			if err != nil {
-				return "", err
+			expr := types.list[0]
+			if len(types.list) > 1 {
+				for j, part := range types.list {
+					types.list[j] = group(part)
+				}
+				expr = strings.Join(types.list, " & ")
 			}
-			writeComment(&b, "    ", p.Description)
-			mark := "?"
-			if p.Required || location == "path" {
-				mark = ""
-			}
-			b.WriteString("    " + propertyKey(p.Name) + mark + ": " + expr + ";\n")
+			writeComment(&b, "    ", docs.list...)
+			b.WriteString("    " + propertyKey(name) + mark + ": " + expr + ";\n")
 		}
 		b.WriteString("  };\n")
 	}

@@ -9,6 +9,50 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+### Fixed
+
+- **`otlp.Exporter.Stop` makes a retry its deadline can still reach.** A
+  `Stop` that began while the exporter waited to retry compared a whole wait,
+  counted from the moment it looked, with its deadline, rather than the moment
+  the wait was due to end. So it gave up on a retry it had time for and
+  dropped the spans, and on Windows, whose clock is coarse, the two compared
+  equal and the `Stop` waited out its deadline instead. Migration: none.
+
+- **A frontend or static mount no longer holds the directory it serves where
+  that pins it.** The directory was opened as an `os.Root` for the life of the
+  application, and opened a second time at build and never closed. On Windows
+  an open directory cannot be removed or renamed, so a deployment replacing
+  the build output failed while the application ran. The build now uses the
+  root the requests use; Unix holds it, where an open directory pins nothing,
+  and Windows reaches each file through a root opened for it and closed once
+  the file is open. Migration: none.
+
+- **`muzak dev` stops what a Windows application started.** Windows has no
+  process groups, so dev killed the application alone and a process it had
+  started went on running. The application now starts suspended, joins a job
+  object of its own and only then runs, so stopping it terminates everything
+  it started. A build that finishes is ended the same way. Migration: none.
+
+- **Trace and span identifiers are drawn from crypto/rand a batch at a time.**
+  Each identifier was a call into the system of its own and, under the race
+  detector on Linux, an allocation. They are now copied out of a buffer
+  refilled from crypto/rand 512 bytes at a time, which allocates nothing and
+  serves thirty-two traces a draw. Migration: none.
+
+### Tests and continuous integration
+
+- **The suite runs whole on Windows and under the race detector, and skips
+  nothing for the system it runs on.** The first run of the Windows job found
+  what the suite had not checked there, and every test that skipped itself for
+  a platform, for root, for a filesystem or for the race detector now runs
+  everywhere and expects what that system does: a deny entry in an access
+  control list stands in for permission bits on Windows, a symbolic link to
+  itself or a file held with no sharing for a file that cannot be opened, a
+  stalled peer for a socket a system buffers whole, and a time zone database
+  is compiled into the tests. Allocation counts are read as the fewest of many
+  calls, which is exact under `-race` as without it, and a test that read a
+  pooled `Context` after its handler returned no longer does.
+
 ## [0.3.0] - 2026-10-10
 
 This release adds what a service needs beside its routes: dependencies that

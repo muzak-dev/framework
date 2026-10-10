@@ -43,7 +43,15 @@ func TestGenerateTranslatesTheRest(t *testing.T) {
 		{"union inside an intersection", &muzak.Schema{AllOf: []*muzak.Schema{{AnyOf: []*muzak.Schema{ref("Other"), {Type: "null"}}}, ref("Other")}}, "(Other | null) & Other"},
 		{"array of a union of literals", &muzak.Schema{Type: "array", Items: &muzak.Schema{Enum: []any{"a", "b"}}}, `Array<"a" | "b">`},
 		{"array of one literal", &muzak.Schema{Type: "array", Items: &muzak.Schema{Enum: []any{`a"b`}}}, `"a\"b"[]`},
-		{"array of a literal ending in a backslash", &muzak.Schema{Type: "array", Items: &muzak.Schema{Enum: []any{`a\`}}}, `Array<"a\\">`},
+		{"array of a literal ending in a backslash", &muzak.Schema{Type: "array", Items: &muzak.Schema{Enum: []any{`a\`}}}, `"a\\"[]`},
+		// Two literals ending in a backslash hold as many escaped quotes as
+		// unescaped ones beyond the first two, which once passed them off as
+		// one literal: "C:\\" | "D:\\"[] is a drive or an array of drives.
+		{"array of a union of literals ending in a backslash", &muzak.Schema{Type: "array", Items: &muzak.Schema{Enum: []any{`C:\`, `D:\`}}},
+			`Array<"C:\\" | "D:\\">`},
+		{"union of literals ending in a backslash inside an intersection",
+			&muzak.Schema{AllOf: []*muzak.Schema{{Enum: []any{`C:\`, `D:\`}}, ref("Other")}}, `("C:\\" | "D:\\") & Other`},
+		{"array of one literal of escapes", &muzak.Schema{Type: "array", Items: &muzak.Schema{Enum: []any{`\"\`}}}, `"\\\"\\"[]`},
 		{"member with no schema", &muzak.Schema{Type: "object", Properties: map[string]*muzak.Schema{"a": nil}, AdditionalProperties: false},
 			"{\n  a?: unknown;\n}"},
 	} {

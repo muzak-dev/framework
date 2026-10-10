@@ -348,8 +348,18 @@ func group(expr string) string {
 // or an array of one, which nothing around it can change the meaning of.
 func isSimple(expr string) bool {
 	if strings.HasPrefix(expr, `"`) {
-		// A string literal from quote, which holds no unescaped quote.
-		return strings.Count(expr, `"`)-strings.Count(expr, `\"`) == 2 && strings.HasSuffix(expr, `"`)
+		// One string literal from quote, when the quote that closes it is the
+		// last byte. It is read as quote writes it, an escape at a time,
+		// since counting quotes and escaped quotes takes the end of "C:\\"
+		// for an escaped quote, and two such literals for one.
+		i := 1
+		for i < len(expr)-1 && expr[i] != '"' {
+			if expr[i] == '\\' {
+				i++
+			}
+			i++
+		}
+		return i == len(expr)-1
 	}
 	expr = strings.TrimSuffix(expr, "[]")
 	return expr != "" && strings.IndexFunc(expr, func(r rune) bool {

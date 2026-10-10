@@ -856,13 +856,35 @@ func TestWebSocketUpgradeRefusedAfterTheResponseStarted(t *testing.T) {
 	}
 }
 
+// smallSocketBuffer is the send and receive buffer a test sets on both ends
+// of a connection it means to fill, far below what it writes.
+const smallSocketBuffer = 64 << 10
+
+// smallSendBuffers accepts connections whose send buffer is
+// smallSocketBuffer, so that what a server writes past it waits on its peer.
+type smallSendBuffers struct{ net.Listener }
+
+func (l smallSendBuffers) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.(*net.TCPConn).SetWriteBuffer(smallSocketBuffer); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
 func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 	t.Parallel()
-	// The response is made far larger than any socket will buffer and the
-	// client is made to look away until the server has closed the connection,
-	// so the handshake genuinely cannot be delivered. What matters is that the
-	// server gives up and closes rather than holding open a connection whose
-	// client will never hear back.
+	// The response is made far larger than the two sockets will buffer, and
+	// the client is made to look away until the server has closed the
+	// connection, so the handshake genuinely cannot be delivered. What matters
+	// is that the server gives up and closes rather than holding open a
+	// connection whose client will never hear back. Both sockets' buffers are
+	// set small, since the size a system chooses for them on its own is its
+	// own: Windows grows a loopback connection's to take four mebibytes whole.
 	const padding = 4 << 20
 	const writeTimeout = 20 * time.Millisecond
 
@@ -875,7 +897,11 @@ func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 	})
 	app.WS("/ws", wsEcho, WithWebSocket(WSOptions{WriteTimeout: writeTimeout}))
 	mustBuild(t, app)
-	server, sockets := startCountedServer(t, app)
+	server := httptest.NewUnstartedServer(app)
+	sockets := &openCountListener{Listener: smallSendBuffers{server.Listener}}
+	server.Listener = sockets
+	server.Start()
+	t.Cleanup(server.Close)
 
 	address := strings.TrimPrefix(server.URL, "http://")
 	conn, err := net.Dial("tcp", address)
@@ -883,6 +909,9 @@ func TestWebSocketHandshakeThatCannotBeSent(t *testing.T) {
 		t.Fatalf("dialling: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.(*net.TCPConn).SetReadBuffer(smallSocketBuffer); err != nil {
+		t.Fatalf("setting the receive buffer: %v", err)
+	}
 	if err := conn.SetDeadline(time.Now().Add(wsTestTimeout)); err != nil {
 		t.Fatalf("setting a deadline: %v", err)
 	}

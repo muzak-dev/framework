@@ -519,7 +519,6 @@ func TestDepOnEventStreamsAndWebSockets(t *testing.T) {
 // dependency from a Dep against the same request reading it with From. The
 // field is filled in place, so it must not allocate.
 func TestDepCostsNoMoreThanFrom(t *testing.T) {
-	skipAllocationCountsUnderRace(t)
 	type viaFrom struct {
 		ID string `query:"id"`
 	}
@@ -541,7 +540,7 @@ func TestDepCostsNoMoreThanFrom(t *testing.T) {
 	measure := func(target string) float64 {
 		req := httptest.NewRequest(http.MethodGet, target, nil)
 		rec := httptest.NewRecorder()
-		return testing.AllocsPerRun(500, func() {
+		return exactAllocs(500, func() {
 			rec.Body.Reset()
 			app.ServeHTTP(rec, req)
 		})

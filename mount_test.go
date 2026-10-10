@@ -963,7 +963,6 @@ func TestMountConcurrentRequests(t *testing.T) {
 // application with no mount and on one with a mount elsewhere: the mount must
 // not add a single allocation to a request it does not answer.
 func TestMountCostsNothingWhereItIsNotUsed(t *testing.T) {
-	skipAllocationCountsUnderRace(t)
 	plain := New(quietOptions())
 	mounted := New(quietOptions())
 	for _, app := range []*App{plain, mounted} {
@@ -975,7 +974,7 @@ func TestMountCostsNothingWhereItIsNotUsed(t *testing.T) {
 
 	measure := func(app *App) float64 {
 		req := httptest.NewRequest("GET", "/ping", nil)
-		return testing.AllocsPerRun(200, func() {
+		return exactAllocs(200, func() {
 			app.dispatch(httptest.NewRecorder(), req)
 		})
 	}

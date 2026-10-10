@@ -178,7 +178,6 @@ func TestSessionOverTheWire(t *testing.T) {
 // asks for its session, with a session cookie on it or not, and the check
 // adds nothing to a request it lets through.
 func TestSessionsCostNothingUntouched(t *testing.T) {
-	skipAllocationCountsUnderRace(t)
 	plain := quietOptions()
 	plain.DisableAccessLog = true
 	configured := plain
@@ -192,7 +191,7 @@ func TestSessionsCostNothingUntouched(t *testing.T) {
 	}
 	without, with := build(plain), build(configured)
 	measure := func(app *App, method string) float64 {
-		return testing.AllocsPerRun(200, func() {
+		return exactAllocs(200, func() {
 			req := httptest.NewRequest(method, "/untouched", nil)
 			req.Header.Set("Cookie", "__Host-session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 			req.Header.Set("Sec-Fetch-Site", "same-origin")

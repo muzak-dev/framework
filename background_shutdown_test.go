@@ -364,7 +364,6 @@ func TestTaskRing(t *testing.T) {
 // registers no task in an application with a large pool configured and one
 // without: the feature must cost a request that does not use it nothing.
 func TestBackgroundCostsNothingUnused(t *testing.T) {
-	skipAllocationCountsUnderRace(t)
 	// Workers are counted across the process; see
 	// TestBackgroundWorkersStartLazilyAndExitWhenIdle.
 	waitNoWorkers(t)
@@ -373,7 +372,7 @@ func TestBackgroundCostsNothingUnused(t *testing.T) {
 		app.Get("/x", okHandler)
 		mustBuild(t, app)
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		return testing.AllocsPerRun(200, func() { app.ServeHTTP(httptest.NewRecorder(), req) })
+		return exactAllocs(200, func() { app.ServeHTTP(httptest.NewRecorder(), req) })
 	}
 	plain := measure(quietOptions())
 	opts := quietOptions()

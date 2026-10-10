@@ -709,14 +709,9 @@ func TestUnsecuredRoutesPayNothing(t *testing.T) {
 	if len(described.routes[0].guards) != 0 {
 		t.Fatal("a descriptive scheme added a guard")
 	}
-	if raceDetector {
-		// sync.Pool drops a share of what it is given under -race, so the
-		// counts below are not exact there.
-		return
-	}
 	allocs := func(app *App) float64 {
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		return testing.AllocsPerRun(200, func() {
+		return exactAllocs(200, func() {
 			app.ServeHTTP(httptest.NewRecorder(), req)
 		})
 	}

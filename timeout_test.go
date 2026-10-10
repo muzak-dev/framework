@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,14 +14,20 @@ import (
 	"time"
 )
 
-// skipAllocationCountsUnderRace skips a test that compares exact allocation
-// counts when it cannot, which is under the race detector. Without it the
-// test runs, and the suite runs without -race as well as with it.
-func skipAllocationCountsUnderRace(t *testing.T) {
-	t.Helper()
-	if raceDetector {
-		t.Skip("sync.Pool drops a share of its items under -race, so allocation counts are only exact without it")
+// exactAllocs reports how many allocations a call of f makes, as
+// testing.AllocsPerRun does, but as the fewest any of runs calls made rather
+// than their mean. Without the race detector every call makes the same
+// number, so the two agree. Under it, sync.Pool drops a share of what it is
+// given, on purpose, and a call the pool then fails allocates again what it
+// would have been handed: the fewest is the count of a call the pool served in
+// full, which is the count without the detector. So a test of exact counts
+// holds under -race as it does without it.
+func exactAllocs(runs int, f func()) float64 {
+	fewest := math.Inf(1)
+	for range runs {
+		fewest = min(fewest, testing.AllocsPerRun(1, f))
 	}
+	return fewest
 }
 
 // waitOut is a handler that waits for its context to end and returns what
@@ -370,11 +377,10 @@ func TestTimeoutIsDocumented(t *testing.T) {
 // application where no route has one against a route whose inherited deadline
 // was removed: neither may pay for the option existing.
 func TestTimeoutCostsNothingWhenUnset(t *testing.T) {
-	skipAllocationCountsUnderRace(t)
 	measure := func(app *App, path string) float64 {
 		mustBuild(t, app)
 		req := httptest.NewRequest(http.MethodGet, path, nil)
-		return testing.AllocsPerRun(200, func() { app.ServeHTTP(httptest.NewRecorder(), req) })
+		return exactAllocs(200, func() { app.ServeHTTP(httptest.NewRecorder(), req) })
 	}
 	plain := New(quietOptions())
 	plain.Get("/x", okHandler)

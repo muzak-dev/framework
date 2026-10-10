@@ -325,9 +325,8 @@ func TestEndpointCarriesTenThousandEntries(t *testing.T) {
 }
 
 func TestImplementCostsWhatHandleCosts(t *testing.T) {
-	// The comparison is of exact allocation counts, which sync.Pool makes
-	// unsteady under the race detector.
-	skipAllocationCountsUnderRace(t)
+	// The comparison is of exact allocation counts, which exactAllocs reads
+	// steadily under the race detector too.
 	type in struct {
 		ID string `path:"id"`
 		Q  int    `query:"q"`
@@ -341,7 +340,7 @@ func TestImplementCostsWhatHandleCosts(t *testing.T) {
 	mustBuild(t, implemented)
 	mustBuild(t, handled)
 	measure := func(app *App) float64 {
-		return testing.AllocsPerRun(200, func() {
+		return exactAllocs(200, func() {
 			app.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/a/x?q=1", nil))
 		})
 	}

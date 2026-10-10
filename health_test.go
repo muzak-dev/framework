@@ -869,13 +869,12 @@ func TestHealthPathsThatDoNotCollide(t *testing.T) {
 // ordinary request with health disabled and enabled: the endpoints must cost
 // the rest of the application nothing.
 func TestHealthCostsNothingWhenOffOrForOtherPaths(t *testing.T) {
-	skipAllocationCountsUnderRace(t)
 	measure := func(opts AppOptions) float64 {
 		app := New(opts)
 		app.Get("/x", okHandler)
 		mustBuild(t, app)
 		req := httptest.NewRequest(http.MethodGet, "/x", nil)
-		return testing.AllocsPerRun(200, func() {
+		return exactAllocs(200, func() {
 			app.ServeHTTP(httptest.NewRecorder(), req)
 		})
 	}
@@ -887,7 +886,7 @@ func TestHealthCostsNothingWhenOffOrForOtherPaths(t *testing.T) {
 
 	app := readyApp(t, HealthOptions{})
 	req := httptest.NewRequest(http.MethodGet, DefaultReadinessPath, nil)
-	probe := testing.AllocsPerRun(200, func() { app.ServeHTTP(httptest.NewRecorder(), req) })
+	probe := exactAllocs(200, func() { app.ServeHTTP(httptest.NewRecorder(), req) })
 	if probe > off {
 		t.Errorf("a readiness probe allocates %v times, more than an ordinary request's %v", probe, off)
 	}

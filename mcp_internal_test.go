@@ -430,7 +430,6 @@ func TestMCPDescribeErrorsAreBuildErrors(t *testing.T) {
 // application with an MCP endpoint than in one without, for a route that is
 // not a tool call: the hooks the endpoint adds are comparisons.
 func TestMCPCostsNothingWhenOff(t *testing.T) {
-	skipAllocationCountsUnderRace(t)
 	build := func(withMCP bool) *App {
 		options := quietOptions()
 		options.DisableAccessLog = true
@@ -447,7 +446,7 @@ func TestMCPCostsNothingWhenOff(t *testing.T) {
 	}
 	measure := func(app *App) float64 {
 		req := httptest.NewRequest(http.MethodGet, "/items/42", nil)
-		return testing.AllocsPerRun(200, func() {
+		return exactAllocs(200, func() {
 			app.ServeHTTP(httptest.NewRecorder(), req)
 		})
 	}

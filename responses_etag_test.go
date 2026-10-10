@@ -432,11 +432,10 @@ func TestAutoETagNotModifiedKeepsTheFrameworksVary(t *testing.T) {
 
 // A route that does not tag pays nothing for the feature: the request is not
 // read for If-None-Match and no allocation is added. It is not parallel,
-// because AllocsPerRun counts every allocation in the process, and it is
-// skipped under -race, where a pooled response buffer is sometimes rebuilt and
-// the two counts it compares differed by one at random.
+// because AllocsPerRun counts every allocation in the process, and it counts
+// through exactAllocs, since under -race a pooled response buffer is sometimes
+// rebuilt and the mean of the counts it compares differed by one at random.
 func TestAutoETagOffCostsNothing(t *testing.T) {
-	skipAllocationCountsUnderRace(t)
 	app := New(AppOptions{LoggerOptions: LoggerOptions{Format: LogFormatNone}, DisableAccessLog: true, DisableDocs: true})
 	app.Get("/plain", func(ctx *Context, _ Empty) (benchOut, error) { return benchOut{ID: "x"}, nil })
 	app.Get("/tagged", func(ctx *Context, _ Empty) (benchOut, error) { return benchOut{ID: "x"}, nil }, AutoETag())
@@ -452,14 +451,14 @@ func TestAutoETagOffCostsNothing(t *testing.T) {
 	if w.header.Get("ETag") != "" {
 		t.Fatal("the untagged route was tagged")
 	}
-	base := testing.AllocsPerRun(200, func() { serve(app, plain, w) })
-	withHeader := testing.AllocsPerRun(200, func() { serve(app, conditional, w) })
+	base := exactAllocs(200, func() { serve(app, plain, w) })
+	withHeader := exactAllocs(200, func() { serve(app, conditional, w) })
 	if withHeader != base {
 		t.Errorf("an If-None-Match on an untagged route cost %.0f allocations against %.0f without, want the header ignored", withHeader, base)
 	}
 	// The tagged route pays for its tag and nothing else: the digest it
 	// renders and the header it sets.
-	if tagCost := testing.AllocsPerRun(200, func() { serve(app, tagged, w) }) - base; tagCost < 1 || tagCost > 3 {
+	if tagCost := exactAllocs(200, func() { serve(app, tagged, w) }) - base; tagCost < 1 || tagCost > 3 {
 		t.Errorf("a tag cost %.0f allocations, want between 1 and 3", tagCost)
 	}
 }

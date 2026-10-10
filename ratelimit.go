@@ -845,9 +845,12 @@ const rateLimitStorageRetryAfter = "5"
 
 // storageFailed decides what to do about a storage that could not count, and
 // records why without recording the key, which carries client-supplied data.
+// A count the client cancelled by hanging up is no failure of the storage;
+// see [failureLevel].
 func (cfg *rateLimitConfig) storageFailed(c *Context, quota Quota, err error) error {
 	if cfg.failOpen {
-		c.logger.WarnContext(c.Context(), "muzak: the rate limit storage failed; serving the request unmetered",
+		c.logger.Log(c.Context(), failureLevel(c.Context(), err, slog.LevelWarn),
+			"muzak: the rate limit storage failed; serving the request unmetered",
 			slog.String("quota", quota.Name),
 			slog.String(RequestIDKey, c.RequestID()),
 			slog.String("error", err.Error()))
@@ -932,16 +935,20 @@ func (l *wsMessageLimiter) allow(ctx context.Context) (WSStatus, string) {
 
 // storageFailed decides what to do about a storage that could not count a
 // message. The key is never logged, because it carries whatever the tracker
-// read from the client.
+// read from the client. A count the read's own context cancelled, as it is
+// cancelled when the peer goes away, is no failure of the storage; see
+// [failureLevel].
 func (l *wsMessageLimiter) storageFailed(ctx context.Context, quota Quota, err error) (WSStatus, string) {
 	if l.cfg.failOpen {
-		l.logger.WarnContext(ctx, "muzak: the rate limit storage failed; the websocket message was not counted",
+		l.logger.Log(ctx, failureLevel(ctx, err, slog.LevelWarn),
+			"muzak: the rate limit storage failed; the websocket message was not counted",
 			slog.String("quota", quota.Name),
 			slog.String(RequestIDKey, l.requestID),
 			slog.String("error", err.Error()))
 		return 0, ""
 	}
-	l.logger.ErrorContext(ctx, "muzak: the rate limit storage failed; closing the websocket connection",
+	l.logger.Log(ctx, failureLevel(ctx, err, slog.LevelError),
+		"muzak: the rate limit storage failed; closing the websocket connection",
 		slog.String("quota", quota.Name),
 		slog.String(RequestIDKey, l.requestID),
 		slog.String("error", err.Error()))

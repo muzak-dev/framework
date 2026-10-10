@@ -255,17 +255,28 @@ func TestAPIKeyVerifierComparesInConstantTime(t *testing.T) {
 	}
 	scheme := APIKeyVerifier(APIKeyOptions{Name: "X-API-Key", Keys: keys})
 	s := newAPIKeyScheme("key", scheme.verifier.apiKey)
-	measure := func(key string) time.Duration {
+	sample := func(key string, reps int) time.Duration {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("X-API-Key", key)
 		c := &Context{r: req}
-		samples := make([]time.Duration, 41)
+		start := time.Now()
+		for range reps {
+			s.verify(c)
+		}
+		return time.Since(start)
+	}
+	// Each sample repeats the check until it lasts tens of milliseconds by
+	// the clock, which one that ticks only every 15.6 milliseconds, as
+	// Windows' may, still resolves well inside the bound below. A sample of
+	// a few microseconds read as nothing at all there.
+	reps := 20
+	for sample("key-none-of-these-0", reps) < 25*time.Millisecond {
+		reps *= 2
+	}
+	measure := func(key string) time.Duration {
+		samples := make([]time.Duration, 9)
 		for i := range samples {
-			start := time.Now()
-			for range 20 {
-				s.verify(c)
-			}
-			samples[i] = time.Since(start)
+			samples[i] = sample(key, reps)
 		}
 		sort.Slice(samples, func(a, b int) bool { return samples[a] < samples[b] })
 		return samples[len(samples)/2]

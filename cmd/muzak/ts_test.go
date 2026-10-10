@@ -78,8 +78,14 @@ func TestTSWritesAFileWhole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
-		t.Errorf("a new file has permissions %v, want 0644", info.Mode().Perm())
+	// A new file is created 0644 less what the umask takes away, as a file
+	// the test creates the same way is.
+	reference := filepath.Join(t.TempDir(), "reference")
+	if err := os.WriteFile(reference, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := os.Stat(reference); runtime.GOOS != "windows" && info.Mode().Perm() != want.Mode().Perm() {
+		t.Errorf("a new file has permissions %v, want %v", info.Mode().Perm(), want.Mode().Perm())
 	}
 
 	// Writing again replaces the file, and keeps the permissions it was

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -148,13 +149,14 @@ func writeOutput(c *console, name string, data []byte) error {
 // renaming it into place, so that a reader, a build watching the file or an
 // interrupted run never sees half of it. A symbolic link at the path is
 // replaced rather than written through. A file that is there already keeps
-// its permissions, and a new one is readable by all, as a source file is.
+// its permissions, and a new one is created as a source file is, readable by
+// all less whatever the umask takes away.
 func writeFileAtomic(name string, data []byte) error {
-	mode := os.FileMode(0o644)
+	mode, existing := os.FileMode(0o644), false
 	if info, err := os.Stat(name); err == nil && info.Mode().IsRegular() {
-		mode = info.Mode().Perm()
+		mode, existing = info.Mode().Perm(), true
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(name), "."+filepath.Base(name)+".*.tmp")
+	tmp, err := createBeside(name, mode)
 	if err != nil {
 		return err
 	}
@@ -162,7 +164,9 @@ func writeFileAtomic(name string, data []byte) error {
 	if err == nil {
 		err = tmp.Sync()
 	}
-	if err == nil {
+	if err == nil && existing {
+		// The umask applied to the temporary file too; the file it
+		// replaces had these permissions whatever the umask is now.
 		err = tmp.Chmod(mode)
 	}
 	if closeErr := tmp.Close(); err == nil {
@@ -175,4 +179,15 @@ func writeFileAtomic(name string, data []byte) error {
 		_ = os.Remove(tmp.Name())
 	}
 	return err
+}
+
+// createBeside creates the temporary file writeFileAtomic renames into place,
+// in the directory of name and under a name of 128 random bits, exclusively,
+// so that neither a file nor a symbolic link already there is opened. It is
+// created with perm, which the umask applies to as it does to every file a
+// program creates; os.CreateTemp would make it 0600, and widening that to
+// perm would ignore the umask.
+func createBeside(name string, perm os.FileMode) (*os.File, error) {
+	tmp := filepath.Join(filepath.Dir(name), "."+filepath.Base(name)+"."+rand.Text()+".tmp")
+	return os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 }

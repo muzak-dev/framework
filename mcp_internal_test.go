@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -564,5 +565,45 @@ func TestMCPInheritedRequestID(t *testing.T) {
 	}
 	if _, ok := app.subrequestParent(plain); ok {
 		t.Fatal("a client's request has an in-process parent")
+	}
+}
+
+// limitedBodyIn is an input with a JSON body for TestCallBodyLimit.
+type limitedBodyIn struct {
+	ID   string   `path:"id"`
+	Name string   `json:"name"`
+	Rows []string `json:"rows"`
+}
+
+// TestCallBodyLimit writes a form and a JSON body under every limit short of
+// their length, each of which fails with errCallBodyTooLarge at whichever
+// write crosses it, a form field, a file or the closing boundary, and under
+// their length and no limit at all, which write the same body.
+func TestCallBodyLimit(t *testing.T) {
+	three := 3
+	form := epFormIn{ID: "f1", Name: "name", Count: &three, Tags: []string{"a", ""}, Avatar: []byte("avatar"), Extra: [][]byte{[]byte("x"), {}}}
+	body := limitedBodyIn{ID: "b1", Name: "name", Rows: []string{"a", "", "c"}}
+	for _, c := range []struct {
+		in    any
+		route string
+	}{{&form, "/forms/{id}"}, {&body, "/bodies/{id}"}} {
+		value := reflect.ValueOf(c.in).Elem()
+		plan, err := compileCall(value.Type(), reflect.TypeFor[Empty](), http.MethodPost, c.route, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		whole, err := plan.encode(value, &callConfig{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		exact, err := plan.encode(value, &callConfig{maxBody: int64(len(whole.body))})
+		if err != nil || len(exact.body) != len(whole.body) {
+			t.Fatalf("%s at its own length: %d bytes, %v", c.route, len(exact.body), err)
+		}
+		for limit := 1; limit < len(whole.body); limit++ {
+			if _, err := plan.encode(value, &callConfig{maxBody: int64(limit)}); !errors.Is(err, errCallBodyTooLarge) {
+				t.Fatalf("%s under %d of its %d bytes: %v", c.route, limit, len(whole.body), err)
+			}
+		}
 	}
 }

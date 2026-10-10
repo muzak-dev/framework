@@ -43,6 +43,8 @@ type mcpTool struct {
 	// bindsUserAgent and bindsLanguage record that the input reads one of the
 	// headers a call otherwise copies from the MCP request.
 	bindsUserAgent, bindsLanguage bool
+	// maxBody bounds the body a call writes; see [mcpServer.compileTool].
+	maxBody int64
 	// listing is the tool's definition as each era's tools/list carries it,
 	// and structured records whether that definition has an output schema, in
 	// which case every successful result must carry structured content.
@@ -99,6 +101,18 @@ func (s *mcpServer) compileTool(rt *Route) (*mcpTool, []error) {
 		t.accept = "application/json"
 	}
 	t.bindsUserAgent, t.bindsLanguage = p.headers[userAgent], p.headers["Accept-Language"]
+	// A call's body is written under the limit the route reads one under, so
+	// that a few bytes of arguments, a list of empty strings or empty objects,
+	// are not written as a body hundreds of times their size only for the
+	// route to refuse it; see [boundedBuffer]. A route that removed its limit
+	// is held to the endpoint's, which its arguments came in under.
+	t.maxBody = rt.maxBodySize
+	if len(rt.plan.files) > 0 {
+		t.maxBody = rt.maxUploadSize
+	}
+	if t.maxBody <= 0 {
+		t.maxBody = mcpMessageLimit(s.post)
+	}
 	for i, err := range errs {
 		errs[i] = fmt.Errorf("%w; it is chosen as an MCP tool, and a tool call writes the input as a request as Endpoint.Call does, "+
 			"so change the input or leave the route out of the MCP endpoint's tools", err)
@@ -225,11 +239,21 @@ func (s *mcpServer) newResult(era mcpEra) *mcpCallResult {
 // come back as a result with isError set, carrying the error envelope the
 // application renders, which is written for clients.
 func (s *mcpServer) call(c *Context, t *mcpTool, args jsontext.Value, era mcpEra) *mcpCallResult {
+	tooLarge := func() *mcpCallResult {
+		return s.errorResult(c, era, NewHTTPErrorf(http.StatusRequestEntityTooLarge,
+			"the arguments make a request body larger than the %d bytes this operation accepts", t.maxBody))
+	}
 	in, err := t.decode(args)
+	if errors.Is(err, errCallBodyTooLarge) {
+		return tooLarge()
+	}
 	if err != nil {
 		return s.errorResult(c, era, err)
 	}
-	encoded, err := t.plan.encode(in, &callConfig{})
+	encoded, err := t.plan.encode(in, &callConfig{maxBody: t.maxBody})
+	if errors.Is(err, errCallBodyTooLarge) {
+		return tooLarge()
+	}
 	if err != nil {
 		return s.errorResult(c, era, mcpRefusal(t, err))
 	}
@@ -332,6 +356,11 @@ func (t *mcpTool) decode(args jsontext.Value) (reflect.Value, error) {
 
 // decodeBody decodes the body argument as the binder decodes a body; see
 // [bindPlan.bindBody]. A body left out, or null, is missing.
+//
+// A body argument larger than the route reads a body is refused with
+// errCallBodyTooLarge before it is decoded, as the route refuses such a body
+// before decoding it: decoding is where an empty object becomes a struct, and
+// a list of them the size of the message the arguments came in.
 func (t *mcpTool) decodeBody(raw jsontext.Value, v reflect.Value, verr *ValidationError) error {
 	body := t.plan.bind.body
 	if body == nil {
@@ -342,6 +371,9 @@ func (t *mcpTool) decodeBody(raw jsontext.Value, v reflect.Value, verr *Validati
 			verr.add("body", "", "is required")
 		}
 		return nil
+	}
+	if int64(len(raw)) > t.maxBody {
+		return errCallBodyTooLarge
 	}
 	target := v
 	if !body.direct {

@@ -190,10 +190,7 @@ func singleHeader(h http.Header, name string) (string, error) {
 // application that removed the limit still has one here, since every message
 // is held in memory whole: [DefaultMaxBodySize].
 func readMCPMessage(c *Context) ([]byte, error) {
-	limit := c.route.maxBodySize
-	if limit <= 0 {
-		limit = DefaultMaxBodySize
-	}
+	limit := mcpMessageLimit(c.route)
 	tooLarge := func() *HTTPError {
 		return NewHTTPErrorf(http.StatusRequestEntityTooLarge, "the MCP message exceeds the %d byte limit of this endpoint", limit)
 	}
@@ -209,6 +206,14 @@ func readMCPMessage(c *Context) ([]byte, error) {
 		return nil, NewHTTPError(http.StatusBadRequest, "the MCP message could not be read").Wrap(err)
 	}
 	return data, nil
+}
+
+// mcpMessageLimit is the largest message the endpoint served by rt reads.
+func mcpMessageLimit(rt *Route) int64 {
+	if rt.maxBodySize > 0 {
+		return rt.maxBodySize
+	}
+	return DefaultMaxBodySize
 }
 
 // mcpExchange is one message being answered.

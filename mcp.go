@@ -327,8 +327,11 @@ type mcpServer struct {
 // A token therefore reaches the routes of this application unchanged, and no
 // other service. A credential is never the model's to choose: a route whose
 // input binds the header, query parameter or cookie an API key scheme or the
-// session reads one from is a build error once it is chosen. The answer is
-// bounded by MaxResultSize.
+// session reads one from is a build error once it is chosen. The request's
+// body is written under the route's own limit, [MaxBodySize] or
+// [MaxUploadSize], and under the endpoint's for a route that has none, so that
+// arguments written out as more than the route reads are refused with 413
+// before they are. The answer is bounded by MaxResultSize.
 //
 // routeOpts configure the endpoint as they would any route: [WithSecurity]
 // makes an unauthenticated client get the 401 whose challenge names the

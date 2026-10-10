@@ -439,6 +439,35 @@ func textMarshalerFor(t reflect.Type) (textEncoder, error) {
 type callConfig struct {
 	headers  [][2]string
 	validate bool
+	// maxBody, when positive, bounds the body written, in bytes; see
+	// [boundedBuffer].
+	maxBody int64
+}
+
+// errCallBodyTooLarge is what writing a body past [callConfig.maxBody] fails
+// with.
+var errCallBodyTooLarge = errors.New("muzak: the request body is larger than the limit it is written under")
+
+// boundedBuffer holds a body as it is written, and refuses a write that would
+// take it past limit, when limit is positive.
+//
+// A body is written from a value, and a value decoded from a few bytes can be
+// written as many: an empty string in a list is a form part of its own, with a
+// boundary and headers, and an empty object in a list is a struct with every
+// member written out. A tool call writes a value a client sent, so its body is
+// written under the limit its route reads one under, and writing stops at the
+// limit rather than producing a body the route would refuse after it was made.
+// Only Write is offered, so that nothing writes around the limit.
+type boundedBuffer struct {
+	buf   bytes.Buffer
+	limit int64
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.limit > 0 && int64(b.buf.Len())+int64(len(p)) > b.limit {
+		return 0, errCallBodyTooLarge
+	}
+	return b.buf.Write(p)
 }
 
 // encodedRequest is a value of the input written out, ready to become a
@@ -527,9 +556,9 @@ func (p *callPlan) encode(v reflect.Value, cfg *callConfig) (*encodedRequest, er
 	}
 	switch {
 	case p.bind.multipart:
-		out.body, out.contentType, err = p.encodeForm(v)
+		out.body, out.contentType, err = p.encodeForm(v, cfg.maxBody)
 	case p.bind.body != nil:
-		out.body, err = p.encodeBody(v)
+		out.body, err = p.encodeBody(v, cfg.maxBody)
 		out.contentType = "application/json"
 	}
 	if err != nil {
@@ -734,7 +763,10 @@ func (p *callPlan) addHeaders(h http.Header, extra [][2]string) error {
 // is written from the same struct as any other input, which its own fields
 // encode as once those are left out. One that encodes itself is handed a copy
 // with its located fields and Deps zeroed.
-func (p *callPlan) encodeBody(v reflect.Value) ([]byte, error) {
+//
+// The body is written under limit, when it is positive, and refused with
+// errCallBodyTooLarge as soon as it outgrows it; see [boundedBuffer].
+func (p *callPlan) encodeBody(v reflect.Value, limit int64) ([]byte, error) {
 	source := v
 	switch {
 	case p.bodyShape != v.Type():
@@ -752,10 +784,16 @@ func (p *callPlan) encodeBody(v reflect.Value) ([]byte, error) {
 			fieldAt(source, dep.index).SetZero()
 		}
 	}
-	data, err := json.Marshal(source.Addr().Interface(), durationJSON, json.Deterministic(true))
-	if err != nil {
+	// Written as it is encoded, which the encoder does a few kilobytes at a
+	// time, so that a body past the limit stops there.
+	out := &boundedBuffer{limit: limit}
+	if err := json.MarshalWrite(out, source.Addr().Interface(), durationJSON, json.Deterministic(true)); err != nil {
+		if errors.Is(err, errCallBodyTooLarge) {
+			return nil, errCallBodyTooLarge
+		}
 		return nil, refuse(p.method, p.path, "the body could not be encoded as JSON: %v", err)
 	}
+	data := out.buf.Bytes()
 	if len(p.omitted) > 0 {
 		if err := p.checkOmitted(v, data); err != nil {
 			return nil, err
@@ -808,9 +846,13 @@ func (p *callPlan) checkOmitted(v reflect.Value, body []byte) error {
 // can be called with. A value is a part of its own and arrives byte for byte.
 // A []byte file is sent as a part named after its field, with the field's
 // name as its file name, and a nil one is not sent at all.
-func (p *callPlan) encodeForm(v reflect.Value) ([]byte, string, error) {
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
+//
+// The body is written under limit, when it is positive, and the first write
+// past it ends the encoding with errCallBodyTooLarge, which is the only way
+// writing to a [boundedBuffer] fails; see there.
+func (p *callPlan) encodeForm(v reflect.Value, limit int64) ([]byte, string, error) {
+	buf := &boundedBuffer{limit: limit}
+	w := multipart.NewWriter(buf)
 	for i := range p.form {
 		c := &p.form[i]
 		texts, err := c.encode(fieldAt(v, c.index))
@@ -818,7 +860,6 @@ func (p *callPlan) encodeForm(v reflect.Value) ([]byte, string, error) {
 			return nil, "", p.refuseParam(c, err)
 		}
 		for _, text := range texts {
-			// coverage: writing to a bytes.Buffer cannot fail.
 			if err := w.WriteField(c.name, text); err != nil {
 				return nil, "", err
 			}
@@ -839,17 +880,15 @@ func (p *callPlan) encodeForm(v reflect.Value) ([]byte, string, error) {
 			if err == nil {
 				_, err = part.Write(content)
 			}
-			// coverage: writing to a bytes.Buffer cannot fail.
 			if err != nil {
 				return nil, "", err
 			}
 		}
 	}
-	// coverage: closing a writer over a bytes.Buffer cannot fail.
 	if err := w.Close(); err != nil {
 		return nil, "", err
 	}
-	return buf.Bytes(), w.FormDataContentType(), nil
+	return buf.buf.Bytes(), w.FormDataContentType(), nil
 }
 
 // validateFirst runs, before anything is sent, the checks the server runs

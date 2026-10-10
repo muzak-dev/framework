@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -582,6 +583,107 @@ func TestMCPCallResultIsBounded(t *testing.T) {
 	}
 	if !body.closed.Load() || body.read.Load() > 1<<20 {
 		t.Fatalf("the stream read %d bytes and closed %t", body.read.Load(), body.closed.Load())
+	}
+}
+
+// listFormIn reads a list of form values.
+type listFormIn struct {
+	Tags []string `form:"tags"`
+}
+
+// listFilesIn reads a list of files.
+type listFilesIn struct {
+	Docs [][]byte `file:"docs"`
+}
+
+// wideRow is a struct an empty object stands for in full.
+type wideRow struct {
+	A, B, C, D, E, F, G, H, I, J string
+	K, L, M, N, O, P, Q, R, S, T int
+}
+
+// wideRowsIn reads a JSON body of rows.
+type wideRowsIn struct {
+	Rows []wideRow `json:"rows"`
+}
+
+// TestMCPCallRequestIsBounded refuses a call whose arguments would be written
+// as a body larger than its route reads, before the body is written out: a
+// list of empty strings is a form part each, and a list of empty objects a
+// struct each with every member, hundreds of times the bytes the arguments
+// took. The route's limit holds, MaxUploadSize for files, and a route that
+// removed its limit is held to the endpoint's, which the arguments came in
+// under. The route never runs, and what the refusal costs is bounded too.
+//
+// It is not parallel: it measures what the whole process allocates.
+func TestMCPCallRequestIsBounded(t *testing.T) {
+	const routeLimit, endpointLimit = 64 << 10, 512 << 10
+	var ran atomic.Int32
+	options := quietMCPOptions()
+	options.MaxBodySize = -1
+	app := muzak.New(options)
+	app.MCP("/mcp", muzak.MCPOptions{}, muzak.MaxBodySize(endpointLimit))
+	app.Post("/form", func(*muzak.Context, listFormIn) (shopItem, error) { ran.Add(1); return shopItem{}, nil },
+		muzak.MaxBodySize(routeLimit), muzak.MCPTool())
+	app.Post("/unlimited", func(*muzak.Context, listFormIn) (shopItem, error) { ran.Add(1); return shopItem{}, nil },
+		muzak.MCPTool())
+	app.Post("/upload", func(*muzak.Context, listFilesIn) (shopItem, error) { ran.Add(1); return shopItem{}, nil },
+		muzak.MaxUploadSize(routeLimit), muzak.MCPTool())
+	app.Post("/rows", func(*muzak.Context, wideRowsIn) (shopItem, error) { ran.Add(1); return shopItem{}, nil },
+		muzak.MaxBodySize(routeLimit), muzak.MCPTool())
+	m := newMCPClient(t, app)
+	m.initialize("2025-06-18")
+
+	const entries = 80_000
+	list := func(entry any, n int) []any {
+		out := make([]any, n)
+		for i := range out {
+			out[i] = entry
+		}
+		return out
+	}
+	calls := []struct {
+		tool  string
+		args  map[string]any
+		limit int
+	}{
+		{"post_form", map[string]any{"form": map[string]any{"tags": list("", entries)}}, routeLimit},
+		{"post_unlimited", map[string]any{"form": map[string]any{"tags": list("", entries)}}, endpointLimit},
+		{"post_upload", map[string]any{"form": map[string]any{"docs": list("", entries)}}, routeLimit},
+		{"post_rows", map[string]any{"body": map[string]any{"rows": list(map[string]any{}, entries)}}, routeLimit},
+		// Under the limit as arguments, and over it written out.
+		{"post_rows", map[string]any{"body": map[string]any{"rows": list(map[string]any{}, 2000)}}, routeLimit},
+	}
+	messages := make([]string, len(calls))
+	for i, call := range calls {
+		messages[i] = m.message("tools/call", map[string]any{"name": call.tool, "arguments": call.args})
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	replies := make([]*testclient.Response, len(calls))
+	for i := range calls {
+		replies[i] = m.post(messages[i])
+	}
+	runtime.ReadMemStats(&after)
+	for i, call := range calls {
+		got := result[toolResult](t, decodeReply(t, replies[i], http.StatusOK))
+		envelope := errorEnvelope(t, got)
+		if envelope.Error.Status != http.StatusRequestEntityTooLarge {
+			t.Fatalf("%s: %+v", call.tool, envelope)
+		}
+		mustContain(t, envelope.Error.Message, fmt.Sprintf("the arguments make a request body larger than the %d bytes this operation accepts", call.limit))
+	}
+	if ran.Load() != 0 {
+		t.Fatalf("a route ran %d times for a body it would not read", ran.Load())
+	}
+	// Decoded and written out whole, the calls allocate some 440 MiB,
+	// the form parts a header map each and the rows a struct each; held to
+	// their limits they allocate some 55 MiB, most of it reading the
+	// messages' lists.
+	const tolerated = 160 << 20
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > tolerated {
+		t.Errorf("the calls allocated %d MiB, want less than %d", allocated>>20, tolerated>>20)
 	}
 }
 

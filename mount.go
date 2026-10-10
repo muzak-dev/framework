@@ -28,10 +28,10 @@ const mountKind = "mount"
 // relative to the mount, the way [net/http.StripPrefix] does, so a handler
 // written to be served at the root can be served beneath a prefix unchanged:
 //
-//	app.Mount("/debug/pprof", pprofMux, muzak.StripPrefix())
+//	app.Mount("/legacy", legacyApp, muzak.StripPrefix())
 //
-// A request for "/debug/pprof/heap" then reaches the handler with the path
-// "/heap", and one for the prefix itself, with or without its trailing slash,
+// A request for "/legacy/users/7" then reaches the handler with the path
+// "/users/7", and one for the prefix itself, with or without its trailing slash,
 // with "/" rather than the empty path [net/http.StripPrefix] leaves, which a
 // [net/http.ServeMux] would answer with a redirect to the root of the site.
 // The prefix is removed from the escaped path segment by segment, so a request
@@ -97,8 +97,11 @@ type mountPoint struct {
 // replaced route by route:
 //
 //	app.Mount("/metrics", promhttp.Handler(), muzak.Needs(auth.RequireOperator))
-//	app.Mount("/debug/pprof", pprofMux, muzak.StripPrefix())
+//	app.Mount("/debug/pprof", pprofMux, muzak.Needs(auth.RequireOperator))
 //	app.Mount("/", legacy) // whatever no route answers yet
+//
+// net/http/pprof chooses a profile by the full path, "/debug/pprof/heap" say,
+// so it is mounted at the path it was written for, without [StripPrefix].
 //
 // The prefix is an absolute path relative to the router it is registered on,
 // under whatever prefixes that router is included with, as a route's path is.

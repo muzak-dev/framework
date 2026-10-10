@@ -737,7 +737,7 @@
 // time:
 //
 //	app.Mount("/metrics", promhttp.Handler(), muzak.Needs(auth.RequireOperator))
-//	app.Mount("/debug/pprof", pprofMux, muzak.StripPrefix())
+//	app.Mount("/debug/pprof", pprofMux, muzak.Needs(auth.RequireOperator))
 //	app.Mount("/", legacy)
 //
 // The most specific answer wins. A route at a path beneath the prefix answers

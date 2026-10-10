@@ -355,7 +355,9 @@ func TestMountCaseVariantIsNotServedByParent(t *testing.T) {
 }
 
 // TestMountCaseVariantOnThisFilesystem replays the report against a real
-// directory, which is only meaningful where the filesystem ignores case.
+// directory. Where the filesystem ignores case, the variant reaches the guarded
+// directory through the parent and is refused; where it does not, the variant
+// names nothing. A 404 is the answer either way.
 func TestMountCaseVariantOnThisFilesystem(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -366,9 +368,6 @@ func TestMountCaseVariantOnThisFilesystem(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if _, err := os.Stat(filepath.Join(dir, "ADMIN", "secret.txt")); err != nil {
-		t.Skip("this filesystem is case-sensitive; TestMountCaseVariantIsNotServedByParent covers the logic")
 	}
 	admin := NewRouter(WithDependencies(RequireBearerToken("s3cret")))
 	admin.Static("/", StaticOptions{Dir: filepath.Join(dir, "admin")})

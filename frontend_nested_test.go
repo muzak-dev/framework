@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"encoding/json/v2"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -82,14 +83,33 @@ func nestedLayout(t *testing.T, root string, mounts []string, spa bool) *App {
 	return mustBuild(t, app)
 }
 
+// sameAnswer reports whether two requests got the same answer: the same
+// status and, for an error, the same code, since its message names the path
+// asked for and its request identifier is the request's own, and otherwise
+// the same body.
+func sameAnswer(a, b *httptest.ResponseRecorder) bool {
+	if a.Code != b.Code {
+		return false
+	}
+	var errA, errB struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(a.Body.Bytes(), &errA) == nil && json.Unmarshal(b.Body.Bytes(), &errB) == nil && errA.Error.Code != "" {
+		return errA.Error.Code == errB.Error.Code
+	}
+	return a.Body.String() == b.Body.String()
+}
+
 // TestGuardedMountIsNotReachedThroughItsFoldedName is the regression test for
 // a guarded mount served, with no credentials, by a public parent mount over
 // the same directory tree. It runs against a real directory and asks the
 // volume, rather than assuming, which spellings it treats as one name: on a
-// filesystem that folds none of them the request cannot reach the file and
-// there is nothing to defend, so those cases skip, and a case-sensitive Linux
-// volume skips them all. TestNestedMountsByIdentity runs the same logic on
-// every platform.
+// filesystem that folds none of them the request cannot reach the file, and is
+// held to the answer a name that names nothing gets, which on a case-sensitive
+// Linux volume is every case. TestNestedMountsByIdentity runs the defending
+// logic on every platform.
 func TestGuardedMountIsNotReachedThroughItsFoldedName(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -113,19 +133,40 @@ func TestGuardedMountIsNotReachedThroughItsFoldedName(t *testing.T) {
 		for _, c := range foldCases {
 			for _, alias := range c.aliases {
 				t.Run(c.mount+"/"+alias, func(t *testing.T) {
-					if _, err := os.Stat(filepath.Join(root, alias, "secret.txt")); err != nil {
-						t.Skipf("this volume does not treat %q as %q, so the parent mount cannot open the guarded directory through it", alias, c.mount)
+					// A spelling of the mount's name under simple case folding
+					// is refused on every volume. Any other is refused where
+					// the volume treats it as the mount's name, since the
+					// parent could open the guarded directory through it, and
+					// elsewhere names nothing, and is answered as any name
+					// that names nothing is.
+					_, err := os.Stat(filepath.Join(root, alias, "secret.txt"))
+					refused := err == nil || strings.EqualFold(alias, c.mount)
+					requests := func(name string) []*http.Request {
+						target := "/" + name + "/secret.txt"
+						return []*http.Request{
+							httptest.NewRequest("GET", target, nil),
+							navigation(target),
+							navigation("/" + name),
+							navigation("/" + name + "/nothing-here"),
+						}
 					}
-					target := "/" + escaped(alias) + "/secret.txt"
-					for _, req := range []*http.Request{
-						httptest.NewRequest("GET", target, nil),
-						navigation(target),
-						navigation("/" + escaped(alias)),
-						navigation("/" + escaped(alias) + "/nothing-here"),
-					} {
+					nowhere := requests("nowhere")
+					for i, req := range requests(escaped(alias)) {
 						rec := doRequest(t, app, req)
-						if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "SECRET-") || rec.Body.String() == "public" {
-							t.Errorf("GET %s (spa=%v) = %d %q, want 404 and none of the guarded directory", req.URL.Path, spa, rec.Code, rec.Body.String())
+						if strings.Contains(rec.Body.String(), "SECRET-") {
+							t.Errorf("GET %s (spa=%v) served the guarded directory: %q", req.URL.Path, spa, rec.Body.String())
+							continue
+						}
+						if refused {
+							if rec.Code != http.StatusNotFound || rec.Body.String() == "public" {
+								t.Errorf("GET %s (spa=%v) = %d %q, want 404 for a spelling of %q", req.URL.Path, spa, rec.Code, rec.Body.String(), c.mount)
+							}
+							continue
+						}
+						twin := doRequest(t, app, nowhere[i])
+						if !sameAnswer(rec, twin) {
+							t.Errorf("GET %s (spa=%v) = %d %q, want what %s gets, %d %q, from a volume that keeps it apart from %q",
+								req.URL.Path, spa, rec.Code, rec.Body.String(), nowhere[i].URL.Path, twin.Code, twin.Body.String(), c.mount)
 						}
 					}
 				})
@@ -152,6 +193,7 @@ func TestGuardedMountIsNotReachedThroughItsFoldedName(t *testing.T) {
 // TestFoldedNameKeepsSandboxAndPrivateCaching pins the two things a request
 // served by the wrong mount used to lose besides the guard: the sandbox policy
 // of a directory of uploads, and the "private" cache directive of a guarded one.
+// The folded spelling is held to what the volume it runs on makes of it.
 func TestFoldedNameKeepsSandboxAndPrivateCaching(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -168,9 +210,6 @@ func TestFoldedNameKeepsSandboxAndPrivateCaching(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, "\uFB01les", "x.html")); err != nil {
-		t.Skip("this volume does not fold the fi ligature onto \"fi\", so there is no alias to defend against")
-	}
 	app := New(quietOptions())
 	app.Frontend("/", FrontendOptions{Dir: root})
 	app.Static("/files", StaticOptions{Dir: filepath.Join(root, "files")})
@@ -184,10 +223,17 @@ func TestFoldedNameKeepsSandboxAndPrivateCaching(t *testing.T) {
 	if exact.Header().Get("Content-Security-Policy") != "sandbox" {
 		t.Fatalf("the uploads mount sends no sandbox policy: %v", exact.Header())
 	}
+	// Spelled with the fi ligature, the name reaches the uploads through the
+	// parent on a volume that folds it, where it must be refused. On one that
+	// does not, it names nothing, and is answered as such a name is.
 	folded := do(t, app, "GET", "/%EF%AC%81les/x.html")
-	assertStatus(t, folded, http.StatusNotFound)
 	if strings.Contains(folded.Body.String(), "steal") {
 		t.Fatalf("the folded name served the uploaded document: %q", folded.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "\uFB01les", "x.html")); err == nil {
+		assertStatus(t, folded, http.StatusNotFound)
+	} else if twin := do(t, app, "GET", "/nowhere/x.html"); !sameAnswer(folded, twin) {
+		t.Fatalf("the ligature name = %d %q, want what a name that names nothing gets, %d %q", folded.Code, folded.Body.String(), twin.Code, twin.Body.String())
 	}
 	owned := doRequest(t, app, withToken("/staff/secret.txt"))
 	assertStatus(t, owned, http.StatusOK)

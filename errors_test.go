@@ -1,10 +1,12 @@
 package muzak
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -539,4 +541,64 @@ func TestEmptyValidationErrorHasAMessageAndAResponse(t *testing.T) {
 	mustBuild(t, app)
 	rec := do(t, app, http.MethodGet, "/x")
 	assertStatus(t, rec, http.StatusUnprocessableEntity)
+}
+
+// TestRequestCancelledByClientIsNotLoggedAsAFailure is the regression test for
+// a request whose client hung up being logged as a failure of the server. A
+// query a handler runs under the request's context fails with its
+// cancellation, and the handler returns that, which was logged at error level
+// whether or not its response had started, so any client could write errors
+// to the log at will. It is logged at debug level and the request ends as
+// before; a cancellation the request did not cause is still a failure.
+func TestRequestCancelledByClientIsNotLoggedAsAFailure(t *testing.T) {
+	t.Parallel()
+	const (
+		failed  = `","msg":"muzak: request failed"`
+		aborted = `","msg":"muzak: request failed after its response had started, so the connection was aborted"`
+	)
+	for name, tc := range map[string]struct {
+		cancel  bool
+		started bool
+		line    string
+	}{
+		"the client went away":                                {true, false, `"level":"DEBUG` + failed},
+		"the client went away once the response started":      {true, true, `"level":"DEBUG` + aborted},
+		"the handler cancelled its own query":                 {false, false, `"level":"ERROR` + failed},
+		"the handler cancelled its own query once it started": {false, true, `"level":"ERROR` + aborted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			logger, logs := captureLogger(t)
+			opts := quietOptions()
+			opts.Logger = logger
+			app := New(opts)
+			app.Get("/x", func(ctx *Context, _ Empty) (Empty, error) {
+				if tc.started {
+					_, _ = ctx.ResponseWriter().Write([]byte("partial"))
+				}
+				query, cancel := context.WithCancel(ctx.Context())
+				cancel()
+				return Empty{}, fmt.Errorf("the query failed: %w", query.Err())
+			})
+			mustBuild(t, app)
+			req := httptest.NewRequest(http.MethodGet, "/x", nil)
+			if tc.cancel {
+				ctx, cancel := context.WithCancel(req.Context())
+				cancel()
+				req = req.WithContext(ctx)
+			}
+			rec := httptest.NewRecorder()
+			recovered := catchPanic(func() { app.ServeHTTP(rec, req) })
+			if tc.started {
+				if recovered != http.ErrAbortHandler { //nolint:errorlint // recover yields any, not a wrapped error
+					t.Errorf("recovered %v, want the response aborted", recovered)
+				}
+			} else {
+				assertStatus(t, rec, http.StatusInternalServerError)
+			}
+			if !strings.Contains(logs.String(), tc.line) {
+				t.Errorf("want %s; the log holds:\n%s", tc.line, logs.String())
+			}
+		})
+	}
 }

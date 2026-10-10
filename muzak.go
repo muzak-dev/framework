@@ -1209,6 +1209,11 @@ var errPanic = errors.New("muzak: handler panicked")
 // have kept: net/http never learns the response was meant to be final, and
 // the error says it was not. A hijacked connection is left alone, and so is
 // a WebSocket or event stream route; see [Context.endsItsOwnResponse].
+//
+// A failure that is the request's own cancellation, which is what a handler,
+// a session store or a rate limit storage waiting on behalf of a client that
+// hung up returns, is logged at debug level rather than as an error; see
+// [failureLevel]. The request ends the same way either way.
 func (a *App) fail(c *Context, err error) {
 	a.observeFailure(c, err)
 	// Releases see the failure before anything is written, and returning it
@@ -1222,7 +1227,8 @@ func (a *App) fail(c *Context, err error) {
 		if cause == nil {
 			cause = err
 		}
-		a.logger.ErrorContext(c.Context(), "muzak: request failed after its response had started, so the connection was aborted",
+		a.logger.Log(c.Context(), failureLevel(c.Context(), cause, slog.LevelError),
+			"muzak: request failed after its response had started, so the connection was aborted",
 			slog.String("method", c.r.Method),
 			slog.String("path", truncateForMessage(c.r.URL.Path)),
 			slog.String(RequestIDKey, c.RequestID()),
@@ -1230,7 +1236,7 @@ func (a *App) fail(c *Context, err error) {
 		abortStartedResponse(c.w)
 	}
 	if cause := logCause(err); cause != nil {
-		a.logger.ErrorContext(c.Context(), "muzak: request failed",
+		a.logger.Log(c.Context(), failureLevel(c.Context(), cause, slog.LevelError), "muzak: request failed",
 			slog.String("method", c.r.Method),
 			slog.String("path", truncateForMessage(c.r.URL.Path)),
 			slog.String(RequestIDKey, c.RequestID()),

@@ -70,16 +70,24 @@ func TestHungRateLimitStorageIsBounded(t *testing.T) {
 // storage, which any client could produce at will. A count its own request's
 // cancellation ended is logged at debug level and the request is answered as
 // before; one StorageTimeout ended is the storage failing, and is logged as
-// one.
+// one. Failing closed, the 503 is still sent, and the failure it carries is
+// logged at the same level.
 func TestRateLimitStorageCancelledByClient(t *testing.T) {
 	t.Parallel()
-	const unmetered = `","msg":"muzak: the rate limit storage failed; serving the request unmetered"`
+	const (
+		unmetered = `","msg":"muzak: the rate limit storage failed; serving the request unmetered"`
+		refused   = `","msg":"muzak: request failed"`
+	)
 	for name, tc := range map[string]struct {
-		cancel bool
-		level  string
+		failOpen bool
+		cancel   bool
+		status   int
+		line     string
 	}{
-		"the client went away":  {true, "DEBUG"},
-		"the storage timed out": {false, "WARN"},
+		"fail open, the client went away":    {true, true, http.StatusOK, `"level":"DEBUG` + unmetered},
+		"fail open, the storage timed out":   {true, false, http.StatusOK, `"level":"WARN` + unmetered},
+		"fail closed, the client went away":  {false, true, http.StatusServiceUnavailable, `"level":"DEBUG` + refused},
+		"fail closed, the storage timed out": {false, false, http.StatusServiceUnavailable, `"level":"ERROR` + refused},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -88,7 +96,7 @@ func TestRateLimitStorageCancelledByClient(t *testing.T) {
 			opts.Logger = logger
 			opts.RateLimit = RateLimitOptions{
 				Storage:        hungStorage{},
-				FailOpen:       true,
+				FailOpen:       tc.failOpen,
 				StorageTimeout: time.Millisecond,
 				Quotas:         []Quota{{Name: "burst", Window: time.Minute, Limit: 5}},
 			}
@@ -102,9 +110,13 @@ func TestRateLimitStorageCancelledByClient(t *testing.T) {
 				cancel()
 				req = req.WithContext(ctx)
 			}
-			assertStatus(t, doRequest(t, app, req), http.StatusOK)
-			if want := `"level":"` + tc.level + unmetered; !strings.Contains(logs.String(), want) {
-				t.Errorf("want %s; the log holds:\n%s", want, logs.String())
+			rec := doRequest(t, app, req)
+			assertStatus(t, rec, tc.status)
+			if tc.status == http.StatusServiceUnavailable && rec.Header().Get("Retry-After") != rateLimitStorageRetryAfter {
+				t.Errorf("Retry-After = %q, want %s", rec.Header().Get("Retry-After"), rateLimitStorageRetryAfter)
+			}
+			if !strings.Contains(logs.String(), tc.line) {
+				t.Errorf("want %s; the log holds:\n%s", tc.line, logs.String())
 			}
 		})
 	}

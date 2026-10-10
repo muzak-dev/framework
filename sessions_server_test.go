@@ -376,7 +376,8 @@ func (hungSessionStore) Load(ctx context.Context, _ string) ([]byte, bool, error
 // at error level, which any client could produce at will. The read its own
 // request's cancellation ended is logged at debug level, and the request is
 // answered as before; a read StoreTimeout ended is the store failing, and
-// is still an error.
+// is still an error. So is the failure of a handler that returns
+// [Session.Err], as the documentation suggests.
 func TestServerSessionLoadCancelledByClient(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -391,16 +392,26 @@ func TestServerSessionLoadCancelledByClient(t *testing.T) {
 			store := hungSessionStore{NewMemorySessionStore(MemorySessionOptions{})}
 			app, _, logs := sessionTestApp(t, func(o *AppOptions) {
 				o.Sessions = &SessionOptions{Store: store, StoreTimeout: time.Millisecond}
-			}, nil)
+			}, func(app *App) {
+				app.Get("/strict", func(ctx *Context, _ Empty) (sessionOut, error) {
+					if err := ctx.Session().Err(); err != nil {
+						return sessionOut{}, err
+					}
+					return sessionOut{}, nil
+				})
+			})
 			id, _ := newSessionID()
-			req := httptest.NewRequest(http.MethodGet, "/read", nil)
-			req.AddCookie(&http.Cookie{Name: app.sessions.name, Value: id})
-			if tc.cancel {
-				ctx, cancel := context.WithCancel(req.Context())
-				cancel()
-				req = req.WithContext(ctx)
+			request := func(target string) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodGet, target, nil)
+				req.AddCookie(&http.Cookie{Name: app.sessions.name, Value: id})
+				if tc.cancel {
+					ctx, cancel := context.WithCancel(req.Context())
+					cancel()
+					req = req.WithContext(ctx)
+				}
+				return doRequest(t, app, req)
 			}
-			rec := doRequest(t, app, req)
+			rec := request("/read")
 			assertStatus(t, rec, http.StatusOK)
 			assertNoSessionCookie(t, rec)
 			if out := decodeSessionOut(t, rec); out.Found {
@@ -409,6 +420,11 @@ func TestServerSessionLoadCancelledByClient(t *testing.T) {
 			want := `"level":"` + tc.level + `","msg":"muzak: the session store could not be read`
 			if !strings.Contains(logs.String(), want) {
 				t.Errorf("want a line beginning %s; the log holds:\n%s", want, logs.String())
+			}
+			assertStatus(t, request("/strict"), http.StatusInternalServerError)
+			want = `"level":"` + tc.level + `","msg":"muzak: request failed"`
+			if !strings.Contains(logs.String(), want) {
+				t.Errorf("want %s; the log holds:\n%s", want, logs.String())
 			}
 		})
 	}

@@ -56,9 +56,14 @@ func TestDevStopsAGrandchildLeftByAnApplicationThatExited(t *testing.T) {
 // manager would: the signal reaches dev through main, is forwarded to the
 // application, and dev exits once the application has stopped, leaving no
 // process and no build behind.
+//
+// A hang-up, which closing the terminal sends, and a quit, which Ctrl-\
+// sends, reach dev alone, since the application runs in a group of its own:
+// left to their default, they ended dev and left the application running,
+// holding its port, with nobody to stop it.
 func TestDevStopsOnARealSignal(t *testing.T) {
 	t.Parallel()
-	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
 		t.Run(sig.String(), func(t *testing.T) {
 			t.Parallel()
 			p := newProject(t)
@@ -67,6 +72,9 @@ func TestDevStopsOnARealSignal(t *testing.T) {
 			cmd.Env = append(goEnv(), "MUZAK_TEST_RUN_MAIN=1", "FAKE_MARKER="+p.marker, "TMPDIR="+p.temp)
 			stderr := &syncBuffer{}
 			cmd.Stdout, cmd.Stderr = io.Discard, stderr
+			// An application dev left running holds the output pipe open,
+			// which the wait would otherwise wait on for as long as it runs.
+			cmd.WaitDelay = 5 * time.Second
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
@@ -79,6 +87,13 @@ func TestDevStopsOnARealSignal(t *testing.T) {
 				<-exited
 			})
 			started := p.waitFor(t, `^start 1 (\d+) `)
+			t.Cleanup(func() {
+				// An application dev failed to stop is killed, so that a
+				// failure leaves nothing running on the machine.
+				if t.Failed() {
+					_ = syscall.Kill(pidOf(t, started[1]), syscall.SIGKILL)
+				}
+			})
 			if err := cmd.Process.Signal(sig); err != nil {
 				t.Fatal(err)
 			}

@@ -46,7 +46,7 @@ func note(format string, args ...any) {
 
 func main() {
 	signals := make(chan os.Signal, 4)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	if os.Getenv("FAKE_ROLE") == "grandchild" {
 		note("grandchild %%d", os.Getpid())
 		for range signals {

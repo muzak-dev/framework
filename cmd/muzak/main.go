@@ -55,10 +55,10 @@ type console struct {
 	dir string
 	// env is the environment every process a command starts runs with.
 	env []string
-	// signals subscribes to the interrupt and termination signals and returns
-	// the function that ends the subscription. Only dev subscribes: every
-	// other command is stopped by a signal the ordinary way, and an
-	// application dev runs has to be stopped by dev rather than abandoned.
+	// signals subscribes to the signals that stop dev and returns the
+	// function that ends the subscription. Only dev subscribes: every other
+	// command is stopped by a signal the ordinary way, and an application dev
+	// runs has to be stopped by dev rather than abandoned.
 	signals func() (<-chan os.Signal, func())
 
 	// version is the framework version a new project requires.
@@ -88,7 +88,12 @@ func processConsole() *console {
 			// Buffered, so a signal that arrives while dev is busy building is
 			// kept until it looks rather than dropped by the runtime.
 			ch := make(chan os.Signal, 2)
-			signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+			// Besides an interrupt and a termination, the hang-up closing the
+			// terminal sends and the quit Ctrl-\ sends. The application runs
+			// in a process group of its own, so the terminal delivers either
+			// to dev alone, and left to its default it ended dev and left the
+			// application running, holding its port, with nobody to stop it.
+			signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 			return ch, func() { signal.Stop(ch) }
 		},
 		version:      frameworkVersion(info, ok),

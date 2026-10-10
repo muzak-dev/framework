@@ -34,8 +34,9 @@ into its own directory does not restart itself, and directories whose name
 starts with a dot, node_modules, vendor and testdata are not walked. A tree
 with more than 10000 watched files is refused rather than polled slowly.
 
-Ctrl-C or SIGTERM stops dev. The application is sent the same signal and
-given -grace to shut down before it is killed. On Unix the application runs
+Ctrl-C or SIGTERM stops dev, and so do the hang-up a closed terminal sends and
+the quit Ctrl-\ sends. The application is sent the same signal and given
+-grace to shut down before it is killed. On Unix the application runs
 in a process group of its own and the signal goes to the whole group, so a
 process it started is stopped with it. On Windows there is no signal to send:
 the application is killed at once, and a process it started is left running.`,

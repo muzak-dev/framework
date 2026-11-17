@@ -48,6 +48,17 @@ type BackgroundOptions struct {
 	// request that succeeds never finds the queue full at the moment its
 	// tasks are handed over. A negative value is a build error.
 	Queue int
+	// Observer receives lifecycle events for queued and executed background
+	// tasks. Nil disables background observation.
+	Observer BackgroundObserver
+}
+
+// BackgroundObserver observes [Context.AfterResponse] queue reservations and
+// task execution.
+type BackgroundObserver interface {
+	OnEnqueue(queued int, err error)
+	OnStart(active int)
+	OnComplete(duration time.Duration, panicked bool)
 }
 
 // withDefaults fills in the unset bounds.
@@ -218,6 +229,7 @@ type backgroundPool struct {
 	logger   *slog.Logger
 	workers  int
 	capacity int
+	observer BackgroundObserver
 
 	mu sync.Mutex
 	// reserved counts the tasks registered and not yet started: those whose
@@ -245,7 +257,7 @@ type backgroundPool struct {
 // newBackgroundPool prepares a pool for opts, which have had their defaults
 // applied. It starts nothing.
 func newBackgroundPool(opts BackgroundOptions, logger *slog.Logger) *backgroundPool {
-	p := &backgroundPool{logger: logger, workers: opts.Workers, capacity: opts.Queue}
+	p := &backgroundPool{logger: logger, workers: opts.Workers, capacity: opts.Queue, observer: opts.Observer}
 	p.lifetime, p.cancel = context.WithCancelCause(context.Background())
 	return p
 }
@@ -253,15 +265,21 @@ func newBackgroundPool(opts BackgroundOptions, logger *slog.Logger) *backgroundP
 // reserve claims a place in the queue for a task being registered.
 func (p *backgroundPool) reserve() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return ErrBackgroundShuttingDown
+	var err error
+	switch {
+	case p.closed:
+		err = ErrBackgroundShuttingDown
+	case p.reserved >= p.capacity:
+		err = ErrBackgroundQueueFull
+	default:
+		p.reserved++
 	}
-	if p.reserved >= p.capacity {
-		return ErrBackgroundQueueFull
+	queued := p.reserved
+	p.mu.Unlock()
+	if p.observer != nil {
+		p.observer.OnEnqueue(queued, err)
 	}
-	p.reserved++
-	return nil
+	return err
 }
 
 // settle queues one request's tasks when run is true and releases their
@@ -306,7 +324,11 @@ func (p *backgroundPool) work() {
 		}
 		p.reserved--
 		lifetime := p.lifetime
+		active := p.alive
 		p.mu.Unlock()
+		if p.observer != nil {
+			p.observer.OnStart(active)
+		}
 		p.run(lifetime, task)
 	}
 }
@@ -317,15 +339,24 @@ func (p *backgroundPool) work() {
 func (p *backgroundPool) run(lifetime context.Context, task backgroundTask) {
 	ctx, cancel := context.WithCancelCause(context.WithoutCancel(task.ctx))
 	stop := context.AfterFunc(lifetime, func() { cancel(context.Cause(lifetime)) })
+	ctx, span := StartSpan(ctx, "muzak.background", SpanKindInternal)
+	start := time.Now()
+	panicked := false
 	defer func() {
-		stop()
-		cancel(nil)
 		if recovered := recover(); recovered != nil {
+			panicked = true
+			span.SetStatus(SpanStatusError, "background task panicked")
 			id, _ := RequestIDFromContext(task.ctx)
 			p.logger.ErrorContext(ctx, "muzak: recovered from a panic in a background task",
 				slog.String("panic", panicValue(recovered)),
 				slog.String(RequestIDKey, id),
 				slog.String("stack", string(debug.Stack())))
+		}
+		span.End()
+		stop()
+		cancel(nil)
+		if p.observer != nil {
+			p.observer.OnComplete(time.Since(start), panicked)
 		}
 	}()
 	task.run(ctx)

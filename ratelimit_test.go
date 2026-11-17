@@ -1046,3 +1046,67 @@ func TestRateLimitLayersFieldByField(t *testing.T) {
 		t.Error("the inherited storage counted nothing")
 	}
 }
+
+func TestRateLimitConcurrencyCap(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	app := New(quietOptions(), WithRateLimit(RateLimitOptions{
+		ConcurrencyLimit: 1,
+		Tracker: func(ctx *Context) (string, error) {
+			return "tenant:" + ctx.Header("X-Tenant"), nil
+		},
+	}))
+	app.Get("/slow", func(_ *Context, _ Empty) (string, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return "ok", nil
+	})
+	mustBuild(t, app)
+
+	var wg sync.WaitGroup
+	var res1 *httptest.ResponseRecorder
+	wg.Go(func() {
+		req := httptest.NewRequest(http.MethodGet, "/slow", nil)
+		req.Header.Set("X-Tenant", "t1")
+		res1 = doRequest(t, app, req)
+	})
+
+	<-started
+	req2 := httptest.NewRequest(http.MethodGet, "/slow", nil)
+	req2.Header.Set("X-Tenant", "t1")
+	res2 := doRequest(t, app, req2)
+	if res2.Code != http.StatusTooManyRequests {
+		t.Fatalf("concurrent status = %d, want 429", res2.Code)
+	}
+	if res2.Header().Get(HeaderRetryAfter) != "1" {
+		t.Fatalf("Retry-After = %q, want 1", res2.Header().Get(HeaderRetryAfter))
+	}
+
+	close(release)
+	wg.Wait()
+	if res1.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", res1.Code)
+	}
+
+	// Slot is released after completion.
+	release2 := make(chan struct{})
+	release = release2
+	close(release2)
+	req3 := httptest.NewRequest(http.MethodGet, "/slow", nil)
+	req3.Header.Set("X-Tenant", "t1")
+	if res3 := doRequest(t, app, req3); res3.Code != http.StatusOK {
+		t.Fatalf("after-release status = %d, want 200", res3.Code)
+	}
+}
+
+func TestRateLimitNegativeConcurrencyBuildError(t *testing.T) {
+	app := New(quietOptions(), WithRateLimit(RateLimitOptions{ConcurrencyLimit: -1}))
+	app.Get("/bad", pong)
+	if err := app.Build(); err == nil || !strings.Contains(err.Error(), "concurrency limit") {
+		t.Fatalf("expected concurrency limit build error, got %v", err)
+	}
+}

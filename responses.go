@@ -1,6 +1,9 @@
 package muzak
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -568,4 +571,61 @@ func scanQuoted(s string, i int) int {
 // itself or after a backslash: a tab, a space or a visible ASCII character.
 func isQuotedText(c byte) bool {
 	return c == '\t' || (c >= ' ' && c <= '~')
+}
+
+// Page is a standard cursor-paginated response envelope.
+type Page[T any] struct {
+	Items      []T    `json:"items"`
+	NextCursor string `json:"next_cursor,omitzero"`
+	HasMore    bool   `json:"has_more"`
+}
+
+const minCursorSecretBytes = 32
+
+// CursorSigner signs and verifies opaque pagination cursors using HMAC-SHA256
+// with an explicit shared secret across replicas.
+type CursorSigner struct {
+	secret []byte
+}
+
+// NewCursorSigner returns a [CursorSigner] using secret. Secret must be at
+// least 32 bytes so multi-replica deployments use an explicit shared key rather
+// than a process-local random secret.
+func NewCursorSigner(secret []byte) (*CursorSigner, error) {
+	if len(secret) < minCursorSecretBytes {
+		return nil, fmt.Errorf("muzak: cursor signing secret must be at least %d bytes", minCursorSecretBytes)
+	}
+	copied := make([]byte, len(secret))
+	copy(copied, secret)
+	return &CursorSigner{secret: copied}, nil
+}
+
+// Sign encodes payload and appends an HMAC-SHA256 tag.
+func (s *CursorSigner) Sign(payload []byte) string {
+	mac := hmac.New(sha256.New, s.secret)
+	_, _ = mac.Write(payload)
+	tag := mac.Sum(nil)
+	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(tag)
+}
+
+// Verify authenticates cursor in constant time and returns its decoded payload.
+func (s *CursorSigner) Verify(cursor string) ([]byte, error) {
+	encodedPayload, encodedTag, ok := strings.Cut(cursor, ".")
+	if !ok || encodedPayload == "" || encodedTag == "" {
+		return nil, errors.New("muzak: invalid pagination cursor")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encodedPayload)
+	if err != nil {
+		return nil, errors.New("muzak: invalid pagination cursor")
+	}
+	tag, err := base64.RawURLEncoding.DecodeString(encodedTag)
+	if err != nil {
+		return nil, errors.New("muzak: invalid pagination cursor")
+	}
+	mac := hmac.New(sha256.New, s.secret)
+	_, _ = mac.Write(payload)
+	if !hmac.Equal(tag, mac.Sum(nil)) {
+		return nil, errors.New("muzak: invalid pagination cursor")
+	}
+	return payload, nil
 }

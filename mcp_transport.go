@@ -1,6 +1,7 @@
 package muzak
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -78,11 +79,16 @@ func (s *mcpServer) serveDelete(c *Context, _ Empty) (Empty, error) {
 	if id == "" {
 		return Empty{}, errMCPNoSession()
 	}
-	session, ok := s.sessions.lookup(id)
+	session, ok, err := s.sessionLookup(c, id)
+	if err != nil {
+		return Empty{}, err
+	}
 	if !ok || !session.ownedBy(mcpOwner(c)) {
 		return Empty{}, errMCPUnknownSession()
 	}
-	s.sessions.remove(id)
+	if err := s.sessionDelete(c, id); err != nil {
+		return Empty{}, err
+	}
 	if err := c.settle(nil); err != nil {
 		return Empty{}, err
 	}
@@ -313,15 +319,19 @@ func isLegacyVersion(version string) bool {
 // 2026-07-28 one is, since a gateway that admits tools by those headers would
 // otherwise be told of one tool while another is called.
 func (x *mcpExchange) serveSession(rerr *rpcError) error {
-	session, ok := x.s.sessions.lookup(x.sessionID)
+	session, ok, err := x.s.sessionLookup(x.c, x.sessionID)
+	if err != nil {
+		return err
+	}
 	if !ok || !session.ownedBy(mcpOwner(x.c)) {
 		return errMCPUnknownSession()
 	}
-	if x.version != "" && x.version != session.version {
+	if x.version != "" && x.version != session.Version {
 		return NewHTTPError(http.StatusBadRequest,
 			"the MCP-Protocol-Version header names a revision other than the one this session negotiated")
 	}
-	x.era = eraOf(session.version)
+	x.era = eraOf(session.Version)
+	setMCPTelemetry(x.c, x.msg.method, session.Version, "", false, false)
 	if x.msg.kind != rpcRequest {
 		// The client's notifications and its answers to requests this server
 		// never sends need nothing from it.
@@ -390,6 +400,7 @@ func (x *mcpExchange) serveStateless(rerr *rpcError) error {
 		return x.rpcFail(http.StatusBadRequest, &rpcError{Code: rpcInvalidParams,
 			Message: "Invalid params: _meta carries no client capabilities"})
 	}
+	setMCPTelemetry(x.c, x.msg.method, x.version, "", false, false)
 	return method(x)
 }
 
@@ -470,7 +481,12 @@ func (x *mcpExchange) initialize(rerr *rpcError) error {
 		version = requested
 	}
 	x.era = eraOf(version)
-	x.c.w.Header().Set(HeaderMCPSessionID, x.s.sessions.create(version, mcpOwner(x.c)))
+	sessionID, err := x.s.sessionCreate(x.c, version, mcpOwner(x.c))
+	if err != nil {
+		return err
+	}
+	setMCPTelemetry(x.c, x.msg.method, version, "", false, false)
+	x.c.w.Header().Set(HeaderMCPSessionID, sessionID)
 	return x.result(mcpInitializeResult{
 		ProtocolVersion: version,
 		ServerInfo:      x.s.serverInfo(),
@@ -652,7 +668,91 @@ func (x *mcpExchange) toolsCall() error {
 		return x.rpcFail(x.invalidParamsStatus(), &rpcError{Code: rpcInvalidParams,
 			Message: "Invalid params: the arguments of a tool call are an object"})
 	}
-	return x.result(x.s.call(x.c, tool, p.Arguments, x.era))
+	res := x.s.call(x.c, tool, p.Arguments, x.era)
+	setMCPTelemetry(x.c, x.msg.method, "", tool.name, true, res.IsError)
+	return x.result(res)
+}
+
+func (s *mcpServer) sessionCtx(c *Context) (context.Context, context.CancelFunc) {
+	base := c.Context()
+	if s.sessionTimeout <= 0 {
+		return base, func() {}
+	}
+	return context.WithTimeout(base, s.sessionTimeout)
+}
+
+func (s *mcpServer) sessionCreate(c *Context, version string, owner [sha256.Size]byte) (string, error) {
+	ctx, cancel := s.sessionCtx(c)
+	defer cancel()
+	id, err := s.sessionStore.Create(ctx, version, owner, s.opts.SessionIdleTimeout)
+	if err != nil {
+		s.app.logger.Log(c.Context(), failureLevel(c.Context(), err, slog.LevelError),
+			"muzak: MCP session store Create failed",
+			slog.String(RequestIDKey, c.RequestID()),
+			slog.String("error", err.Error()))
+		c.w.Header().Set(canonicalRetryAfter, idempotencyStorageRetryAfter)
+		return "", NewHTTPError(http.StatusServiceUnavailable, "MCP session store is unavailable")
+	}
+	return id, nil
+}
+
+func (s *mcpServer) sessionLookup(c *Context, id string) (MCPSessionRecord, bool, error) {
+	ctx, cancel := s.sessionCtx(c)
+	defer cancel()
+	rec, ok, err := s.sessionStore.Lookup(ctx, id, s.opts.SessionIdleTimeout)
+	if err != nil {
+		s.app.logger.Log(c.Context(), failureLevel(c.Context(), err, slog.LevelError),
+			"muzak: MCP session store Lookup failed",
+			slog.String(RequestIDKey, c.RequestID()),
+			slog.String("error", err.Error()))
+		c.w.Header().Set(canonicalRetryAfter, idempotencyStorageRetryAfter)
+		return MCPSessionRecord{}, false, NewHTTPError(http.StatusServiceUnavailable, "MCP session store is unavailable")
+	}
+	return rec, ok, nil
+}
+
+func (s *mcpServer) sessionDelete(c *Context, id string) error {
+	ctx, cancel := s.sessionCtx(c)
+	defer cancel()
+	if err := s.sessionStore.Delete(ctx, id); err != nil {
+		s.app.logger.Log(c.Context(), failureLevel(c.Context(), err, slog.LevelError),
+			"muzak: MCP session store Delete failed",
+			slog.String(RequestIDKey, c.RequestID()),
+			slog.String("error", err.Error()))
+		c.w.Header().Set(canonicalRetryAfter, idempotencyStorageRetryAfter)
+		return NewHTTPError(http.StatusServiceUnavailable, "MCP session store is unavailable")
+	}
+	return nil
+}
+
+func setMCPTelemetry(c *Context, method, version, tool string, hasTool bool, isError bool) {
+	var attrs []slog.Attr
+	if method != "" {
+		attrs = append(attrs, slog.String("mcp.method", method))
+	}
+	if version != "" {
+		attrs = append(attrs, slog.String("mcp.protocol.version", version))
+	}
+	if hasTool {
+		attrs = append(attrs, slog.String("mcp.tool.name", tool), slog.Bool("mcp.tool.is_error", isError))
+	}
+	if len(attrs) == 0 {
+		return
+	}
+	SpanFromContext(c.Context()).SetAttributes(attrs...)
+	if extra, ok := c.r.Context().Value(accessAttrsKey{}).(*accessLogAttrs); ok {
+		if method != "" {
+			extra.mcpMethod = method
+		}
+		if version != "" {
+			extra.mcpVersion = version
+		}
+		if hasTool {
+			extra.mcpTool = tool
+			extra.mcpToolHasErr = true
+			extra.mcpToolIsErr = isError
+		}
+	}
 }
 
 // decodeMCPHeaderValue reads a header value 2026-07-28 may write in the

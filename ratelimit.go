@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -295,6 +296,11 @@ type RateLimitOptions struct {
 	// it, so a route states the whole policy it wants.
 	Quotas []Quota
 
+	// ConcurrencyLimit caps how many in-flight requests for the same tracked
+	// key may execute concurrently on a route. Zero disables concurrency
+	// limiting; negative values are rejected at build time.
+	ConcurrencyLimit int
+
 	// Storage counts the requests, defaulting to a process-local storage
 	// equivalent to [NewMemoryRateLimitStorage] with its own defaults. One
 	// storage is created for the whole application, so routes that do not name
@@ -378,6 +384,9 @@ type RateLimitOptions struct {
 func (o RateLimitOptions) overlay(over RateLimitOptions) RateLimitOptions {
 	if over.Quotas != nil {
 		o.Quotas = over.Quotas
+	}
+	if over.ConcurrencyLimit != 0 {
+		o.ConcurrencyLimit = over.ConcurrencyLimit
 	}
 	if over.Storage != nil {
 		o.Storage = over.Storage
@@ -473,10 +482,11 @@ type rateLimitConfig struct {
 	quotas []Quota
 	// order is quotas in the order a request is counted against them, the
 	// longest window first; see [rateLimitConfig.check].
-	order    []Quota
-	storage  RateLimitStorage
-	tracker  RateLimitTracker
-	resolver QuotaResolver
+	order       []Quota
+	storage     RateLimitStorage
+	tracker     RateLimitTracker
+	resolver    QuotaResolver
+	concurrency *concurrencyLimiter
 	// policy is the fixed RateLimit-Policy header value for the static quotas.
 	// A request whose resolver adds quotas renders its own.
 	policy string
@@ -485,6 +495,33 @@ type rateLimitConfig struct {
 	failOpen          bool
 	headers           bool
 	afterDependencies bool
+}
+
+type concurrencyLimiter struct {
+	limit  int
+	mu     sync.Mutex
+	active map[string]int
+}
+
+func (l *concurrencyLimiter) acquire(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active[key] >= l.limit {
+		return false
+	}
+	l.active[key]++
+	return true
+}
+
+func (l *concurrencyLimiter) release(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := l.active[key]
+	if n <= 1 {
+		delete(l.active, key)
+		return
+	}
+	l.active[key] = n - 1
 }
 
 // resolveRateLimit works out a route's rate limiting from what it inherits and
@@ -503,7 +540,7 @@ func (rt *Route) resolveRateLimit(in inherited) error {
 	}
 	rt.rateLimitOpts = opts
 	rt.skipRateLimit = in.skipRateLimit || rt.cfg.skipRateLimit
-	if rt.skipRateLimit || (len(opts.Quotas) == 0 && opts.Resolver == nil) {
+	if rt.skipRateLimit || (len(opts.Quotas) == 0 && opts.Resolver == nil && opts.ConcurrencyLimit == 0) {
 		return nil
 	}
 	cfg, err := newRateLimitConfig(opts, opts.Quotas)
@@ -521,6 +558,16 @@ func (rt *Route) resolveRateLimit(in inherited) error {
 // newRateLimitConfig validates a set of quotas and precomputes what every
 // request would otherwise have to work out again.
 func newRateLimitConfig(opts RateLimitOptions, quotas []Quota) (*rateLimitConfig, error) {
+	if opts.ConcurrencyLimit < 0 {
+		return nil, fmt.Errorf("concurrency limit is %d, must be non-negative", opts.ConcurrencyLimit)
+	}
+	var concurrency *concurrencyLimiter
+	if opts.ConcurrencyLimit > 0 {
+		concurrency = &concurrencyLimiter{
+			limit:  opts.ConcurrencyLimit,
+			active: make(map[string]int),
+		}
+	}
 	seen := make(map[string]struct{}, len(quotas))
 	var policy strings.Builder
 	for _, quota := range quotas {
@@ -551,6 +598,7 @@ func newRateLimitConfig(opts RateLimitOptions, quotas []Quota) (*rateLimitConfig
 		storage:           opts.Storage,
 		tracker:           opts.Tracker,
 		resolver:          opts.Resolver,
+		concurrency:       concurrency,
 		policy:            policy.String(),
 		storageTimeout:    storageTimeout,
 		failOpen:          opts.FailOpen,
@@ -687,19 +735,46 @@ func (cfg *rateLimitConfig) increment(ctx context.Context, quota Quota, key stri
 // the wait of the longest quota that refused, rather than of whichever was
 // declared first.
 func (cfg *rateLimitConfig) check(c *Context) error {
+	release, err := cfg.enter(c)
+	if release != nil {
+		release()
+	}
+	return err
+}
+
+func (cfg *rateLimitConfig) enter(c *Context) (func(), error) {
 	quotas, policy, err := cfg.quotasFor(c)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if len(quotas) == 0 {
+	if len(quotas) == 0 && cfg.concurrency == nil {
 		// A resolver that returned nothing leaves the request unlimited, which
 		// is the documented meaning and not a failure.
-		return nil
+		return nil, nil
 	}
 
 	key, err := cfg.key(c)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	var release func()
+	if cfg.concurrency != nil {
+		if !cfg.concurrency.acquire(key) {
+			c.w.Header().Set(canonicalRetryAfter, "1")
+			return nil, NewHTTPErrorf(http.StatusTooManyRequests,
+				"the concurrency limit of %d in-flight requests has been exceeded; retry in 1 second",
+				cfg.concurrency.limit)
+		}
+		released := false
+		release = func() {
+			if !released {
+				released = true
+				cfg.concurrency.release(key)
+			}
+		}
+	}
+	if len(quotas) == 0 {
+		return release, nil
 	}
 	ctx := c.Context()
 
@@ -709,7 +784,10 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 		count, reset, storageErr := cfg.increment(ctx, quota, key)
 		if storageErr != nil {
 			if failure := cfg.storageFailed(c, quota, storageErr); failure != nil {
-				return failure
+				if release != nil {
+					release()
+				}
+				return nil, failure
 			}
 			// Failing open means this quota goes unmetered, not that the
 			// others do: what they counted stands, so a request over the
@@ -719,7 +797,10 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 		counted++
 		current := outcome{quota: quota, count: count, reset: reset}
 		if current.exceeded() {
-			return cfg.refuse(c, current, policy)
+			if release != nil {
+				release()
+			}
+			return nil, cfg.refuse(c, current, policy)
 		}
 		if counted == 1 || current.remaining() < tightest.remaining() ||
 			(current.remaining() == tightest.remaining() && current.reset > tightest.reset) {
@@ -730,7 +811,7 @@ func (cfg *rateLimitConfig) check(c *Context) error {
 	if counted > 0 {
 		cfg.setHeaders(c, tightest, policy)
 	}
-	return nil
+	return release, nil
 }
 
 // refuse answers a request one quota refused, with that quota's state in the
@@ -989,13 +1070,13 @@ func (a *App) resolveRateLimiting(state *buildState) {
 				}
 				declared[quota.Name] = quota
 			}
-			if cfg.storage == nil {
+			if cfg.storage == nil && (len(cfg.quotas) > 0 || cfg.resolver != nil) {
 				if shared == nil {
 					shared = NewMemoryRateLimitStorage(MemoryRateLimitOptions{})
 				}
 				cfg.storage = shared
 			}
-			if !containsStorage(storages, cfg.storage) {
+			if cfg.storage != nil && !containsStorage(storages, cfg.storage) {
 				storages = append(storages, cfg.storage)
 			}
 		}

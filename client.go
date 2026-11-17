@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -228,6 +229,23 @@ type ClientOptions struct {
 	// because each would be sent with every call and none is what a base
 	// means. Leave it empty for a client that calls no endpoint.
 	BaseURL string
+
+	// Tracer, when non-nil, starts a [SpanKindClient] span for each outbound
+	// call made by [Client.Do], continuing any active span in the request
+	// context and propagating the client span's traceparent.
+	Tracer Tracer
+
+	// Observer receives per-attempt latency/status events, retry-budget
+	// exhaustion events, and circuit-breaker state transitions.
+	Observer ClientObserver
+}
+
+// ClientObserver observes outbound [Client] attempts, retry budgets, and
+// circuit-breaker transitions.
+type ClientObserver interface {
+	OnAttempt(req *http.Request, attempt int, status int, duration time.Duration, err error)
+	OnRetryBudgetExhausted(host string)
+	OnBreakerStateChange(host, fromState, toState string)
 }
 
 // RetryBudget bounds how many retries a [Client] spends in proportion to the
@@ -297,6 +315,8 @@ type Client struct {
 	retry     *retryPolicy
 	breakers  *breakerSet
 	propagate func(ctx context.Context, h http.Header)
+	tracer    Tracer
+	observer  ClientObserver
 
 	// baseURL is [ClientOptions.BaseURL] parsed, and nil when none was given;
 	// see endpoint_call.go.
@@ -346,8 +366,11 @@ func NewClient(opts ClientOptions) *Client {
 		sensitive:        clientSensitiveHeaders(opts.SensitiveHeaders),
 		retry:            newRetryPolicy(opts),
 		propagate:        opts.Propagate,
+		tracer:           opts.Tracer,
+		observer:         opts.Observer,
 		baseURL:          clientBaseURL(opts.BaseURL),
 	}
+	c.retry.observer = opts.Observer
 	if c.maxResponseBytes <= 0 {
 		c.maxResponseBytes = DefaultClientMaxResponseBytes
 	}
@@ -360,6 +383,7 @@ func NewClient(opts ClientOptions) *Client {
 	var roundTripper http.RoundTripper = transport
 	if opts.CircuitBreaker.Threshold > 0 {
 		c.breakers = newBreakerSet(opts.CircuitBreaker)
+		c.breakers.observer = opts.Observer
 		roundTripper = &breakerTransport{next: transport, breakers: c.breakers}
 	}
 	c.client = &http.Client{Transport: roundTripper, CheckRedirect: c.checkRedirect}
@@ -446,6 +470,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			cancel()
 		}
 	}()
+	ctx, span := c.startClientSpan(ctx, req)
 	out := req.Clone(ctx)
 	if out.Header == nil {
 		out.Header = make(http.Header)
@@ -458,6 +483,8 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		err = checkBoundHeaders(ctx, out.Header)
 	}
 	if err != nil {
+		span.SetStatus(SpanStatusError, err.Error())
+		span.End()
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
@@ -465,11 +492,63 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 	resp, attempts, err := c.send(ctx, out)
 	if err != nil {
+		span.SetAttributes(slog.Int("http.request.attempts", attempts))
+		span.SetStatus(SpanStatusError, err.Error())
+		span.End()
 		return nil, c.explain(ctx, out, attempts, err)
 	}
+	span.SetAttributes(
+		slog.Int("http.response.status_code", resp.StatusCode),
+		slog.Int("http.request.attempts", attempts),
+	)
+	if resp.StatusCode >= http.StatusInternalServerError {
+		span.SetStatus(SpanStatusError, "")
+	}
+	span.End()
 	resp, err = c.bodyBounded(resp, cancel)
 	handedOff = err == nil
 	return resp, err
+}
+
+func (c *Client) startClientSpan(ctx context.Context, req *http.Request) (context.Context, Span) {
+	if c.tracer == nil {
+		return ctx, noopSpan{}
+	}
+	parent := activeSpanFrom(ctx)
+	var parentSC SpanContext
+	child := &activeSpan{
+		sc: SpanContext{
+			SpanID:     newSpanID(),
+			TraceFlags: TraceFlagsSampled,
+		},
+		tracer: c.tracer,
+	}
+	if parent != nil {
+		parentSC = parent.sc
+		child.sc.TraceID = parent.sc.TraceID
+		child.sc.TraceFlags = parent.sc.TraceFlags & TraceFlagsSampled
+		child.sc.TraceState = parent.sc.TraceState
+	} else {
+		child.sc.TraceID = newTraceID()
+	}
+	if child.sc.IsSampled() {
+		child.span = c.tracer.StartSpan(ctx, SpanStart{
+			Name:        clientMethod(req),
+			Kind:        SpanKindClient,
+			SpanContext: child.sc,
+			Parent:      parentSC,
+			StartTime:   time.Now(),
+			Attributes: []slog.Attr{
+				slog.String("http.request.method", clientMethod(req)),
+				slog.String("server.address", req.URL.Hostname()),
+			},
+		})
+	}
+	ctx = context.WithValue(ctx, spanContextKey{}, child)
+	if child.span == nil {
+		return ctx, noopSpan{}
+	}
+	return ctx, child.span
 }
 
 // checkRequest refuses a request the client cannot or will not send, before
@@ -574,7 +653,15 @@ func (c *Client) send(ctx context.Context, first *http.Request) (*http.Response,
 	replayable := c.retry.maxAttempts > 1 && replayableRequest(first)
 	req := first
 	for attempt := 1; ; attempt++ {
+		attemptStart := time.Now()
 		resp, err := c.client.Do(req)
+		if c.observer != nil {
+			status := 0
+			if resp != nil {
+				status = resp.StatusCode
+			}
+			c.observer.OnAttempt(req, attempt, status, time.Since(attemptStart), err)
+		}
 		if err == nil && !retryableStatus(resp.StatusCode) {
 			if resp.StatusCode < http.StatusInternalServerError {
 				c.retry.budget.earn()

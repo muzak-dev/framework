@@ -2,11 +2,65 @@ package muzak
 
 import (
 	"container/list"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json/v2"
+	"errors"
 	"sync"
 	"time"
 )
+
+const mcpSessionRecordVersion = byte(1)
+
+// MCPSessionRecord holds the negotiated revision and owner digest of a legacy
+// MCP session stored in an [MCPSessionStore].
+type MCPSessionRecord struct {
+	Version string            `json:"version"`
+	Owner   [sha256.Size]byte `json:"owner"`
+}
+
+func (r MCPSessionRecord) ownedBy(owner [sha256.Size]byte) bool {
+	return r.Owner == [sha256.Size]byte{} || r.Owner == owner
+}
+
+// EncodeMCPSessionRecord serializes record with a version byte header so mixed
+// deployment versions reject incompatible layouts cleanly.
+func EncodeMCPSessionRecord(record MCPSessionRecord) ([]byte, error) {
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 1+len(payload))
+	out[0] = mcpSessionRecordVersion
+	copy(out[1:], payload)
+	return out, nil
+}
+
+// DecodeMCPSessionRecord decodes a record produced by [EncodeMCPSessionRecord].
+func DecodeMCPSessionRecord(data []byte) (MCPSessionRecord, error) {
+	if len(data) < 3 || data[0] != mcpSessionRecordVersion {
+		return MCPSessionRecord{}, errors.New("muzak: invalid or unsupported MCP session record version")
+	}
+	var rec MCPSessionRecord
+	if err := json.Unmarshal(data[1:], &rec); err != nil {
+		return MCPSessionRecord{}, err
+	}
+	return rec, nil
+}
+
+// MCPSessionStore persists legacy MCP client sessions across requests and
+// replicas; see [MCPOptions.SessionStore].
+//
+// Implementations must be safe for concurrent use and honor ctx deadlines.
+// Lookup must atomically refresh the session's idle TTL when found. If the
+// store also satisfies [Lifecycle], the application starts it before serving
+// and stops it after draining.
+type MCPSessionStore interface {
+	Create(ctx context.Context, version string, owner [sha256.Size]byte, ttl time.Duration) (id string, err error)
+	Lookup(ctx context.Context, id string, ttl time.Duration) (record MCPSessionRecord, found bool, err error)
+	Delete(ctx context.Context, id string) error
+}
 
 // mcpSessions holds the sessions legacy clients open with initialize.
 //
@@ -56,6 +110,35 @@ func newMCPSessions(limit int, idle time.Duration) *mcpSessions {
 		idle:  idle,
 		now:   time.Now,
 	}
+}
+
+// Create implements [MCPSessionStore].
+func (s *mcpSessions) Create(ctx context.Context, version string, owner [sha256.Size]byte, _ time.Duration) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return s.create(version, owner), nil
+}
+
+// Lookup implements [MCPSessionStore].
+func (s *mcpSessions) Lookup(ctx context.Context, id string, _ time.Duration) (MCPSessionRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return MCPSessionRecord{}, false, err
+	}
+	session, ok := s.lookup(id)
+	if !ok {
+		return MCPSessionRecord{}, false, nil
+	}
+	return MCPSessionRecord{Version: session.version, Owner: session.owner}, true, nil
+}
+
+// Delete implements [MCPSessionStore].
+func (s *mcpSessions) Delete(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.remove(id)
+	return nil
 }
 
 // create opens a session and returns its identifier.

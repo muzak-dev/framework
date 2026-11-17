@@ -9,6 +9,63 @@ Until 1.0.0, a minor bump may carry a breaking change. Each one is listed under
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-17
+
+### Added
+
+- **Request idempotency middleware and `IdempotencyStore`.** `IdempotencyOptions`,
+  `WithIdempotency`, `SkipIdempotency`, `NewMemoryIdempotencyStore`, and
+  `EncodeIdempotencyRecord` / `DecodeIdempotencyRecord` deduplicate retried
+  mutations and MCP `tools/call` requests after authentication and guards have
+  admitted them and before dependencies and handlers run. Keys are scoped by
+  method, route pattern, authenticated principal (unless
+  `DisablePrincipalScope` is set), and MCP tool name; digest mismatches answer
+  `422`, in-flight duplicates answer `409 Conflict` with `Retry-After: 1`, and
+  `5xx` or oversized bodies delete the in-flight lock. Migration: none.
+
+- **Pluggable `MCPSessionStore` for legacy stateful MCP clients.**
+  `MCPOptions.SessionStore` (with `EncodeMCPSessionRecord` /
+  `DecodeMCPSessionRecord` and `MCPOptions.SessionStoreTimeout`) lets
+  multi-replica deployments share legacy `Mcp-Session-Id` state across
+  instances, with `Lookup` refreshing the idle TTL atomically. Leaving
+  `SessionStore` nil preserves the in-process LRU and emits a startup warning.
+  Migration: none.
+
+- **In-flight concurrency limiting.** `RateLimitOptions.ConcurrencyLimit` caps
+  concurrent active requests per tracked key (respecting `AfterDependencies` for
+  tenant-scoped limits), answering `429` with `Retry-After: 1` when saturated.
+  Migration: none.
+
+- **Operational visibility across background tasks, outbound client calls, and
+  MCP tool execution.**
+  - `BackgroundOptions.Observer` (`BackgroundObserver`) reports queue
+    reservations, active starts, completion duration, and panics, while
+    `Context.AfterResponse` tasks emit child `muzak.background` spans when
+    tracing is active.
+  - `ClientOptions.Tracer` emits `SpanKindClient` spans in `Client.Do` and
+    propagates their trace context, while `ClientOptions.Observer`
+    (`ClientObserver`) reports attempt timing/status, `RetryBudget` exhaustion,
+    and `CircuitBreakerOptions` transitions.
+  - MCP dispatch records `mcp.method`, `mcp.protocol.version`, `mcp.tool.name`,
+    and `mcp.tool.is_error` on active spans and access logs.
+  Migration: none.
+
+- **Three-state `Opt[T]` for partial JSON updates.** `Opt[T]`, `Some[T]`, and
+  `Null[T]` distinguish omitted members (`!IsSet()`), explicit `null`
+  (`IsNull()`), and present values (`Value()`) using `encoding/json/v2`, with
+  optional + nullable OpenAPI 3.1 and TypeScript (`T | null | undefined`) schema
+  emission. Migration: none.
+
+- **Cursor pagination envelope and HMAC signer.** `Page[T]` and `CursorSigner`
+  (`NewCursorSigner` requiring at least a 32-byte shared secret, `Sign`, and
+  `Verify`) provide a standard cursor-paginated response envelope with OpenAPI
+  3.1 and TypeScript support. Migration: none.
+
+- **Raw-body webhook verification package (`muzak.dev/framework/webhook`).**
+  `webhook.Guard` verifies constant-time HMAC-SHA256 and Ed25519 signatures and
+  timestamp replay windows over raw request bytes captured by `CaptureBody()`
+  before JSON binding runs. Migration: none.
+
 ## [0.3.1] - 2026-10-10
 
 ### Fixed

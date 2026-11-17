@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/github/actions/workflow/status/muzak-dev/framework/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI" alt="CI">
 </a>
 <a href="#test-coverage">
-  <img src="https://img.shields.io/badge/coverage-99.1%25-3fb950?style=flat-square&logo=go&logoColor=white" alt="Coverage">
+  <img src="https://img.shields.io/badge/coverage-98.8%25-3fb950?style=flat-square&logo=go&logoColor=white" alt="Coverage">
 </a>
 <a href="https://pkg.go.dev/muzak.dev/framework">
   <img src="https://img.shields.io/badge/pkg.go.dev-reference-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go Reference">
@@ -70,22 +70,23 @@ type, and the compiler is what tells you rather than a bug report.
 | | |
 |---|---|
 | **Routing** | Segment-wise radix trie. A static match takes 64 ns and allocates nothing |
-| **Request binding** | `path`, `query`, `header`, `cookie`, `form`, `file` or the JSON body, by struct tag, with the plan compiled once per route |
+| **Request binding** | `path`, `query`, `header`, `cookie`, `form`, `file` or the JSON body, by struct tag, with the plan compiled once per route; `Opt[T]` distinguishes omitted, `null`, and set PATCH fields |
 | **Validation** | Declared against the field itself, so renaming it is a change the compiler checks |
 | **Dependencies** | Guards and typed providers, read with `From[T](ctx)` or a `Dep[T]` field and no cast anywhere; providers that release what they acquire, a transaction per request, and overrides for tests |
 | **Real-time** | RFC 6455 WebSockets and typed server-sent events, implemented here rather than delegated |
 | **Versioning** | Per route or router, read from the path, a header, the `Accept` header or a function of your own |
 | **Documentation** | OpenAPI 3.1 at `/openapi.json`, derived from the code, and an optional dashboard with a request console at `/docs` |
 | **Errors** | One envelope for every failure, a constructor per status, and causes that stay server-side |
-| **Responses** | JSON by default; bytes, streams, files with ranges, redirects that refuse to be open, entity tags, and RFC 9457 problem details |
-| **Authentication** | JWT bearer tokens and API keys verified by the schemes the document describes, encrypted sessions, and cross-origin protection without tokens |
-| **Operations** | Liveness and readiness probes, a drain delay, background tasks after the response, per-route timeouts, allowed hosts and an HTTPS redirect |
-| **Observability** | W3C trace context, a span per route, trace ids in every log line, a request metrics hook, and an OTLP exporter |
+| **Responses** | JSON by default; `Page[T]` + `CursorSigner`, bytes, streams, files with ranges, redirects that refuse to be open, entity tags, and RFC 9457 problem details |
+| **Authentication** | JWT bearer tokens and API keys verified by the schemes the document describes, encrypted sessions, cross-origin protection without tokens, and `webhook.Guard` for raw-body HMAC/Ed25519 webhooks |
+| **Operations** | Liveness and readiness probes, a drain delay, `IdempotencyStore` deduplication, per-key `ConcurrencyLimit`, background tasks with `BackgroundObserver`, per-route timeouts, allowed hosts and an HTTPS redirect |
+| **Observability** | W3C trace context, spans for routes/background/client calls (`SpanKindClient`), `ClientObserver`, trace ids in every log line, a request metrics hook, and an OTLP exporter |
 | **Calling services** | A client that refuses private and metadata addresses at the socket, retries only what is safe, and calls typed endpoints with the server's own types |
-| **Clients and agents** | TypeScript generated from the document, a test that fails when the API breaks, and chosen routes served to MCP clients as tools |
+| **Clients and agents** | TypeScript generated from the document, a test that fails when the API breaks, and chosen routes served to MCP clients as tools with pluggable `MCPSessionStore` |
 | **Interop** | Mount any `net/http` handler beside the routes, behind the same guards |
 | **Tooling** | `muzak new`, `muzak dev`, and `muzak routes`, `diff` and `ts` |
 | **Defaults** | Conservative everywhere. Relaxing one is a decision you make out loud |
+| **Scope** | Protocol & operational envelope in the framework (`SessionStore`, `RateLimitStorage`, `IdempotencyStore`, `MCPSessionStore`); persistence drivers, ORMs, durable queues, and LLM/RAG logic stay in userland |
 
 ## A whole application
 

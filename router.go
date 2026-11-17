@@ -92,6 +92,8 @@ type routerConfig struct {
 	ws                 *WSOptions
 	sse                *SSEOptions
 	rateLimit          *RateLimitOptions
+	idempotency        *IdempotencyOptions
+	idempotencySet     bool
 	allowUnknownFields *bool
 	captureBody        *bool
 	versions           []Version
@@ -99,6 +101,7 @@ type routerConfig struct {
 	deprecated         bool
 	hidden             bool
 	skipRateLimit      bool
+	skipIdempotency    bool
 	security           []SecurityRequirement
 	securitySet        bool
 	// timeout is what [Timeout] declared; see [Route.resolveTimeout].
@@ -133,6 +136,8 @@ type routeConfig struct {
 	ws                 *WSOptions
 	sse                *SSEOptions
 	rateLimit          *RateLimitOptions
+	idempotency        *IdempotencyOptions
+	idempotencySet     bool
 	allowUnknownFields *bool
 	captureBody        *bool
 	versions           []Version
@@ -141,6 +146,7 @@ type routeConfig struct {
 	deprecated         bool
 	hidden             bool
 	skipRateLimit      bool
+	skipIdempotency    bool
 	security           []SecurityRequirement
 	securitySet        bool
 	// timeout is what [Timeout] declared; see [Route.resolveTimeout].
@@ -554,9 +560,11 @@ type Route struct {
 	// was built from, kept even when no quota was declared because a
 	// WebSocket route's message limits are counted with the same storage and
 	// tracker.
-	rateLimit     *rateLimitConfig
-	rateLimitOpts RateLimitOptions
-	skipRateLimit bool
+	rateLimit       *rateLimitConfig
+	rateLimitOpts   RateLimitOptions
+	skipRateLimit   bool
+	idempotency     *idempotencyConfig
+	skipIdempotency bool
 
 	// timeout is the deadline [Timeout] gives the route, and zero for none.
 	timeout time.Duration
@@ -922,12 +930,15 @@ type inherited struct {
 	sseMaxStreams         int
 	sseMaxStreamsPerIP    int
 	rateLimit             RateLimitOptions
+	idempotency           IdempotencyOptions
+	idempotencySet        bool
 	allowUnknownFields    bool
 	captureBody           bool
 	versions              []Version
 	deprecated            bool
 	hidden                bool
 	skipRateLimit         bool
+	skipIdempotency       bool
 	security              []SecurityRequirement
 	securitySet           bool
 	timeout               time.Duration
@@ -954,12 +965,15 @@ func (in inherited) merge(cfg routerConfig) inherited {
 		sseMaxStreams:         in.sseMaxStreams,
 		sseMaxStreamsPerIP:    in.sseMaxStreamsPerIP,
 		rateLimit:             in.rateLimit,
+		idempotency:           in.idempotency,
+		idempotencySet:        in.idempotencySet || cfg.idempotencySet,
 		allowUnknownFields:    in.allowUnknownFields,
 		captureBody:           in.captureBody,
 		versions:              in.versions,
 		deprecated:            in.deprecated || cfg.deprecated,
 		hidden:                in.hidden || cfg.hidden,
 		skipRateLimit:         in.skipRateLimit || cfg.skipRateLimit,
+		skipIdempotency:       in.skipIdempotency || cfg.skipIdempotency,
 		security:              in.security,
 		securitySet:           in.securitySet,
 		timeout:               in.timeout,
@@ -991,6 +1005,9 @@ func (in inherited) merge(cfg routerConfig) inherited {
 	}
 	if cfg.rateLimit != nil {
 		out.rateLimit = out.rateLimit.overlay(*cfg.rateLimit)
+	}
+	if cfg.idempotency != nil {
+		out.idempotency = out.idempotency.overlay(*cfg.idempotency)
 	}
 	if cfg.captureBody != nil {
 		out.captureBody = *cfg.captureBody
@@ -1187,10 +1204,17 @@ func (rt *Route) resolve(in inherited) error {
 		return err
 	}
 	if rt.websocket != nil {
-		return rt.resolveWebSocket(in)
+		if err := rt.resolveWebSocket(in); err != nil {
+			return err
+		}
 	}
 	if rt.sse != nil {
-		return rt.resolveSSE(in)
+		if err := rt.resolveSSE(in); err != nil {
+			return err
+		}
+	}
+	if err := rt.resolveIdempotency(in); err != nil {
+		return err
 	}
 	return nil
 }

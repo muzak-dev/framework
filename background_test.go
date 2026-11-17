@@ -614,3 +614,95 @@ func TestAfterResponseRefusedOnceTheListenersClose(t *testing.T) {
 	}
 	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
 }
+
+type recordingBackgroundObserver struct {
+	mu        sync.Mutex
+	enqueued  int
+	rejected  int
+	started   int
+	completed int
+	panicked  int
+}
+
+func (o *recordingBackgroundObserver) OnEnqueue(_ int, err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if err != nil {
+		o.rejected++
+		return
+	}
+	o.enqueued++
+}
+func (o *recordingBackgroundObserver) OnStart(int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.started++
+}
+func (o *recordingBackgroundObserver) OnComplete(_ time.Duration, panicked bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.completed++
+	if panicked {
+		o.panicked++
+	}
+}
+
+func TestBackgroundObserverAndChildSpan(t *testing.T) {
+	t.Parallel()
+	obs := &recordingBackgroundObserver{}
+	tracer := &recordingTracer{}
+	opts := quietOptions()
+	opts.Tracing = TracingOptions{Tracer: tracer}
+	opts.Background = BackgroundOptions{Workers: 1, Queue: 1, Observer: obs}
+
+	gate := make(chan struct{})
+	app := New(opts)
+	app.Get("/bg", func(ctx *Context, _ Empty) (rtOut, error) {
+		if err := ctx.AfterResponse(func(context.Context) {
+			<-gate
+		}); err != nil {
+			return rtOut{}, err
+		}
+		// Queue capacity is 1, so second registration returns ErrBackgroundQueueFull.
+		_ = ctx.AfterResponse(func(context.Context) {
+			panic("boom")
+		})
+		return rtOut{OK: true}, nil
+	})
+	app.Get("/panic", func(ctx *Context, _ Empty) (rtOut, error) {
+		_ = ctx.AfterResponse(func(context.Context) {
+			panic("bg-panic")
+		})
+		return rtOut{OK: true}, nil
+	})
+	mustBuild(t, app)
+
+	assertStatus(t, do(t, app, http.MethodGet, "/bg", ""), http.StatusOK)
+	close(gate)
+	waitPoolIdle(t, app)
+
+	assertStatus(t, do(t, app, http.MethodGet, "/panic", ""), http.StatusOK)
+	waitPoolIdle(t, app)
+
+	obs.mu.Lock()
+	enqueued, rejected, started, completed, panicked := obs.enqueued, obs.rejected, obs.started, obs.completed, obs.panicked
+	obs.mu.Unlock()
+	if enqueued != 2 || rejected != 1 || started != 2 || completed != 2 || panicked != 1 {
+		t.Fatalf("observer counts enq=%d rej=%d start=%d comp=%d panic=%d, want 2/1/2/2/1",
+			enqueued, rejected, started, completed, panicked)
+	}
+
+	tracer.mu.Lock()
+	spans := append([]*recordedSpan(nil), tracer.spans...)
+	tracer.mu.Unlock()
+	var childFound bool
+	for _, s := range spans {
+		if s.start.Name == "muzak.background" && s.start.Parent.SpanID != (SpanID{}) {
+			childFound = true
+			break
+		}
+	}
+	if !childFound {
+		t.Fatalf("expected muzak.background child span in %d recorded spans", len(spans))
+	}
+}

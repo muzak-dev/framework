@@ -1581,6 +1581,9 @@ func (b *schemaBuilder) schemaFor(t reflect.Type) *Schema {
 		// enclosing object records; the schema itself describes the pointee.
 		t = t.Elem()
 	}
+	if elem, ok := optElemType(t); ok {
+		return nullable(b.schemaFor(elem))
+	}
 	if t.Kind() != reflect.Struct || t.Name() == "" || isWellKnown(t) {
 		switch t.Kind() {
 		case reflect.Slice, reflect.Array, reflect.Map:
@@ -1766,15 +1769,26 @@ func (b *schemaBuilder) describeMember(member jsonMember) *Schema {
 	if value.Kind() == reflect.Pointer {
 		value = value.Elem()
 	}
+	isOpt := false
+	if elem, ok := optElemType(value); ok {
+		isOpt = true
+		value = elem
+		for value.Kind() == reflect.Pointer {
+			value = value.Elem()
+		}
+	}
 	var schema *Schema
 	if member.stringify && isPlainNumber(value) {
 		// The string option writes the number inside a string and reads it
 		// only from one, so a bare number is refused.
 		schema = quotedNumber(value)
+		if isOpt {
+			schema = nullable(schema)
+		}
 	} else {
 		schema = b.schemaFor(field.Type)
 	}
-	if field.Type.Kind() == reflect.Pointer {
+	if field.Type.Kind() == reflect.Pointer && !isOpt {
 		// schemaFor looks through a pointer so that T and *T share one
 		// component. At field level the pointer still means something, though:
 		// the member may be null, and the schema has to say so.

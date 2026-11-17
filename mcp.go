@@ -187,7 +187,20 @@ type MCPOptions struct {
 	// application is built, so this is about how soon a client sees a
 	// deployment's new tools. Negative means zero.
 	ListTTL time.Duration
+
+	// SessionStore persists legacy MCP client sessions across replicas. When
+	// nil, Muzak uses an in-process LRU store (bounded by MaxSessions and
+	// SessionIdleTimeout) and emits a startup warning for multi-replica awareness.
+	SessionStore MCPSessionStore
+
+	// SessionStoreTimeout bounds each call to [MCPSessionStore], defaulting to
+	// [DefaultMCPSessionStoreTimeout] (2s). A negative value removes the bound.
+	SessionStoreTimeout time.Duration
 }
+
+// DefaultMCPSessionStoreTimeout is how long one call to [MCPSessionStore] may
+// take before its context is cancelled.
+const DefaultMCPSessionStoreTimeout = 2 * time.Second
 
 // withDefaults fills in the unset bounds.
 func (o MCPOptions) withDefaults() MCPOptions {
@@ -278,6 +291,7 @@ func MCPTool() RouteOption {
 // mcpServer is the MCP endpoint of one application.
 type mcpServer struct {
 	app  *App
+	path string
 	opts MCPOptions
 	// post and del are the routes the endpoint is served by.
 	post, del *Route
@@ -287,7 +301,9 @@ type mcpServer struct {
 	tools  []*mcpTool
 	byName map[string]*mcpTool
 
-	sessions *mcpSessions
+	sessions       *mcpSessions
+	sessionStore   MCPSessionStore
+	sessionTimeout time.Duration
 	// cursorKey authenticates the cursors tools/list hands out; see
 	// [mcpServer.cursor].
 	cursorKey [sha256.Size]byte
@@ -353,7 +369,7 @@ func (a *App) MCP(path string, opts MCPOptions, routeOpts ...RouteOption) {
 			"and the tools it serves are chosen by its MCPOptions"))
 		return
 	}
-	s := &mcpServer{app: a, opts: opts}
+	s := &mcpServer{app: a, path: path, opts: opts}
 	a.mcp = s
 	options := []RouteOption{Hidden()}
 	if a.opts.Versioning.enabled() {
@@ -375,6 +391,11 @@ func (a *App) buildMCP(state *buildState) {
 	}
 	errs := a.mcp.build(len(state.errs) == 0)
 	state.errs = append(state.errs, errs...)
+	if a.mcp.opts.SessionStore != nil {
+		if managed, ok := a.mcp.opts.SessionStore.(Lifecycle); ok {
+			state.lifecycles = append(state.lifecycles, managed)
+		}
+	}
 }
 
 // build does the work of [App.buildMCP]. The schemas are described only when
@@ -411,7 +432,21 @@ func (s *mcpServer) build(healthy bool) []error {
 			errs = append(errs, err)
 		}
 	}
-	s.sessions = newMCPSessions(s.opts.MaxSessions, s.opts.SessionIdleTimeout)
+	switch {
+	case s.opts.SessionStoreTimeout == 0:
+		s.sessionTimeout = DefaultMCPSessionStoreTimeout
+	case s.opts.SessionStoreTimeout < 0:
+		s.sessionTimeout = 0
+	default:
+		s.sessionTimeout = s.opts.SessionStoreTimeout
+	}
+	if s.opts.SessionStore != nil {
+		s.sessionStore = s.opts.SessionStore
+	} else {
+		s.sessions = newMCPSessions(s.opts.MaxSessions, s.opts.SessionIdleTimeout)
+		s.sessionStore = s.sessions
+		Scoped(a.logger, ScopeServer).Warn("muzak: MCPOptions.SessionStore is nil; legacy MCP sessions are stored in process memory and will not be shared across replicas")
+	}
 	// crypto/rand never fails to fill a buffer; it ends the program first.
 	_, _ = rand.Read(s.cursorKey[:])
 	s.cacheScope = "public"

@@ -790,3 +790,32 @@ func FuzzGenerate(f *testing.F) {
 		}
 	})
 }
+
+func TestGenerateOptAndPageTypes(t *testing.T) {
+	t.Parallel()
+	type patchIn struct {
+		Name muzak.Opt[string] `json:"name,omitzero"`
+	}
+	type item struct {
+		ID string `json:"id"`
+	}
+	app := muzak.New(muzak.AppOptions{DisableAccessLog: true})
+	app.Patch("/items", func(_ *muzak.Context, _ patchIn) (muzak.Page[item], error) {
+		return muzak.Page[item]{}, nil
+	})
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	out, err := Generate(doc, Options{Client: true})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	text := string(out)
+	if !strings.Contains(text, "name?: string | null;") {
+		t.Fatalf("expected optional nullable TypeScript field `name?: string | null;` in:\n%s", text)
+	}
+	if !strings.Contains(text, "next_cursor?: string;") || !strings.Contains(text, "has_more: boolean;") {
+		t.Fatalf("expected Page fields in:\n%s", text)
+	}
+}

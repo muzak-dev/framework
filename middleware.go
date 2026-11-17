@@ -79,6 +79,17 @@ type routeHolder struct {
 	route *Route
 }
 
+type accessAttrsKey struct{}
+
+type accessLogAttrs struct {
+	idempotencyReplayed bool
+	mcpMethod           string
+	mcpVersion          string
+	mcpTool             string
+	mcpToolHasErr       bool
+	mcpToolIsErr        bool
+}
+
 // RouteFromContext returns the template of the route this request matched,
 // such as "/v1/orgs/{org_id}/apps/{app_id}", and whether one matched at all.
 //
@@ -344,13 +355,15 @@ func AccessLog(logger *slog.Logger, opts AccessLogOptions) Middleware {
 			}
 			start := time.Now()
 			rw := asResponseWriter(w)
+			extra := &accessLogAttrs{}
+			r = r.WithContext(context.WithValue(r.Context(), accessAttrsKey{}, extra))
 			// The line is written from a deferred function so that a panic on
 			// its way through, whether one Recovery will turn into a 500 or
 			// the abort of a response that already started, still leaves a
 			// record of the request it ended. The panic is resumed unchanged.
 			defer func() {
 				recovered := recover()
-				logAccess(scoped, opts.Level, r, rw, start, recovered != nil)
+				logAccess(scoped, opts.Level, r, rw, extra, start, recovered != nil)
 				if recovered != nil {
 					panic(recovered)
 				}
@@ -363,7 +376,7 @@ func AccessLog(logger *slog.Logger, opts AccessLogOptions) Middleware {
 // logAccess writes the access log line for one request. panicking reports a
 // panic passing through [AccessLog]: before the response has started, that is
 // the 500 [Recovery] will write, and after it, the connection is aborted.
-func logAccess(scoped *slog.Logger, base slog.Level, r *http.Request, rw *responseWriter, start time.Time, panicking bool) {
+func logAccess(scoped *slog.Logger, base slog.Level, r *http.Request, rw *responseWriter, extra *accessLogAttrs, start time.Time, panicking bool) {
 	status := rw.statusOrDefault()
 	aborted := false
 	if panicking {
@@ -393,6 +406,20 @@ func logAccess(scoped *slog.Logger, base slog.Level, r *http.Request, rw *respon
 	// wants; the template is what a query groups by.
 	if route, ok := RouteFromContext(r.Context()); ok {
 		attrs = append(attrs, slog.String("route", route))
+	}
+	if extra != nil {
+		if extra.idempotencyReplayed {
+			attrs = append(attrs, slog.Bool("idempotency.replayed", true))
+		}
+		if extra.mcpMethod != "" {
+			attrs = append(attrs, slog.String("mcp.method", extra.mcpMethod))
+		}
+		if extra.mcpVersion != "" {
+			attrs = append(attrs, slog.String("mcp.protocol.version", extra.mcpVersion))
+		}
+		if extra.mcpToolHasErr {
+			attrs = append(attrs, slog.String("mcp.tool.name", extra.mcpTool), slog.Bool("mcp.tool.is_error", extra.mcpToolIsErr))
+		}
 	}
 	// The trace, when tracing is configured, which joins the line to the
 	// request's server span; see [TracingOptions].

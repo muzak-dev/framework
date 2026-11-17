@@ -85,6 +85,19 @@ const (
 	breakerHalfOpen
 )
 
+func (s breakerState) String() string {
+	switch s {
+	case breakerClosed:
+		return "closed"
+	case breakerOpen:
+		return "open"
+	case breakerHalfOpen:
+		return "half-open"
+	default:
+		return "unknown"
+	}
+}
+
 // breakerOutcome is what one round trip says about its host.
 type breakerOutcome uint8
 
@@ -112,10 +125,11 @@ type breakerEntry struct {
 // list move under one lock, so its cost does not depend on how many hosts it
 // holds.
 type breakerSet struct {
-	mu      sync.Mutex
-	hosts   map[string]*list.Element
-	order   list.List
-	options CircuitBreakerOptions
+	mu       sync.Mutex
+	hosts    map[string]*list.Element
+	order    list.List
+	options  CircuitBreakerOptions
+	observer ClientObserver
 	// now is the clock cooldowns are measured on, a field so that a test can
 	// move it.
 	now func() time.Time
@@ -135,27 +149,40 @@ func newBreakerSet(opts CircuitBreakerOptions) *breakerSet {
 // admit decides whether a request to a host may be sent, and reports whether
 // it is the one request testing a circuit that has cooled down.
 func (s *breakerSet) admit(key string) (probe bool, err error) {
+	var fromState, toState string
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	element := s.hosts[key]
 	if element == nil {
+		s.mu.Unlock()
 		return false, nil
 	}
 	s.order.MoveToFront(element)
 	entry := element.Value.(*breakerEntry)
 	if entry.state == breakerOpen {
 		if s.now().Before(entry.reopen) {
+			s.mu.Unlock()
 			return false, &circuitOpenError{origin: key, threshold: s.options.Threshold}
 		}
+		fromState = entry.state.String()
 		entry.state = breakerHalfOpen
+		toState = entry.state.String()
 	}
 	if entry.state == breakerHalfOpen {
 		if entry.probing {
+			s.mu.Unlock()
+			if fromState != "" && s.observer != nil {
+				s.observer.OnBreakerStateChange(key, fromState, toState)
+			}
 			return false, &circuitOpenError{origin: key, threshold: s.options.Threshold}
 		}
 		entry.probing = true
+		s.mu.Unlock()
+		if fromState != "" && s.observer != nil {
+			s.observer.OnBreakerStateChange(key, fromState, toState)
+		}
 		return true, nil
 	}
+	s.mu.Unlock()
 	return false, nil
 }
 
@@ -167,20 +194,29 @@ func (s *breakerSet) admit(key string) (probe bool, err error) {
 // probe that ended that way frees the slot for the next request to probe
 // with.
 func (s *breakerSet) record(key string, probe bool, outcome breakerOutcome) {
+	var fromState, toState string
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	element := s.hosts[key]
 	switch outcome {
 	case outcomeSuccess:
 		if element != nil {
+			prev := element.Value.(*breakerEntry).state
+			if prev != breakerClosed {
+				fromState, toState = prev.String(), breakerClosed.String()
+			}
 			s.order.Remove(element)
 			delete(s.hosts, key)
+		}
+		s.mu.Unlock()
+		if fromState != "" && s.observer != nil {
+			s.observer.OnBreakerStateChange(key, fromState, toState)
 		}
 		return
 	case outcomeNeutral:
 		if element != nil && probe {
 			element.Value.(*breakerEntry).probing = false
 		}
+		s.mu.Unlock()
 		return
 	}
 	if element == nil {
@@ -191,12 +227,20 @@ func (s *breakerSet) record(key string, probe bool, outcome breakerOutcome) {
 	entry := element.Value.(*breakerEntry)
 	switch {
 	case probe:
+		if entry.state != breakerOpen {
+			fromState, toState = entry.state.String(), breakerOpen.String()
+		}
 		entry.state, entry.probing, entry.reopen = breakerOpen, false, s.now().Add(s.options.Cooldown)
 	case entry.state == breakerClosed:
 		entry.failures++
 		if entry.failures >= s.options.Threshold {
+			fromState, toState = breakerClosed.String(), breakerOpen.String()
 			entry.state, entry.reopen = breakerOpen, s.now().Add(s.options.Cooldown)
 		}
+	}
+	s.mu.Unlock()
+	if fromState != "" && s.observer != nil {
+		s.observer.OnBreakerStateChange(key, fromState, toState)
 	}
 }
 

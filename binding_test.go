@@ -931,3 +931,55 @@ func TestALocationTagIgnoresWhatFollowsTheFirstComma(t *testing.T) {
 		t.Errorf("bound %+v; the options were read as part of the name", got)
 	}
 }
+
+func TestOptThreeStateBindingAndEncoding(t *testing.T) {
+	t.Parallel()
+	type patchIn struct {
+		Name Opt[string] `json:"name,omitzero"`
+		Age  Opt[int]    `json:"age,omitzero"`
+	}
+	var got patchIn
+	app := New(quietOptions())
+	app.Patch("/users", func(_ *Context, in patchIn) (patchIn, error) {
+		got = in
+		return in, nil
+	})
+	mustBuild(t, app)
+
+	// 1) Omitted
+	assertStatus(t, do(t, app, http.MethodPatch, "/users", `{}`), http.StatusOK)
+	if got.Name.IsSet() || got.Name.IsNull() {
+		t.Fatalf("omitted Name = %+v", got.Name)
+	}
+	if _, ok := got.Name.Value(); ok {
+		t.Fatal("omitted Name.Value() reported true")
+	}
+
+	// 2) Explicit null
+	resNull := do(t, app, http.MethodPatch, "/users", `{"name":null}`)
+	assertStatus(t, resNull, http.StatusOK)
+	if !got.Name.IsSet() || !got.Name.IsNull() {
+		t.Fatalf("null Name = %+v", got.Name)
+	}
+	if _, ok := got.Name.Value(); ok {
+		t.Fatal("null Name.Value() reported true")
+	}
+	if resNull.Body.String() != `{"name":null}` {
+		t.Fatalf("encoded body = %s, want {\"name\":null}", resNull.Body.String())
+	}
+
+	// 3) Present value
+	resVal := do(t, app, http.MethodPatch, "/users", `{"name":"ada","age":42}`)
+	assertStatus(t, resVal, http.StatusOK)
+	v, ok := got.Name.Value()
+	if !ok || v != "ada" {
+		t.Fatalf("Name.Value() = (%q, %v)", v, ok)
+	}
+	age, ok := got.Age.Value()
+	if !ok || age != 42 {
+		t.Fatalf("Age.Value() = (%d, %v)", age, ok)
+	}
+	if Some("x").IsZero() || Null[string]().IsZero() || !(Opt[string]{}).IsZero() {
+		t.Fatal("Opt.IsZero contract broken")
+	}
+}

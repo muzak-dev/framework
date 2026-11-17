@@ -1078,3 +1078,42 @@ func TestDocumentedResponseStatusIsValidated(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAPIOptAndPageSchemas(t *testing.T) {
+	t.Parallel()
+	type patchBody struct {
+		Name Opt[string] `json:"name,omitzero"`
+		Bio  Opt[string] `json:"bio"`
+	}
+	type item struct {
+		ID string `json:"id"`
+	}
+	app := New(quietOptions())
+	app.Patch("/users", func(_ *Context, in patchBody) (Page[item], error) {
+		return Page[item]{}, nil
+	})
+	doc, err := app.Document()
+	if err != nil {
+		t.Fatalf("Document: %v", err)
+	}
+	raw, err := doc.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	text := string(raw)
+	reqSchema := doc.Paths["/users"].Patch.RequestBody.Content["application/json"].Schema
+	if reqSchema.Ref != "" {
+		comp := strings.TrimPrefix(reqSchema.Ref, componentPrefix)
+		reqSchema = doc.Components.Schemas[comp]
+	}
+	bioType, ok := reqSchema.Properties["bio"].Type.([]string)
+	if !ok || len(bioType) != 2 || bioType[0] != "string" || bioType[1] != "null" {
+		t.Fatalf("expected nullable string schema for Opt[string], got %#v", reqSchema.Properties["bio"].Type)
+	}
+	if len(reqSchema.Required) != 0 {
+		t.Fatalf("Opt fields should not be required, got %v", reqSchema.Required)
+	}
+	if !strings.Contains(text, `"next_cursor"`) || !strings.Contains(text, `"has_more"`) {
+		t.Fatalf("expected Page[item] fields in %s", text)
+	}
+}

@@ -28,6 +28,88 @@ import (
 // skipped entirely for it.
 type Empty struct{}
 
+// Opt wraps an optional JSON field to distinguish an omitted member
+// (!IsSet()), an explicit null (IsSet() && IsNull()), and a present value
+// (Value() returns (v, true)).
+type Opt[T any] struct {
+	set   bool
+	null  bool
+	value T
+}
+
+// Some returns an [Opt] holding a present non-null value.
+func Some[T any](v T) Opt[T] {
+	return Opt[T]{set: true, value: v}
+}
+
+// Null returns an [Opt] representing an explicit JSON null.
+func Null[T any]() Opt[T] {
+	return Opt[T]{set: true, null: true}
+}
+
+// IsSet reports whether the field was present in JSON (including explicit null).
+func (o Opt[T]) IsSet() bool { return o.set }
+
+// IsNull reports whether the field was explicitly set to null.
+func (o Opt[T]) IsNull() bool { return o.null }
+
+// IsZero reports whether the field is unset, allowing `json:",omitzero"` to omit
+// unset values while still encoding explicit null.
+func (o Opt[T]) IsZero() bool { return !o.set }
+
+// Value returns the wrapped value and true when the field is present and non-null.
+func (o Opt[T]) Value() (T, bool) { return o.value, o.set && !o.null }
+
+// MarshalJSONTo implements [json.MarshalerTo].
+func (o Opt[T]) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if !o.set || o.null {
+		return enc.WriteToken(jsontext.Null)
+	}
+	return json.MarshalEncode(enc, &o.value)
+}
+
+// UnmarshalJSONFrom implements [json.UnmarshalerFrom].
+func (o *Opt[T]) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if dec.PeekKind() == 'n' {
+		if _, err := dec.ReadToken(); err != nil {
+			return err
+		}
+		var zero T
+		o.set = true
+		o.null = true
+		o.value = zero
+		return nil
+	}
+	var v T
+	if err := json.UnmarshalDecode(dec, &v); err != nil {
+		return err
+	}
+	o.set = true
+	o.null = false
+	o.value = v
+	return nil
+}
+
+type optField interface {
+	optElemType() reflect.Type
+}
+
+func (Opt[T]) optElemType() reflect.Type {
+	return reflect.TypeFor[T]()
+}
+
+var optFieldInterface = reflect.TypeFor[optField]()
+
+func optElemType(t reflect.Type) (reflect.Type, bool) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Struct && t.Implements(optFieldInterface) {
+		return reflect.Zero(t).Interface().(optField).optElemType(), true
+	}
+	return nil, false
+}
+
 // Struct tags recognised by the binder. A field carrying one of the first six
 // is read from that part of the request; a field carrying none of them becomes
 // part of the JSON body. A located field is never a member of the body,
@@ -494,6 +576,9 @@ func checkBodyDecodes(shape, input reflect.Type) error {
 // checkDecodes is [checkBodyDecodes] for a type reached through the field at
 // path. The seen set stops a recursive type from being walked forever.
 func checkDecodes(t reflect.Type, path string, seen map[reflect.Type]bool) error {
+	if elem, ok := optElemType(t); ok {
+		t = elem
+	}
 	for !seen[t] && !decodesItself(t) {
 		seen[t] = true
 		switch t.Kind() {

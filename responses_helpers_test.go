@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -145,3 +146,37 @@ func (r *brokenBody) Read(p []byte) (int, error) {
 type explodingBody struct{}
 
 func (explodingBody) Read([]byte) (int, error) { panic("the body exploded") }
+
+func TestPageAndCursorSigner(t *testing.T) {
+	t.Parallel()
+	if _, err := NewCursorSigner([]byte("too-short")); err == nil {
+		t.Fatal("expected error for short cursor secret")
+	}
+	signer, err := NewCursorSigner([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatalf("NewCursorSigner: %v", err)
+	}
+	cursor := signer.Sign([]byte("offset=42"))
+	got, err := signer.Verify(cursor)
+	if err != nil || string(got) != "offset=42" {
+		t.Fatalf("Verify = (%q, %v), want offset=42", got, err)
+	}
+	if _, err := signer.Verify(cursor + "tamper"); err == nil {
+		t.Fatal("expected tampered cursor to fail verification")
+	}
+
+	app := New(quietOptions())
+	app.Get("/items", func(_ *Context, _ Empty) (Page[string], error) {
+		return Page[string]{
+			Items:      []string{"a", "b"},
+			NextCursor: cursor,
+			HasMore:    true,
+		}, nil
+	})
+	mustBuild(t, app)
+	rec := do(t, app, http.MethodGet, "/items", "")
+	assertStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), `"items":["a","b"]`) || !strings.Contains(rec.Body.String(), `"has_more":true`) {
+		t.Fatalf("unexpected Page JSON: %s", rec.Body.String())
+	}
+}

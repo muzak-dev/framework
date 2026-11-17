@@ -913,3 +913,70 @@ func fstestDocs() fstest.MapFS {
 
 // io is used by the endless body's interface checks.
 var _ io.ReadCloser = (*endless)(nil)
+
+type telemetrySpan struct {
+	mu    *sync.Mutex
+	attrs *[]slog.Attr
+}
+
+func (s telemetrySpan) SetName(string)                         {}
+func (s telemetrySpan) AddEvent(string, ...slog.Attr)          {}
+func (s telemetrySpan) SetStatus(muzak.SpanStatusCode, string) {}
+func (s telemetrySpan) End()                                   {}
+func (s telemetrySpan) SetAttributes(a ...slog.Attr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	*s.attrs = append(*s.attrs, a...)
+}
+
+type telemetryTracer struct {
+	mu    sync.Mutex
+	attrs []slog.Attr
+}
+
+func (t *telemetryTracer) StartSpan(_ context.Context, _ muzak.SpanStart) muzak.Span {
+	return telemetrySpan{mu: &t.mu, attrs: &t.attrs}
+}
+
+func TestMCPToolTelemetryOnSpansAndAccessLog(t *testing.T) {
+	tracer := &telemetryTracer{}
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	opts := muzak.AppOptions{
+		Logger:      logger,
+		DisableDocs: true,
+		Tracing:     muzak.TracingOptions{Tracer: tracer},
+	}
+	app := muzak.New(opts)
+	app.Get("/fail", func(_ *muzak.Context, _ muzak.Empty) (string, error) {
+		return "", muzak.NewHTTPError(http.StatusBadRequest, "bad input")
+	}, muzak.MCPTool())
+	app.MCP("/mcp", muzak.MCPOptions{})
+
+	m := newMCPClient(t, app)
+	m.initialize("2025-06-18")
+	got := m.call("get_fail", nil)
+	if !got.IsError {
+		t.Fatal("expected IsError=true")
+	}
+
+	tracer.mu.Lock()
+	var seenToolAttr, seenErrAttr bool
+	for _, a := range tracer.attrs {
+		if a.Key == "mcp.tool.name" && a.Value.String() == "get_fail" {
+			seenToolAttr = true
+		}
+		if a.Key == "mcp.tool.is_error" && a.Value.Bool() {
+			seenErrAttr = true
+		}
+	}
+	tracer.mu.Unlock()
+	if !seenToolAttr || !seenErrAttr {
+		t.Fatalf("missing MCP tool span attrs: tool=%v err=%v", seenToolAttr, seenErrAttr)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, `"mcp.tool.name":"get_fail"`) || !strings.Contains(logs, `"mcp.tool.is_error":true`) {
+		t.Fatalf("missing MCP tool access log attrs in %s", logs)
+	}
+}

@@ -239,6 +239,9 @@ func boolRank(b bool) int {
 // always have been.
 func (m jsonMember) mayBeAbsent() bool {
 	t := m.field.Type
+	if _, isOpt := optElemType(t); isOpt {
+		return true
+	}
 	switch {
 	case m.indirect, m.omitzero, t.Kind() == reflect.Pointer, m.field.Tag.Get(tagRequired) == "false":
 		return true

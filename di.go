@@ -446,12 +446,16 @@ func TryFrom[T any](ctx *Context) (T, bool) {
 // resolveDependencies runs the route's guards and then its value providers,
 // appending each resolved value to the request Context. It returns the first
 // error produced, which the caller maps to a response.
-func (rt *Route) resolveDependencies(c *Context) error {
+func (rt *Route) runGuards(c *Context) error {
 	for _, guard := range rt.guards {
 		if err := guard(c); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+func (rt *Route) resolveProviders(c *Context) error {
 	return resolveProviders(c, rt.providers)
 }
 

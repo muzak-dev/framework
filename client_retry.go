@@ -18,6 +18,7 @@ type retryPolicy struct {
 	maxDelay      time.Duration
 	maxRetryAfter time.Duration
 	budget        *retryBudget
+	observer      ClientObserver
 
 	// now, wait and jitter are what a test replaces to run without waiting:
 	// the clock a Retry-After date is read against, the pause between
@@ -82,7 +83,15 @@ func (p *retryPolicy) next(ctx context.Context, attempt int, replayable bool, re
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
 		return 0, false
 	}
-	return delay, p.budget.spend()
+	if !p.budget.spend() {
+		if p.observer != nil && resp != nil && resp.Request != nil && resp.Request.URL != nil {
+			p.observer.OnRetryBudgetExhausted(resp.Request.URL.Host)
+		} else if p.observer != nil {
+			p.observer.OnRetryBudgetExhausted("")
+		}
+		return 0, false
+	}
+	return delay, true
 }
 
 // backoff returns the wait before the attempt after this one: a random

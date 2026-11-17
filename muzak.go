@@ -207,6 +207,11 @@ type AppOptions struct {
 	// least one [Quota] before any request is counted.
 	RateLimit RateLimitOptions
 
+	// Idempotency configures request deduplication for mutating routes and
+	// routes marked with [WithIdempotency]. The zero value leaves idempotency
+	// off.
+	Idempotency IdempotencyOptions
+
 	// ClientIP decides which address a request is attributed to, which
 	// matters wherever a decision is made per client rather than per request.
 	// The zero value believes no forwarding header, so behind a proxy it
@@ -690,6 +695,7 @@ func (a *App) build() {
 		sseMaxStreams:         a.opts.SSE.MaxStreams,
 		sseMaxStreamsPerIP:    a.opts.SSE.MaxStreamsPerIP,
 		rateLimit:             a.opts.RateLimit,
+		idempotency:           a.opts.Idempotency,
 		versions:              a.opts.Versioning.DefaultVersion,
 	}, emit, state)
 	a.finishDependencies(state)
@@ -728,11 +734,11 @@ func (a *App) build() {
 	// that it is completed with the rest.
 	a.resolveDocsRateLimit(state)
 	a.resolveRateLimiting(state)
+	a.resolveIdempotency(state)
 	// Sessions and cross-origin protection; see crossorigin.go. Before the
 	// components are collected, so a session store that manages something
 	// is started with them.
 	a.buildSessions(state)
-	a.lifecycle.components = observabilityComponents(state.lifecycles, a.opts.Tracing.Tracer, a.opts.Observer)
 	a.frontends = state.frontends
 	// Two mounts at one path cannot both answer, and the one registered first
 	// would take every request, whatever guards the second was given. That is
@@ -755,6 +761,7 @@ func (a *App) build() {
 	a.validateOperations(state)
 	// The MCP endpoint's tools; see mcp.go.
 	a.buildMCP(state)
+	a.lifecycle.components = observabilityComponents(state.lifecycles, a.opts.Tracing.Tracer, a.opts.Observer)
 
 	// Built with the other checks, not while the handler is assembled, so a
 	// policy that cannot be served is reported with them: after that point the
@@ -1082,9 +1089,13 @@ func (a *App) run(c *Context, route *Route) {
 	// behalf, and so that a request rejected by a guard is still counted.
 	limits := route.rateLimit
 	if limits != nil && !limits.afterDependencies {
-		if err := limits.check(c); err != nil {
+		releaseSlot, err := limits.enter(c)
+		if err != nil {
 			a.fail(c, err)
 			return
+		}
+		if releaseSlot != nil {
+			defer releaseSlot()
 		}
 	}
 	// A WebSocket handshake that is going to be refused for its shape, its
@@ -1114,20 +1125,57 @@ func (a *App) run(c *Context, route *Route) {
 	// Before the dependencies, so a guard verifying a signature over the bytes
 	// sees them, and after the rate limit above, so a client past its budget is
 	// refused without the server buffering a body on its behalf.
-	if route.captureBody {
+	if route.captureBody || route.idempotency != nil {
 		if err := captureRequestBody(c, route); err != nil {
 			a.fail(c, route.timedOut(c, err))
 			return
 		}
 	}
-	if err := route.resolveDependencies(c); err != nil {
+	if err := route.runGuards(c); err != nil {
 		a.fail(c, route.timedOut(c, err))
 		return
 	}
-	if limits != nil && limits.afterDependencies {
-		if err := limits.check(c); err != nil {
+	if route.idempotency != nil {
+		finish, replayed, err := a.beginIdempotency(c, route)
+		if err != nil {
 			a.fail(c, route.timedOut(c, err))
 			return
+		}
+		if replayed {
+			return
+		}
+		if finish != nil {
+			failed := false
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					finish(true, true)
+					panic(recovered)
+				}
+				finish(failed, false)
+			}()
+			if err := a.executeRoute(c, route); err != nil {
+				failed = true
+				a.fail(c, route.timedOut(c, err))
+			}
+			return
+		}
+	}
+	if err := a.executeRoute(c, route); err != nil {
+		a.fail(c, route.timedOut(c, err))
+	}
+}
+
+func (a *App) executeRoute(c *Context, route *Route) error {
+	if err := route.resolveProviders(c); err != nil {
+		return err
+	}
+	if limits := route.rateLimit; limits != nil && limits.afterDependencies {
+		releaseSlot, err := limits.enter(c)
+		if err != nil {
+			return err
+		}
+		if releaseSlot != nil {
+			defer releaseSlot()
 		}
 	}
 	if route.isGuarded() && !c.endsItsOwnResponse() {
@@ -1138,9 +1186,7 @@ func (a *App) run(c *Context, route *Route) {
 		// genuinely public says so there.
 		setIfAbsent(c.w.Header(), "Cache-Control", privateCacheControl)
 	}
-	if err := route.invoke(c); err != nil {
-		a.fail(c, route.timedOut(c, err))
-	}
+	return route.invoke(c)
 }
 
 // privateCacheControl is what a guarded response is marked with unless its
